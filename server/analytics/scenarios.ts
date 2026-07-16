@@ -297,7 +297,14 @@ export function runScenario(
   // Cycle 10 (pass 553): negligible savings (< $1/yr) produce astronomically
   // long, meaningless payback figures — suppress the payback rather than show
   // a 50,000-year number.
-  if (input.capexUsd && deltaCost < -1) {
+  // Batch-18 (pass 419): a NO-CAPEX scenario with real savings must not read as
+  // "no financial benefit" — null payback on a $0-capex change (rate switch,
+  // operational baseload trim) misleads in the opposite direction from the
+  // 50,000-year problem. Zero upfront cost + positive savings = immediate payback.
+  if ((input.capexUsd == null || input.capexUsd === 0) && deltaCost < -1) {
+    paybackYears = 0;
+    paybackBand = "immediate — no upfront cost";
+  } else if (input.capexUsd && deltaCost < -1) {
     paybackYears = input.capexUsd / -deltaCost;
     const lo = paybackYears * 0.75;
     const hi = paybackYears * 1.5;

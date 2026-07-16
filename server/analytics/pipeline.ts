@@ -501,7 +501,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
 
   /* ---------- stage 7: opportunities ---------- */
   const oppCands: OpportunityCandidate[] = [];
-  const { rate: kWhRate, isFallback: rateIsFallback } = estimateBlendedRate(currentCost, annualUsage);
+  // Batch-18 (pass 419): pass the raw window total so short-history sites (<25
+  // days, annualUsage null) still get their real blended rate instead of the
+  // $0.12 fallback — the rate is window-invariant even when annualization isn't.
+  const { rate: kWhRate, isFallback: rateIsFallback } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null);
   const fallbackRateDisclosure =
     "Savings priced at a $0.12/kWh national-average assumption because your annual cost basis could not be established — actual savings scale with your real rate.";
   if (demand && currentCost) {
@@ -660,7 +663,17 @@ function annualize(points: IntervalPoint[]): number | null {
   return (total / spanDays) * 365;
 }
 
-function estimateBlendedRate(cost: CostResult | null, annualUsage: number | null): { rate: number; isFallback: boolean } {
+/** Raw import-only usage total with NO minimum-span gate — rate estimation only.
+ * Batch-18 (pass 419): annualize()'s 25-day gate exists so short spans don't get
+ * extrapolated into fake ANNUAL figures (benchmarking/emissions). But a blended
+ * $/kWh rate is span-invariant (cost and usage cover the same window), so a
+ * short history can still yield the customer's real rate — falling back to the
+ * generic $0.12 there was silently mispricing opportunities for new sites. */
+function totalImportKwh(points: IntervalPoint[]): number {
+  return points.reduce((a, p) => a + Math.max(0, p.usage), 0);
+}
+
+function estimateBlendedRate(cost: CostResult | null, annualUsage: number | null, rawUsageKwh?: number | null): { rate: number; isFallback: boolean } {
   // All-in blended rate: total annual cost (energy + demand + fixed + CP − export)
   // per kWh (cycle 1, passes 9/19). Energy-only understates ¢/kWh on
   // demand-heavy tariffs and inflates opportunity paybacks.
@@ -672,6 +685,14 @@ function estimateBlendedRate(cost: CostResult | null, annualUsage: number | null
   // savings on a rate the customer may not pay.
   if (cost && annualUsage && annualUsage > 0) {
     const r = cost.breakdown.total / annualUsage;
+    if (Number.isFinite(r) && r > 0) return { rate: r, isFallback: false };
+  }
+  // Batch-18 (pass 419): short-history path — annualUsage is null when the span
+  // is <25 days, but the blended rate over the observed window is still the
+  // site's real rate. Cost here is the WINDOW total (CostResult covers the
+  // bill/interval window), so dividing by the same window's kWh is unit-safe.
+  if (cost && rawUsageKwh && rawUsageKwh > 0) {
+    const r = cost.breakdown.total / rawUsageKwh;
     if (Number.isFinite(r) && r > 0) return { rate: r, isFallback: false };
   }
   return { rate: 0.12, isFallback: true };

@@ -179,7 +179,10 @@ export function fitCaltrackMonthly(
   disclosures.push(`Annualized usage computed on ${LABEL_NORMAL_YEAR} (NOAA 1991–2020 station normals).`);
 
   const confidence = coverage >= 12 && fit.r2 >= 0.7 ? "high" : coverage >= 9 && fit.r2 >= 0.5 ? "medium" : "low";
-  const extrap = coverage < 9 ? " — extrapolated beyond observed coverage" : "";
+  // Batch-18 (pass 421): when coverage (<9 months) is WHY confidence is low, the
+  // label must say so — a good-looking R² with a vague "extrapolated" suffix let
+  // customers read a thin fit as reliable. Name the causal reason explicitly.
+  const extrap = coverage < 9 ? ` — low confidence because only ${coverage} months of data (needs ≥9); annualized figures are extrapolated beyond observed coverage` : "";
   return {
     method: "caltrack_monthly",
     coefficients: {
@@ -330,6 +333,14 @@ export function detectResidualAnomalies(
   const empty: AnomalyResult = { anomalies: [], changePointMonth: null, method: "caltrack_residual_10pct_v1", disclosures };
   if (fit.method !== "caltrack_monthly" || fit.rSquared == null) {
     disclosures.push("Anomaly detection skipped — no statistically valid weather fit to compute residuals against.");
+    return empty;
+  }
+  // Batch-18 (pass 471): residuals from a weak fit are mostly model error, not
+  // operational change — an R²=0.1 model leaves ~90% of variance unexplained, so
+  // >10% "anomalies" against it would be flagged noise presented as fact. Gate on
+  // the same R²≥0.5 threshold that defines medium fit confidence, and say why.
+  if (fit.rSquared < 0.5) {
+    disclosures.push(`Anomaly detection skipped — the weather model explains too little of your usage variance (R²=${fit.rSquared.toFixed(2)}, needs ≥0.50) for residual deviations to be attributed to operational change rather than model error.`);
     return empty;
   }
   const usable = monthly.filter((m) => monthDailyTemps.has(m.month) && m.days > 20);
