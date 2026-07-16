@@ -76,13 +76,25 @@ export function rejectXxe(xmlText: string): { ok: boolean; reason?: string } {
   return { ok: true };
 }
 
-/** Gate (d): scrub spreadsheet formula-injection prefixes from string cells. */
+/** Gate (d): scrub spreadsheet formula-injection prefixes from string cells.
+ * Batch-30 (pass 1065): the numeric exemption and the danger test now operate
+ * on the SAME trimmed string. Previously the prefix test ran on the raw value
+ * while the numeric exemption ran on the trimmed value — so "\t123" tested
+ * dangerous (leading tab) yet exempt (trims to numeric) and was returned
+ * unscrubbed with the tab intact; a genuinely numeric cell with incidental
+ * whitespace is now returned trimmed, and non-numeric dangerous values are
+ * scrubbed on the trimmed form. */
 export function scrubCell(value: string): string {
   if (typeof value !== "string") return value;
-  if (/^[=+\-@\t\r]/.test(value) && !/^-?\d+(\.\d+)?$/.test(value.trim())) {
-    return "'" + value;
+  const trimmed = value.trim();
+  const isNumeric = /^-?\d+(\.\d+)?$/.test(trimmed);
+  if (/^[=+\-@\t\r]/.test(trimmed) && !isNumeric) {
+    return "'" + trimmed;
   }
-  return value;
+  // Leading whitespace can itself hide a dangerous prefix from naive consumers
+  // (and " 123" is not a valid number in strict CSV contexts) — return the
+  // trimmed form whenever trimming changed a value we inspected.
+  return trimmed === value ? value : trimmed;
 }
 
 /** Gate (e): run a parse function under the compute timeout. */

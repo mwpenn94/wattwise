@@ -494,7 +494,7 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[] } | nul
               {r.isCurrentBasis
                 ? "—"
                 : r.savingsVsCurrent >= 0
-                  ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr${r.eligible ? "" : " (ref)"}`
+                  ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr${r.eligible ? "" : " (ref)"}` /* Batch-30 (pass 1078): verified both branches carry (ref) */
                   : `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr${r.eligible ? "" : " (ref)"}`}
             </TableCell>
             <TableCell className="text-xs text-muted-foreground">{r.freshness === "urdb_stale" ? "stale — verify with utility" : r.freshness.replace(/_/g, " ")}</TableCell>

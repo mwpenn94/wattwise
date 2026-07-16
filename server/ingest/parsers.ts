@@ -265,6 +265,8 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
   let commodity: "electric" | "gas" | "water" = "electric";
   let powerOfTen = 0;
   let uom = "72"; // Wh default
+  let sawReadingType = false; // Batch-30 (pass 1074)
+  let scalingResetOccurred = false; // Batch-30 (pass 1074)
   const points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }> = [];
 
   for (const e of entries as Array<Record<string, unknown>>) {
@@ -283,6 +285,19 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
       uom = String(rt.uom ?? "72");
     }
     const blocks = (content.IntervalBlock as Array<Record<string, unknown>>) ?? [];
+    // Batch-30 (pass 1074): in Green Button feeds the ReadingType entry precedes
+    // its IntervalBlock entries as SIBLING entries, so carrying the last-seen
+    // ReadingType forward is the CORRECT behavior for well-formed single-stream
+    // feeds — blanket per-entry resets would break them. The corruption risk is
+    // multi-UsagePoint feeds where a later usage point declares NO ReadingType:
+    // scaling from the previous stream would silently apply. Detect that case
+    // and reset to safe defaults (10^0, Wh) with the reset disclosed.
+    if (up && !rt && blocks.length > 0 && sawReadingType) {
+      powerOfTen = 0;
+      uom = "72";
+      scalingResetOccurred = true;
+    }
+    if (rt) sawReadingType = true;
     for (const block of blocks) {
       const readings = (block.IntervalReading as Array<Record<string, unknown>>) ?? [];
       for (const r of readings) {
@@ -341,6 +356,10 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
             ? ["Gas volumes converted ft³ → therms using EIA national-average heat content (1.037 therms/ccf); your utility's billing factor may differ slightly."]
             : []),
           ...(uom === "38" ? ["Power (W) readings converted to kW demand; interval energy derived from demand × duration."] : []),
+          // Batch-30 (pass 1074): disclose the defensive scaling reset.
+          ...(scalingResetOccurred
+            ? ["A usage point in this feed declared no ReadingType; its readings were scaled with safe defaults (10^0, Wh) instead of inheriting the previous stream's scaling — verify totals against your utility portal."]
+            : []),
         ],
       },
       headerRowIndex: 0,

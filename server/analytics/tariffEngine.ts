@@ -217,7 +217,7 @@ function demandWindowMatch(dc: { hourStart?: number; hourEnd?: number; daysOfWee
 export interface CostResult {
   breakdown: CostBreakdown;
   monthlyDetails: MonthlyDemandDetail[];
-  monthlyCosts: Array<{ month: string; energy: number; demand: number; fixed: number; total: number; exportCredit: number }>;
+  monthlyCosts: Array<{ month: string; energy: number; demand: number; fixed: number; cp: number; total: number; exportCredit: number }>;
   disclosures: string[];
 }
 
@@ -326,7 +326,10 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     demandTotal += mDemand;
     fixedTotal += mFixed;
     exportTotal += mExport;
-    monthlyCosts.push({ month: mk, energy: mEnergy, demand: mDemand, fixed: mFixed, total: mTotal, exportCredit: mExport });
+    // Batch-30 (pass 1072): cp starts 0 here; the CP fold below fills it so
+    // Σ(monthly.demand) ≡ breakdown.demand and Σ(monthly.cp) ≡ breakdown.cp —
+    // monthly rows and the aggregate breakdown use identical line semantics.
+    monthlyCosts.push({ month: mk, energy: mEnergy, demand: mDemand, fixed: mFixed, cp: 0, total: mTotal, exportCredit: mExport });
   }
 
   // CP proxy charge
@@ -357,7 +360,9 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       const cpMonthsBilled = Math.min(cpMonths, monthlyCosts.length);
       let cpAllocated = 0;
       for (let i = 0; i < monthlyCosts.length && i < cpMonthsBilled; i++) {
-        monthlyCosts[i].demand += cpPerMonth;
+        // Batch-30 (pass 1072): allocate to the dedicated cp field, NOT demand —
+        // breakdown.demand excludes CP (Batch-23), so monthly demand must too.
+        monthlyCosts[i].cp += cpPerMonth;
         monthlyCosts[i].total += cpPerMonth;
         cpAllocated += cpPerMonth;
       }

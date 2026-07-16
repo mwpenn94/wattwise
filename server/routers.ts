@@ -738,7 +738,7 @@ export const appRouter = router({
 // scope — the fix is disclosure, not silence.
 const SPLIT_TZ_STATES: Record<string, string> = {
   FL: "panhandle (Central)", ID: "northern panhandle (Pacific)", IN: "northwest/southwest counties (Central)",
-  KY: "western half (Central)", MI: "western Upper Peninsula (Central)", TN: "eastern third (Eastern)",
+  KY: "western half (Central)", MI: "western Upper Peninsula (Central)", TN: "western third incl. Memphis/Jackson (Central)",
   SD: "western half (Mountain)", ND: "southwest corner (Mountain)", TX: "far-west El Paso region (Mountain)",
   KS: "far-west counties (Mountain)", NE: "western panhandle (Mountain)", OR: "eastern Malheur County (Mountain)",
   NV: "West Wendover area (Mountain)", AK: "Aleutians west of 169.5°W (Hawaii–Aleutian)",
@@ -758,7 +758,11 @@ function tzForState(state: string | null | undefined): string {
     CO: "America/Denver", NM: "America/Denver", UT: "America/Denver", MT: "America/Denver", WY: "America/Denver", ID: "America/Denver",
     TX: "America/Chicago", IL: "America/Chicago", MN: "America/Chicago", MO: "America/Chicago", WI: "America/Chicago", IA: "America/Chicago",
     KS: "America/Chicago", NE: "America/Chicago", OK: "America/Chicago", AR: "America/Chicago", LA: "America/Chicago", MS: "America/Chicago",
-    AL: "America/Chicago", TN: "America/Chicago", SD: "America/Chicago", ND: "America/Chicago",
+    // Batch-30 (pass 1055): TN is DOMINANTLY Eastern (Nashville is Central but
+    // the population-weighted majority incl. Knoxville/Chattanooga plus the
+    // geographic east is Eastern per IANA guidance); western TN (Memphis) is
+    // covered by the SPLIT_TZ_STATES disclosure above.
+    AL: "America/Chicago", TN: "America/New_York", SD: "America/Chicago", ND: "America/Chicago",
     NY: "America/New_York", FL: "America/New_York", PA: "America/New_York", OH: "America/New_York", GA: "America/New_York",
     NC: "America/New_York", SC: "America/New_York", VA: "America/New_York", WV: "America/New_York", MD: "America/New_York",
     DE: "America/New_York", NJ: "America/New_York", CT: "America/New_York", RI: "America/New_York", MA: "America/New_York",
