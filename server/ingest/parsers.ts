@@ -268,6 +268,7 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
   let sawReadingType = false; // Batch-30 (pass 1074)
   let scalingResetOccurred = false; // Batch-30 (pass 1074)
   let scalingAssumedAtDefaults = false; // Batch-32 (pass 1204)
+  let skippedReadings = 0; // Batch-36 (pass 1374): malformed readings counted + disclosed
   const points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }> = [];
 
   for (const e of entries as Array<Record<string, unknown>>) {
@@ -314,7 +315,15 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
         const start = parseInt(String(tp?.start ?? "0"), 10);
         const durationSec = parseInt(String(tp?.duration ?? "900"), 10);
         const value = parseFloat(String(r.value ?? "0"));
-        if (!start || !Number.isFinite(value)) continue;
+        // Batch-36 (pass 1374): a reading with an unparseable start time or a
+        // non-numeric value is still SKIPPED (ingesting garbage would corrupt
+        // totals), but the omission is now COUNTED and disclosed in validation
+        // notes instead of silently vanishing — an unnoticed gap underestimates
+        // usage/demand in every downstream cost analysis.
+        if (!start || !Number.isFinite(value)) {
+          skippedReadings++;
+          continue;
+        }
         const mult = Math.pow(10, powerOfTen);
         // uom 72 = Wh → kWh; 38 = W (power → kW demand); 119 = ft3; 128 = US gal
         let usage = value * mult;
@@ -361,6 +370,13 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
         pass: true,
         notes: [
           `ESPI feed parsed: ${points.length} interval readings`,
+          // Batch-36 (pass 1374): the parse is no longer reported as fully clean
+          // when malformed readings were dropped — disclose the count.
+          ...(skippedReadings > 0
+            ? [
+                `${skippedReadings} interval reading${skippedReadings === 1 ? " was" : "s were"} skipped (unparseable start time or non-numeric value) — ingested totals may underestimate actual usage; verify against your utility portal.`,
+              ]
+            : []),
           ...(uom === "119"
             ? ["Gas volumes converted ft³ → therms using EIA national-average heat content (1.037 therms/ccf); your utility's billing factor may differ slightly."]
             : []),
@@ -377,7 +393,7 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
       },
       headerRowIndex: 0,
       rowsIngested: points.length,
-      rowsSkipped: 0,
+      rowsSkipped: skippedReadings, // Batch-36 (pass 1374): was hardcoded 0
     },
   ];
 }

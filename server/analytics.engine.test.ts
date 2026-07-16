@@ -304,6 +304,32 @@ describe("Scenario engine", () => {
     const res = runScenario(hourly, { kind: "efficiency", efficiencyReductions: { cooling: 0.1 }, endUseFractions: { cooling: 0.4 } }, FLAT, "2B", 850, "high", false);
     expect(res.disclosures.join(" ")).toContain(LABEL_NORMAL_YEAR);
   });
+
+  // Batch-36 (pass 1383): summed reductions > 100% must clamp to 1 (never a
+  // negative scaling factor inverting the load series) and disclose the cap.
+  it("clamps aggregate efficiency reduction at 100% with disclosure (no negative load)", () => {
+    const res = runScenario(
+      hourly,
+      {
+        kind: "efficiency",
+        // shares sum to 1.5 × frac 0.9 → totalReduction 1.35 > 1
+        efficiencyReductions: { cooling: 0.9, lighting: 0.9, plug: 0.9 },
+        endUseFractions: { cooling: 0.5, lighting: 0.5, plug: 0.5 },
+      },
+      FLAT,
+      "2B",
+      850,
+      "high",
+      false,
+    );
+    // With the clamp, the scenario removes AT MOST the full baseline usage —
+    // an uncapped 135% reduction would delete MORE energy than exists (and the
+    // inverted negative load would also distort deltaCost).
+    const baselineTotal = hourly.reduce((a, v) => a + v, 0);
+    const delta = res.perCommodity.electric?.deltaUsage ?? 0;
+    expect(Math.abs(delta)).toBeLessThanOrEqual(baselineTotal * 1.0001);
+    expect(res.disclosures.join(" ")).toContain("capped at 100%");
+  });
 });
 
 describe("Honest-labeling and cost-cap invariants", () => {

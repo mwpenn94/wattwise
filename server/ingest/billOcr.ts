@@ -10,7 +10,19 @@
  *     parseConfidence < 0.6 → route to manual review with prefilled fields.
  */
 import { invokeLLM } from "../_core/llm";
-import { llmBudgetAllows, recordMeterEvent } from "../analytics/costModel";
+import { llmBudgetAllows, llmCostUsd, recordMeterEvent } from "../analytics/costModel";
+
+/** Batch-36 (pass 1397): tile-scaled prompt-token estimate (floor 800, ceiling
+ * 2600, /8000×85 scaling — Batch-15 semantics). Shared by the PRE-FLIGHT budget
+ * check and the post-call metering fallback so the two can never disagree: a
+ * hardcoded pre-flight figure that diverges from the actual estimate could
+ * approve a call the budget cannot cover, producing a user-facing failure
+ * after llmBudgetAllows returned true. */
+function estimateBillOcrPromptTokens(imageDataUrl: string): number {
+  return Math.min(2600, Math.max(800, Math.ceil(imageDataUrl.length / 8000) * 85));
+}
+/** Conservative completion-token allowance for the structured bill JSON. */
+const EST_BILL_OCR_COMPLETION_TOKENS = 600;
 
 export interface ExtractedBillField<T> {
   value: T | null;
@@ -69,7 +81,12 @@ export async function extractBill(
   // Kill-switch: free-tier monthly LLM budget → automatic downgrade to
   // template-only parsing (no template applies to arbitrary bill images, so
   // the honest degradation is a structured manual-entry prompt).
-  const allowed = await llmBudgetAllows(userId, tier, 0.03);
+  // Batch-36 (pass 1397): the pre-flight estimate is DERIVED from the same
+  // tile-scaled token model used for metering (plus a conservative completion
+  // allowance), not a hardcoded constant — so the check can never approve a
+  // call whose own metering estimate would exceed the remaining budget.
+  const estPreflightCostUsd = llmCostUsd(estimateBillOcrPromptTokens(imageDataUrl), EST_BILL_OCR_COMPLETION_TOKENS);
+  const allowed = await llmBudgetAllows(userId, tier, estPreflightCostUsd);
   if (!allowed) {
     return {
       status: "manual_entry_required",
@@ -109,7 +126,7 @@ export async function extractBill(
     // ceiling 2600 (≈ realistic hi-detail cost for a single bill photo plus
     // prompt text). An unbounded length-proportional estimate would prematurely
     // trip the free-tier kill-switch on large photos while still failing safe.
-    const estPromptTokens = Math.min(2600, Math.max(800, Math.ceil(imageDataUrl.length / 8000) * 85));
+    const estPromptTokens = estimateBillOcrPromptTokens(imageDataUrl); // Batch-36 (pass 1397): shared with pre-flight
     const estCompletionTokens = Math.ceil((typeof raw === "string" ? raw.length : 0) / 4);
     await recordMeterEvent({
       userId,

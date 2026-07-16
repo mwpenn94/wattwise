@@ -267,6 +267,19 @@ export function runScenario(
       const share = input.endUseFractions[endUse] ?? 0;
       totalReduction += share * frac;
     }
+    // Batch-36 (pass 1383): a summed reduction > 1 would flip (1 - totalReduction)
+    // NEGATIVE and invert the entire load series — physically nonsensical negative
+    // consumption propagating into every cost figure. Seeded archetype fractions
+    // sum to 1.0 and the API caps each frac at 0.9, so the aggregate cannot exceed
+    // 0.9 today, but end-use fraction sources are data (future archetypes, custom
+    // disaggregation) — clamp defensively and DISCLOSE when the clamp engages
+    // rather than silently producing an impossible model.
+    if (totalReduction > 1) {
+      disclosures.push(
+        `Requested efficiency reductions summed to ${(totalReduction * 100).toFixed(0)}% of total load — capped at 100% (a building cannot consume negative energy); treat this scenario as a theoretical maximum.`,
+      );
+      totalReduction = 1;
+    }
     hourly = hourly.map((v) => v * (1 - totalReduction));
     disclosures.push(
       "Efficiency savings scale the affected end-use share of load uniformly — actual measure performance varies with equipment, controls, and operations.",

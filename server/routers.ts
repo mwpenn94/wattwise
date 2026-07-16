@@ -781,6 +781,15 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   // fallback — infer from ZIP/state so a Seattle site without an explicit
   // climateZone doesn't get a Phoenix archetype.
   const climateZone = site.climateZone ?? inferClimateZone(site.zip ?? undefined, site.state ?? undefined);
+  // Batch-36 (pass 1385): when the site carries NO location signal at all
+  // (no explicit zone, no zip, no state), inferClimateZone bottoms out at the
+  // US-median '4A' fallback. Quick-start sites disclose this via the
+  // intake-assumptions insight, but a user_entered site (core attributes
+  // provided, location omitted) or a stored zone that itself came from the
+  // location-less create path would anchor archetype-based projections to a
+  // zone the user never chose — with NO disclosure in the scenario results.
+  // Detect the condition here and surface it alongside the other disclosures.
+  const zoneIsUsMedianFallback = !site.zip && !site.state && (site.climateZone == null || site.climateZone === "4A");
   const meters = await h.listMeters(site.id, userId);
   const meter = meters.find((m) => m.commodity === "electric") ?? meters[0] ?? null;
 
@@ -818,6 +827,13 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
     if (arch.zoneMatched === false) {
       archetypeZoneDisclosure = `Baseline uses a ${site.buildingType} archetype from a different climate zone (no ${climateZone} profile is seeded) — heating/cooling shape may differ materially from your climate.`;
     }
+    // Batch-36 (pass 1385): archetype baselines are climate-zone-driven — if the
+    // zone is only the US-median fallback, say so explicitly instead of letting
+    // the customer assume it was derived from their location.
+    if (zoneIsUsMedianFallback) {
+      const fallbackNote = `Climate zone ${climateZone} is the US-median assumption (this site has no state or ZIP on record) — the archetype load shape and yields may not match your actual climate; add a location to fix this.`;
+      archetypeZoneDisclosure = archetypeZoneDisclosure ? `${archetypeZoneDisclosure} ${fallbackNote}` : fallbackNote;
+    }
   }
 
   const tariffRows = await h.listTariffs("electric", site.state ?? undefined);
@@ -836,7 +852,11 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   // assigned rate — an arbitrary seeded tariff can materially shift projections.
   const tariffBasisDisclosure = current
     ? currentStateMismatch
-      ? `Cost basis: your assigned rate ${chosen.utilityName} ${chosen.name} — note its eligibility list does not include this site's state (${site.state ?? "unknown"}); verify the assignment is correct.`
+      ? // Batch-36 (pass 1376): state EXPLICITLY that the potentially-ineligible
+        // assigned rate is still the one used for the cost basis — the previous
+        // wording ("verify the assignment") let a customer infer an eligible
+        // substitute rate had been used instead.
+        `Cost basis: your assigned rate ${chosen.utilityName} ${chosen.name} is used for these figures even though its eligibility list does not include this site's state (${site.state ?? "unknown"}) — no substitute rate was applied; verify the assignment is correct.`
       : null
     : utilityMatch
       ? `Cost basis: ${chosen.utilityName} ${chosen.name} matched by utility name — assign your actual rate on the meter for firmer numbers.`

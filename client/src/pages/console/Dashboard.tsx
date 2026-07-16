@@ -206,13 +206,17 @@ export default function Dashboard() {
           value={demand ? `${(demand.loadFactor * 100).toFixed(0)}%` : "—"}
           /* Batch-29 (pass 1018) + Batch-33 (pass 1248): a low load factor implies
              demand-charge exposure only on tariffs that HAVE demand charges — gate
-             the cost warning on the actual breakdown (demand or CP $ > 0). */
+             the cost warning on the actual breakdown (demand or CP $ > 0).
+             Batch-36 (pass 1398): `demand` is null unless the pipeline had ≥10
+             measured interval points (pipeline.ts hasIntervals gate) — archetype
+             sites never reach these branches — so the sub-text explicitly names
+             its measured-interval provenance to keep that basis visible. */
           sub={
             demand
               ? demand.loadFactor < 0.4
                 ? (costInsight?.breakdown?.demand ?? 0) + (costInsight?.breakdown?.cp ?? 0) > 0
-                  ? "peaky profile — costly on your demand-charge rate"
-                  : "peaky profile — matters only on rates with demand charges"
+                  ? "peaky measured profile — costly on your demand-charge rate"
+                  : "peaky measured profile — would matter only on a rate with demand charges (yours has none)"
                 : "reasonably flat"
               : ""
           }

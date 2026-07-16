@@ -153,4 +153,50 @@ describe("ESPI Green Button XML parser", () => {
     const evil = `<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><feed>&xxe;</feed>`;
     expect(() => parseEspiXml(evil)).toThrow();
   });
+
+  // Batch-36 (pass 1374): malformed readings are skipped but never silently —
+  // the count lands in rowsSkipped and a disclosure note is emitted.
+  it("counts and discloses skipped malformed readings (no silent data loss)", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:espi="http://naesb.org/espi">
+  <entry><content>
+    <espi:IntervalBlock>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>3600</espi:duration><espi:start>1717200000</espi:start></espi:timePeriod>
+        <espi:value>1500</espi:value>
+      </espi:IntervalReading>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>3600</espi:duration><espi:start>not-a-number</espi:start></espi:timePeriod>
+        <espi:value>2500</espi:value>
+      </espi:IntervalReading>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>3600</espi:duration><espi:start>1717207200</espi:start></espi:timePeriod>
+        <espi:value>garbage</espi:value>
+      </espi:IntervalReading>
+    </espi:IntervalBlock>
+  </content></entry>
+</feed>`;
+    const series = parseEspiXml(xml);
+    expect(series.length).toBe(1);
+    expect(series[0]!.points.length).toBe(1);
+    expect(series[0]!.rowsSkipped).toBe(2);
+    expect(series[0]!.validation.notes.some((n) => n.includes("2 interval readings were skipped"))).toBe(true);
+  });
+
+  it("reports rowsSkipped 0 and no skip note for a clean feed", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:espi="http://naesb.org/espi">
+  <entry><content>
+    <espi:IntervalBlock>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>3600</espi:duration><espi:start>1717200000</espi:start></espi:timePeriod>
+        <espi:value>1500</espi:value>
+      </espi:IntervalReading>
+    </espi:IntervalBlock>
+  </content></entry>
+</feed>`;
+    const series = parseEspiXml(xml);
+    expect(series[0]!.rowsSkipped).toBe(0);
+    expect(series[0]!.validation.notes.some((n) => n.includes("skipped"))).toBe(false);
+  });
 });
