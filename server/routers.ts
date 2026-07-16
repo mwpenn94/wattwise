@@ -12,6 +12,7 @@ import {
   DISAGG_LANGUAGE,
   SOLAR_DISCLOSURE,
   BATTERY_DISCLOSURE,
+  inferClimateZone,
   type TariffStructure,
 } from "@shared/wattwise";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -546,7 +547,10 @@ function tzForState(state: string | null | undefined): string {
 }
 
 async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.getSite>>>, userId: number) {
-  const climateZone = site.climateZone ?? "2B";
+  // Cycle 9 (pass 505): never hardcode the hot-arid AZ zone as a universal
+  // fallback — infer from ZIP/state so a Seattle site without an explicit
+  // climateZone doesn't get a Phoenix archetype.
+  const climateZone = site.climateZone ?? inferClimateZone(site.zip ?? undefined, site.state ?? undefined);
   const meters = await h.listMeters(site.id, userId);
   const meter = meters.find((m) => m.commodity === "electric") ?? meters[0] ?? null;
 
@@ -607,9 +611,11 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   };
 }
 
-async function endUseForSite(site: { buildingType: string | null; climateZone: string | null; vintage: number | null }) {
+async function endUseForSite(site: { buildingType: string | null; climateZone: string | null; vintage: number | null; zip?: string | null; state?: string | null }) {
   if (!site.buildingType) return null;
-  const arch = await h.getArchetype(site.buildingType, site.climateZone ?? "2B", vintageBandLocal(site.vintage));
+  // Cycle 9 (pass 505): infer zone from ZIP/state rather than assuming 2B.
+  const zone = site.climateZone ?? inferClimateZone(site.zip ?? undefined, site.state ?? undefined);
+  const arch = await h.getArchetype(site.buildingType, zone, vintageBandLocal(site.vintage));
   return arch ? { fractions: arch.endUseFractions as Record<string, number> } : null;
 }
 
@@ -645,29 +651,6 @@ function measuredTo8760(pts: Array<{ ts: number; durationMin: number; usage: num
     }
   }
   return out;
-}
-
-function inferClimateZone(zip?: string, state?: string): string {
-  // Cycle 5, pass 146: full 50-state coarse IECC map (dominant-population zone
-  // per state) instead of defaulting most of the US to hot-dry 2B. ZIP-prefix
-  // refinements first for intra-state variation we know about (AZ elevations).
-  const z3 = zip?.slice(0, 3);
-  if (z3) {
-    if (["850", "851", "852", "853", "855", "863", "864", "865"].includes(z3)) return "2B"; // Phoenix/Havasu/Kingman
-    if (["856", "857"].includes(z3)) return "2B"; // Tucson
-    if (["859", "860"].includes(z3)) return "5B"; // Flagstaff / high country
-  }
-  const STATE_ZONE: Record<string, string> = {
-    AL: "3A", AK: "7", AZ: "2B", AR: "3A", CA: "3B", CO: "5B", CT: "5A", DE: "4A",
-    DC: "4A", FL: "2A", GA: "3A", HI: "1A", ID: "5B", IL: "5A", IN: "5A", IA: "5A",
-    KS: "4A", KY: "4A", LA: "2A", ME: "6A", MD: "4A", MA: "5A", MI: "5A", MN: "6A",
-    MS: "3A", MO: "4A", MT: "6B", NE: "5A", NV: "3B", NH: "6A", NJ: "4A", NM: "4B",
-    NY: "5A", NC: "3A", ND: "7", OH: "5A", OK: "3A", OR: "4C", PA: "5A", RI: "5A",
-    SC: "3A", SD: "6A", TN: "4A", TX: "2A", UT: "5B", VT: "6A", VA: "4A", WA: "4C",
-    WV: "5A", WI: "6A", WY: "6B",
-  };
-  if (state && STATE_ZONE[state.toUpperCase()]) return STATE_ZONE[state.toUpperCase()];
-  return "4A"; // US-median fallback (mixed-humid), disclosed as inferred
 }
 
 export type AppRouter = typeof appRouter;

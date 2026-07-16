@@ -115,6 +115,21 @@ export function dispatchBattery(
 }
 
 /* ---------------- hourly rate signal from tariff ---------------- */
+/**
+ * Day-of-week convention (passes 459/473 adjudication): the platform-wide
+ * contract is JS convention 0=Sun..6=Sat — declared on TariffStructure
+ * (`daysOfWeek: number[]; // 0 (Sun) - 6 (Sat)` in shared/wattwise.ts), used by
+ * DOW_MAP in localParts, and populated by the seeders (WEEKDAYS=[1..5],
+ * ALL_DAYS=[0..6]). `d.getDay()` therefore matches the stored arrays directly;
+ * NO ISO (1=Mon..7=Sun) remap may be introduced here or in tariffEngine —
+ * doing so would break Sunday/Saturday matching everywhere.
+ * Overnight windows (hourStart > hourEnd, e.g. 22→02) wrap midnight — same
+ * rule as tariffEngine's pass-442 fix.
+ */
+function inHourWindow(hour: number, hourStart: number, hourEnd: number): boolean {
+  if (hourStart <= hourEnd) return hour >= hourStart && hour < hourEnd;
+  return hour >= hourStart || hour < hourEnd; // overnight wrap
+}
 export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): number[] {
   const out: number[] = new Array(8760);
   const start = new Date(refYear, 0, 1).getTime();
@@ -125,7 +140,7 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): nu
     for (const p of structure.energy) {
       if (!p.months.includes(d.getMonth() + 1)) continue;
       if (!p.daysOfWeek.includes(d.getDay())) continue;
-      if (d.getHours() >= p.hourStart && d.getHours() < p.hourEnd) {
+      if (inHourWindow(d.getHours(), p.hourStart, p.hourEnd)) {
         rate = p.ratePerUnit;
         break;
       }
@@ -135,7 +150,7 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): nu
     for (const dc of structure.demand) {
       if (!dc.months.includes(d.getMonth() + 1)) continue;
       if (dc.daysOfWeek && !dc.daysOfWeek.includes(d.getDay())) continue;
-      if (dc.hourStart != null && dc.hourEnd != null && d.getHours() >= dc.hourStart && d.getHours() < dc.hourEnd) {
+      if (dc.hourStart != null && dc.hourEnd != null && inHourWindow(d.getHours(), dc.hourStart, dc.hourEnd)) {
         // Dispatch-signal heuristic only (never used for billing): spread a
         // monthly $/kW demand charge across ~100 window-hours per month
         // (≈ 5 h/day × 21 weekdays) to yield an hourly $/kWh-equivalent adder

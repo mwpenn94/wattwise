@@ -502,6 +502,13 @@ function Heatmap({ grid }: { grid: number[][] }) {
   const flat = grid.flat().filter((v) => v > 0);
   const max = Math.max(...flat, 0.001);
   const min = flat.length ? Math.min(...flat) : 0;
+  // Pass-458: when every non-zero cell shares one value (max === min), the
+  // normalized intensity collapses to 0 and the whole heatmap renders as
+  // near-invisible — misleading "no load" appearance. Render presence at a
+  // fixed mid intensity instead.
+  const uniform = flat.length > 0 && max - min < 1e-9;
+  const intensity = (v: number) =>
+    v <= 0 ? 0.04 : uniform ? 0.55 : Math.max(0.04, Math.pow(Math.max(0, (v - min) / (max - min)), 1.6) * 0.95);
   return (
     <div className="overflow-x-auto">
       <div className="min-w-[560px]">
@@ -522,7 +529,7 @@ function Heatmap({ grid }: { grid: number[][] }) {
                   key={`${d}-${h}`}
                   title={`${DAYS[d]} ${h}:00 — ${v.toFixed(1)} kW avg`}
                   className="m-px h-4 rounded-[2px]"
-                  style={{ background: `oklch(0.8 0.16 80 / ${Math.max(0.04, Math.pow(Math.max(0, (v - min) / (max - min || 1)), 1.6) * 0.95)})` }}
+                  style={{ background: `oklch(0.8 0.16 80 / ${intensity(v)})` }}
                 />
               ))}
             </>

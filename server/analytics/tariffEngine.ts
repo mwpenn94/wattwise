@@ -152,7 +152,11 @@ function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFla
     const p = structure.energy[i];
     if (!p.months.includes(month)) continue;
     if (!p.daysOfWeek.includes(dow)) continue;
-    if (!(hour >= p.hourStart && hour < p.hourEnd)) continue;
+    // Overnight-safe TOU period membership (Cycle 9, consistent with hourSpan
+    // and demandWindowMatch): a 22→02 period matches hours 22,23,0,1.
+    const inPeriod =
+      p.hourStart <= p.hourEnd ? hour >= p.hourStart && hour < p.hourEnd : hour >= p.hourStart || hour < p.hourEnd;
+    if (!inPeriod) continue;
     const score =
       (12 - p.months.length) * 100 + (7 - p.daysOfWeek.length) * 10 + (24 - hourSpan(p.hourStart, p.hourEnd));
     if (!best || score > best.score || (score === best.score && i < best.idx)) {
@@ -185,7 +189,14 @@ function demandWindowMatch(dc: { hourStart?: number; hourEnd?: number; daysOfWee
   if (!dc.months.includes(month)) return false;
   if (dc.daysOfWeek && !dc.daysOfWeek.includes(dow)) return false;
   if (dc.hourStart != null && dc.hourEnd != null) {
-    if (hour < dc.hourStart || hour >= dc.hourEnd) return false;
+    // Cycle 9 (passes 500/512): overnight windows (hourStart > hourEnd, e.g.
+    // 22–02) wrap midnight — the naive range test excluded exactly the hours
+    // such a window covers. Mirrors the pass-442 hourSpan overnight fix.
+    const inWindow =
+      dc.hourStart <= dc.hourEnd
+        ? hour >= dc.hourStart && hour < dc.hourEnd
+        : hour >= dc.hourStart || hour < dc.hourEnd;
+    if (!inWindow) return false;
   }
   return true;
 }

@@ -16,6 +16,7 @@ import {
   MODELED_ESTIMATES_DISCLAIMER,
   TariffComparison,
   TariffStructure,
+  inferClimateZone,
 } from "../../shared/wattwise";
 import {
   fitCaltrackMonthly,
@@ -98,7 +99,9 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
 }
 
 async function execute(site: Site, meter: Meter | null, userId: number, tier: string, analysisId: number): Promise<PipelineResult> {
-  const climateZone = site.climateZone ?? "2B";
+  // Cycle 9 (pass 505, extended): pipeline shares the ZIP/state-inferred zone
+  // fallback rather than assuming the hot-arid AZ default for every site.
+  const climateZone = site.climateZone ?? inferClimateZone(site.zip ?? undefined, site.state ?? undefined);
   const station = await h.getWeatherStation(climateZone);
   const normals = (station?.monthlyNormals ?? []) as MonthNormalRow[];
 
