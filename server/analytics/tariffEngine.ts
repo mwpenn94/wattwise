@@ -133,6 +133,15 @@ export function applyRatchet(
 }
 
 /* ---------------- TOU matching ---------------- */
+/**
+ * Duration of an hour window, overnight-safe (pass-442): a 22→02 window is
+ * 4 hours, not −20. Equal start/end (or 0→24) is treated as the full day.
+ */
+function hourSpan(hourStart: number, hourEnd: number): number {
+  const span = (hourEnd - hourStart + 24) % 24;
+  return span === 0 ? 24 : span;
+}
+
 function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFlag?: { used: boolean }): number {
   const { month, dow, hour } = localParts(ts, tz);
   // Most-specific matching period wins regardless of array order (deliverable
@@ -145,7 +154,7 @@ function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFla
     if (!p.daysOfWeek.includes(dow)) continue;
     if (!(hour >= p.hourStart && hour < p.hourEnd)) continue;
     const score =
-      (12 - p.months.length) * 100 + (7 - p.daysOfWeek.length) * 10 + (24 - (p.hourEnd - p.hourStart));
+      (12 - p.months.length) * 100 + (7 - p.daysOfWeek.length) * 10 + (24 - hourSpan(p.hourStart, p.hourEnd));
     if (!best || score > best.score || (score === best.score && i < best.idx)) {
       best = { rate: p.ratePerUnit, score, idx: i };
     }
@@ -160,7 +169,7 @@ function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFla
   // 1-month/24-hour period outrank a 12-month/1-hour one.)
   let widest: { rate: number; key: [number, number, number] } | null = null;
   for (const p of structure.energy) {
-    const key: [number, number, number] = [p.months.length, p.daysOfWeek.length, p.hourEnd - p.hourStart];
+    const key: [number, number, number] = [p.months.length, p.daysOfWeek.length, hourSpan(p.hourStart, p.hourEnd)];
     const wins =
       !widest ||
       key[0] > widest.key[0] ||

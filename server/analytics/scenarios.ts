@@ -253,8 +253,9 @@ export function runScenario(
   // peaker dispatch just as decreases may — so the disclosure is unconditional.
   disclosures.push("Emissions deltas use annual-average grid intensity (eGRID subregion) — marginal/hourly intensity differs.");
 
-  const basePeak = Math.max(...baselineHourly);
-  const scenPeak = Math.max(...hourly);
+  // Guard: Math.max(...[]) === -Infinity; empty series must yield 0 peak (pass-441).
+  const basePeak = baselineHourly.length > 0 ? Math.max(...baselineHourly) : 0;
+  const scenPeak = hourly.length > 0 ? Math.max(...hourly) : 0;
 
   let paybackYears: number | null = null;
   let paybackBand: string | null = null;

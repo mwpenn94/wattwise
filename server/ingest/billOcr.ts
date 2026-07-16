@@ -102,12 +102,20 @@ export async function extractBill(
 
     const raw = resp.choices?.[0]?.message?.content;
     const usage = resp.usage;
+    // Cycle 7 (pass 367): when the provider omits `usage`, estimate tokens from
+    // actual payload sizes rather than a fixed 1500/300 — fixed defaults either
+    // inflate the budget kill-switch or under-meter real spend. Image inputs are
+    // billed as vision tiles, so the conservative floor for the prompt side is
+    // derived from the data-URL byte length (base64 chars / 4 per token is a
+    // deliberate overestimate — the cap must fail safe, never under-count).
+    const estPromptTokens = Math.max(800, Math.ceil(imageDataUrl.length / 2000) * 85);
+    const estCompletionTokens = Math.ceil((typeof raw === "string" ? raw.length : 0) / 4);
     await recordMeterEvent({
       userId,
       analysisId,
       kind: "bill_ocr_llm",
-      llmTokensIn: usage?.prompt_tokens ?? 1500,
-      llmTokensOut: usage?.completion_tokens ?? 300,
+      llmTokensIn: usage?.prompt_tokens ?? estPromptTokens,
+      llmTokensOut: usage?.completion_tokens ?? estCompletionTokens,
       tier,
     });
 

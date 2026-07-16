@@ -360,6 +360,10 @@ export async function createBill(data: typeof bills.$inferInsert, userId: number
     const res = await db.insert(bills).values(data);
     return { id: Number((res as unknown as [{ insertId: number }])[0].insertId), isRevision: true };
   }
+  // Auto-detect path: the WHERE clause below is scoped to eq(bills.meterId,
+  // data.meterId), so existing[0] is guaranteed same-meter by construction —
+  // cross-meter linkage is structurally impossible here (pass-446 adjudicated:
+  // the meterId filter IS the ownership constraint; no separate check needed).
   const existing = await db
     .select({ id: bills.id, billRevision: bills.billRevision })
     .from(bills)

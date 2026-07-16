@@ -66,9 +66,17 @@ export async function writeIntervals(
     const exact = exactKey.get(key);
     if (exact) {
       if (precedence > exact.precedence) {
+        // Null-safe demand: a higher-precedence usage-only point must not
+        // erase an existing measured demand value (pass-444 finding).
         await db
           .update(intervals)
-          .set({ usage: p.usage, demand: p.demand, uploadId, precedence, qcFlags: null })
+          .set({
+            usage: p.usage,
+            demand: p.demand ?? sql`\`demand\``,
+            uploadId,
+            precedence,
+            qcFlags: null,
+          })
           .where(eq(intervals.id, exact.id));
         res.replaced++;
       } else {
@@ -114,11 +122,15 @@ export async function writeIntervals(
       .insert(intervals)
       .values(chunk)
       .onDuplicateKeyUpdate({
+        // Race fallback (row appeared between the pre-scan and this insert).
+        // Precedence-aware and null-safe: never let a lower-precedence write
+        // clobber a higher-precedence row, and never null out an existing
+        // non-null demand with an incoming null (usage-only upload).
         set: {
-          usage: sql`VALUES(\`usage\`)`,
-          demand: sql`VALUES(\`demand\`)`,
-          uploadId: sql`VALUES(\`uploadId\`)`,
-          precedence: sql`VALUES(\`precedence\`)`,
+          usage: sql`CASE WHEN VALUES(\`precedence\`) >= \`precedence\` AND VALUES(\`usage\`) IS NOT NULL THEN VALUES(\`usage\`) ELSE \`usage\` END`,
+          demand: sql`CASE WHEN VALUES(\`precedence\`) >= \`precedence\` AND VALUES(\`demand\`) IS NOT NULL THEN VALUES(\`demand\`) ELSE \`demand\` END`,
+          uploadId: sql`CASE WHEN VALUES(\`precedence\`) >= \`precedence\` THEN VALUES(\`uploadId\`) ELSE \`uploadId\` END`,
+          precedence: sql`GREATEST(\`precedence\`, VALUES(\`precedence\`))`,
         },
       });
   }
