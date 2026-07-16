@@ -218,7 +218,20 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       eligibleAnywhere[0] ??
       utilityTariffs[0] ??
       sweep[0];
-    if (basis) currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz });
+    // Batch-31 (pass 1099): every candidate in the basis chain descends from
+    // `allTariffs`, which listTariffs() filters by the METER'S commodity (line
+    // above), so a cross-commodity basis cannot arise from the fallback ladder.
+    // The one path that CAN cross commodities is a manually assigned
+    // currentTariffId pointing at a rate for a different commodity — `current`
+    // is looked up inside the commodity-filtered list, so a mismatched
+    // assignment simply won't be found and the ladder proceeds with matched
+    // rates. Assert the invariant cheaply rather than trusting it silently.
+    if (basis && meter?.commodity && basis.commodity !== meter.commodity) {
+      // Defensive: should be unreachable per the filtering above.
+      currentCost = null;
+    } else if (basis) {
+      currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz });
+    }
     // Batch-13 (pass 60): when the LAST-RESORT basis (first same-utility rate,
     // possibly ineligible) is used, every downstream dollar figure is priced on
     // a rate the customer may not qualify for — disclose it, never silently.
