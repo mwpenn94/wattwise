@@ -197,12 +197,12 @@ export default function Dashboard() {
           icon={<BarChart3 className="h-4 w-4" />}
           label="Benchmark"
           value={benchmarkInsight?.percentileBand ? String(benchmarkInsight.percentileBand).split("(")[0].trim() : "—"}
+          /* Batch-17 (pass 298): the main label already reads "vs national median EUI" —
+             the sub shows only the extracted descriptive text, no redundant suffix */
           sub={
             benchmarkInsight
-              ? `${
-                  String(benchmarkInsight.percentileBand ?? "").match(/\(([^)]+)\)/)?.[1] ??
-                  String(benchmarkInsight.percentileBand ?? "")
-                } vs national median EUI`.trim()
+              ? (String(benchmarkInsight.percentileBand ?? "").match(/\(([^)]+)\)/)?.[1] ??
+                String(benchmarkInsight.percentileBand ?? "")).trim()
               : ""
           }
         />
@@ -465,15 +465,18 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[] } | nul
               {r.isCurrentBasis && <span className="ml-2 rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10px] text-primary">current basis</span>}
               {!r.eligible && <span className="ml-2 font-mono text-[10px] text-muted-foreground">ineligible{r.ineligibleReason ? `: ${r.ineligibleReason}` : ""}</span>}
             </TableCell>
-            <TableCell className="text-right font-mono text-xs">{r.eligible ? fmtUsd(r.annualCost.total) : "—"}</TableCell>
-            <TableCell className={`text-right font-mono text-xs ${r.eligible && r.savingsVsCurrent > 0 ? "text-emerald-400" : ""}`}>
-              {!r.eligible
+            {/* Batch-17 (pass 308): costs ARE calculated for ineligible rates (the banner says
+                "for reference only") — show them in muted styling instead of a contradictory "—" */}
+            <TableCell className={`text-right font-mono text-xs ${r.eligible ? "" : "text-muted-foreground/70"}`}>
+              {fmtUsd(r.annualCost.total)}
+              {!r.eligible && <span className="ml-1 text-[10px]">(ref)</span>}
+            </TableCell>
+            <TableCell className={`text-right font-mono text-xs ${r.eligible && r.savingsVsCurrent > 0 ? "text-emerald-400" : !r.eligible ? "text-muted-foreground/70" : ""}`}>
+              {r.isCurrentBasis
                 ? "—"
-                : r.isCurrentBasis
-                  ? "—"
-                  : r.savingsVsCurrent >= 0
-                    ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr`
-                    : `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr`}
+                : r.savingsVsCurrent >= 0
+                  ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr${r.eligible ? "" : " (ref)"}`
+                  : `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr${r.eligible ? "" : " (ref)"}`}
             </TableCell>
             <TableCell className="text-xs text-muted-foreground">{r.freshness === "urdb_stale" ? "stale — verify with utility" : r.freshness.replace(/_/g, " ")}</TableCell>
           </TableRow>

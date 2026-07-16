@@ -9,7 +9,7 @@ import type { TrpcContext } from "./_core/context";
 import { getDb } from "./db";
 import { users } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
-import { FREE_TIER_MAX_COST_USD, FREE_TIER_MONTHLY_LLM_BUDGET_USD } from "../shared/wattwise";
+import { FREE_TIER_MAX_COST_USD, FREE_TIER_MAX_SITES, FREE_TIER_MONTHLY_LLM_BUDGET_USD } from "../shared/wattwise";
 import { llmBudgetAllows, recordMeterEvent } from "./analytics/costModel";
 
 function ctxFor(user: { id: number; openId: string; role?: "user" | "admin" }): TrpcContext {
@@ -87,28 +87,39 @@ describe("multi-tenancy isolation", () => {
 });
 
 describe("tier gating", () => {
-  it("free tier cannot exceed site quota", async () => {
+  // Batch-17 (pass 300): deterministic, cap-aware quota test. Instead of blindly
+  // looping and accepting ANY thrown error as "quota enforced", we (a) read the
+  // actual cap constant, (b) fill exactly up to the cap (asserting each in-cap
+  // creation SUCCEEDS), then (c) assert the (cap+1)th creation fails with the
+  // specific FORBIDDEN quota message — so an unrelated failure (validation, DB)
+  // can no longer masquerade as a passing quota check.
+  it(`free tier cannot exceed the ${FREE_TIER_MAX_SITES}-site quota`, async () => {
     const alice = appRouter.createCaller(ctxFor({ id: aliceId, openId: "vitest-alice" }));
-    // free tier allows FREE_TIER_MAX_SITES sites; the first was created above.
-    // create up to the cap then expect failure
-    let failed = false;
-    for (let i = 0; i < 4; i++) {
-      try {
-        await alice.sites.create({
-          name: `Quota probe ${i}`,
-          siteType: "office",
-          sectorClass: "commercial",
-          climateZone: "2B",
-          state: "AZ",
-          zip: "85004",
-          floorAreaSqft: 1000,
-        });
-      } catch {
-        failed = true;
-        break;
-      }
+    const siteInput = (i: number) => ({
+      name: `Quota probe ${i}`,
+      siteType: "office",
+      sectorClass: "commercial" as const,
+      climateZone: "2B",
+      state: "AZ",
+      zip: "85004",
+      floorAreaSqft: 1000,
+    });
+    // Fill remaining headroom up to the cap — these creations must all succeed.
+    const existing = await alice.sites.list();
+    const headroom = FREE_TIER_MAX_SITES - existing.length;
+    for (let i = 0; i < headroom; i++) {
+      const created = await alice.sites.create(siteInput(i));
+      expect(created.id).toBeGreaterThan(0);
     }
-    expect(failed).toBe(true);
+    const atCap = await alice.sites.list();
+    expect(atCap.length).toBe(FREE_TIER_MAX_SITES);
+    // The (cap+1)th creation must fail with the precise quota error.
+    await expect(alice.sites.create(siteInput(headroom))).rejects.toThrow(
+      new RegExp(`Free tier is limited to ${FREE_TIER_MAX_SITES} sites`),
+    );
+    // And it must not have leaked a row past the cap.
+    const after = await alice.sites.list();
+    expect(after.length).toBe(FREE_TIER_MAX_SITES);
   }, 30_000);
 });
 

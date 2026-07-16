@@ -123,29 +123,42 @@ export async function extractBill(
     if (!raw || typeof raw !== "string") {
       return { status: "manual_entry_required", reason: "AI parser returned no result — please enter the bill fields manually." };
     }
-    const parsed = JSON.parse(raw) as Record<string, unknown> & { fieldConfidences?: Record<string, number> };
-    const fc = parsed.fieldConfidences ?? {};
-    const field = <T,>(key: string): ExtractedBillField<T> => ({
-      value: (parsed[key] ?? null) as T | null,
-      confidence: typeof fc[key] === "number" ? Math.max(0, Math.min(1, fc[key])) : parsed[key] != null ? 0.5 : 0,
-    });
-    const bill: ExtractedBill = {
-      utilityName: field<string>("utilityName"),
-      accountNumber: field<string>("accountNumber"),
-      periodStart: field<string>("periodStart"),
-      periodEnd: field<string>("periodEnd"),
-      totalUsage: field<number>("totalUsage"),
-      usageUnit: field<string>("usageUnit"),
-      billedDemandKw: field<number>("billedDemandKw"),
-      totalCostUsd: field<number>("totalCostUsd"),
-      rateScheduleName: field<string>("rateScheduleName"),
-      overallConfidence: 0,
-    };
-    const critical = [bill.periodStart, bill.periodEnd, bill.totalUsage, bill.totalCostUsd];
-    bill.overallConfidence = critical.reduce((a, f) => a + f.confidence, 0) / critical.length;
-    return { status: "extracted", bill, needsReview: bill.overallConfidence < 0.6 };
-  } catch {
-    // LLM unreachable (offline) → automatic degradation to manual entry
+    // Batch-17 (pass 296): parse/shape failures are a DISTINCT failure mode from
+    // LLM unreachability — collapsing them into one "unavailable" message would
+    // misattribute malformed model output as an availability incident. Parse
+    // errors get their own catch, message, and log line.
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown> & { fieldConfidences?: Record<string, number> };
+      const fc = parsed.fieldConfidences ?? {};
+      const field = <T,>(key: string): ExtractedBillField<T> => ({
+        value: (parsed[key] ?? null) as T | null,
+        confidence: typeof fc[key] === "number" ? Math.max(0, Math.min(1, fc[key])) : parsed[key] != null ? 0.5 : 0,
+      });
+      const bill: ExtractedBill = {
+        utilityName: field<string>("utilityName"),
+        accountNumber: field<string>("accountNumber"),
+        periodStart: field<string>("periodStart"),
+        periodEnd: field<string>("periodEnd"),
+        totalUsage: field<number>("totalUsage"),
+        usageUnit: field<string>("usageUnit"),
+        billedDemandKw: field<number>("billedDemandKw"),
+        totalCostUsd: field<number>("totalCostUsd"),
+        rateScheduleName: field<string>("rateScheduleName"),
+        overallConfidence: 0,
+      };
+      const critical = [bill.periodStart, bill.periodEnd, bill.totalUsage, bill.totalCostUsd];
+      bill.overallConfidence = critical.reduce((a, f) => a + f.confidence, 0) / critical.length;
+      return { status: "extracted", bill, needsReview: bill.overallConfidence < 0.6 };
+    } catch (parseErr) {
+      console.error("[billOcr] LLM returned malformed JSON output (parse failure, NOT availability):", parseErr);
+      return {
+        status: "manual_entry_required",
+        reason: "The AI parser returned malformed output for this bill — please enter the bill fields manually.",
+      };
+    }
+  } catch (llmErr) {
+    // LLM unreachable (offline/network/timeout) → automatic degradation to manual entry
+    console.error("[billOcr] LLM invocation failed (availability):", llmErr);
     return {
       status: "manual_entry_required",
       reason: "AI bill parsing is currently unavailable — enter the bill fields manually below.",

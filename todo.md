@@ -83,3 +83,17 @@
 - [ ] UHOP expert-lens convergence passes on deliverable
 - [x] Live virtual-user E2E testing (Playwright): 18/18 assertions across 3 personas (pro upload+analyze real Cantex file, free hypothetical wizard, free-tier quota/gating)
 - [ ] Session A0 series converged on HANDOFF.md
+
+## Batch-17 (deliverable runner passes 296-308)
+- [x] billOcr: separate malformed-LLM-output failure path from LLM-unavailable path (pass 296)
+- [x] Dashboard Benchmark KPI sub: drop redundant "vs national median EUI" suffix (pass 298)
+- [x] TariffTable: show reference costs (muted) for ineligible rows instead of "—" (pass 308)
+- [x] governance.test.ts: deterministic site-quota test (cap-aware, precise over-cap assertion) (pass 300)
+
+## Progressive / flexible participation (user request, Jul 16)
+- [ ] Quick-start entry: user can begin with JUST an address (state/zip parsed, sensible defaults) or JUST a bill photo/file — no multi-form gate
+- [ ] Quick-win result: immediate partial analysis after minimal input, with assumption disclosures
+- [ ] Progressive refinement prompts: optional "add detail" chips showing what each unlocks — full forms remain for users who prefer them
+- [ ] Backend: sites.quickCreate accepting free-text address; defaults + assumption disclosures recorded
+- [ ] HANDOFF spec: pin progressive-participation principle as Cycle 22 (intake UX + assumption honesty)
+- [ ] Tests for quickCreate defaults + disclosure presence
