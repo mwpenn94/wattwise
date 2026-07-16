@@ -82,10 +82,17 @@ export function dispatchBattery(
   let soc = usable * 0.5;
   let cycled = 0;
 
-  // Rate thresholds: charge below 30th percentile, discharge above 80th
-  const sortedRates = [...hourlyRate].sort((a, b) => a - b);
-  const chargeThresh = sortedRates[Math.floor(sortedRates.length * 0.3)];
-  const dischargeThresh = sortedRates[Math.floor(sortedRates.length * 0.8)];
+  // Rate thresholds: charge below 30th percentile, discharge above 80th.
+  // Batch-21 (pass 563): filter non-finite values BEFORE sorting — sort
+  // comparators receiving NaN are implementation-defined, so a single NaN in
+  // the rate signal could scramble the quantile indices and make both
+  // thresholds NaN, silently disabling every charge/discharge decision. With
+  // an empty/contaminated signal the battery stays idle (thresholds ±Infinity)
+  // rather than dispatching against garbage.
+  const finiteRates = hourlyRate.filter((r) => Number.isFinite(r));
+  const sortedRates = finiteRates.sort((a, b) => a - b);
+  const chargeThresh = sortedRates.length > 0 ? sortedRates[Math.floor(sortedRates.length * 0.3)] : -Infinity;
+  const dischargeThresh = sortedRates.length > 0 ? sortedRates[Math.floor(sortedRates.length * 0.8)] : Infinity;
 
   for (let h = 0; h < residual.length; h++) {
     const rate = hourlyRate[h] ?? 0;

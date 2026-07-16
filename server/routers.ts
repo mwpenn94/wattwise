@@ -187,15 +187,21 @@ export const appRouter = router({
         const { siteId, ...patch } = input;
         const provided = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
         if (Object.keys(provided).length === 0) return { ok: true as const, updated: [] as string[] };
-        const coreProvided = ["buildingType", "sqft", "vintage"].some((k) => k in provided);
+        // Batch-21 (passes 565/566): (a) explicitly-entered location (state/zip)
+        // counts as user-entered data too — leaving attrSource at
+        // quick_start_defaults kept re-emitting the intake-assumptions insight
+        // against data the user actually typed; (b) climateZone is DERIVED from
+        // location, so a location update always re-infers it (the old
+        // attrSource guard silently pinned the zone — and every downstream
+        // archetype/EUI/savings figure — to the pre-move location once any
+        // earlier refinement had flipped attrSource).
+        const coreProvided = ["buildingType", "sqft", "vintage", "state", "zip"].some((k) => k in provided);
         const nextState = (provided.state as string | undefined) ?? site.state ?? undefined;
         const nextZip = (provided.zip as string | undefined) ?? site.zip ?? undefined;
         await h.updateSite(siteId, ctx.user.id, {
           ...provided,
-          // re-infer zone when location changed and zone was never user-set
-          ...((provided.state || provided.zip) && site.attrSource !== "user_entered"
-            ? { climateZone: inferClimateZone(nextZip, nextState) }
-            : {}),
+          // climateZone derives from location: always re-infer on location change
+          ...(provided.state || provided.zip ? { climateZone: inferClimateZone(nextZip, nextState) } : {}),
           ...(coreProvided && site.attrSource === "quick_start_defaults" ? { attrSource: "user_entered" } : {}),
         });
         await h.audit(ctx.user.id, "site_refined", "site", String(siteId), { fields: Object.keys(provided) });
