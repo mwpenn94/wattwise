@@ -56,10 +56,25 @@ export interface PipelineResult {
   disclaimer: string;
 }
 
+// Batch-35 (pass 1319a): classify timeouts by TYPE, not by string-matching the
+// error message — a non-timeout failure whose message happens to contain the
+// word "timeout" (e.g. a DB lock timeout inside a stage) must persist as
+// status='failed', not masquerade as a compute-budget timeout.
+class AnalysisTimeoutError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "AnalysisTimeoutError";
+  }
+}
 function timeoutGuard<T>(p: Promise<T>): Promise<T> {
   return Promise.race([
     p,
-    new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`Analysis exceeded ${ANALYSIS_TIMEOUT_MS / 1000}s compute timeout`)), ANALYSIS_TIMEOUT_MS)),
+    new Promise<never>((_, rej) =>
+      setTimeout(
+        () => rej(new AnalysisTimeoutError(`Analysis exceeded ${ANALYSIS_TIMEOUT_MS / 1000}s compute timeout`)),
+        ANALYSIS_TIMEOUT_MS,
+      ),
+    ),
   ]);
 }
 
@@ -98,7 +113,10 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
     } catch (meterErr) {
       console.error("[pipeline] failed to record meter event for failed analysis", analysisId, meterErr);
     }
-    await h.updateAnalysis(analysisId, { status: msg.includes("timeout") ? "timeout" : "failed", error: msg, durationMs: failDurationMs, marginalCostUsd: failCost });
+    // Batch-35 (pass 1319a): typed check — only the compute-budget guard's own
+    // rejection classifies as 'timeout'; all other failures persist as 'failed'.
+    const isComputeTimeout = e instanceof AnalysisTimeoutError;
+    await h.updateAnalysis(analysisId, { status: isComputeTimeout ? "timeout" : "failed", error: msg, durationMs: failDurationMs, marginalCostUsd: failCost });
     await h.audit(userId, "analysis_failed", "analysis", String(analysisId), { siteId: site.id, error: msg, durationMs: failDurationMs });
     throw e;
   }
@@ -255,6 +273,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       sweepRows = [basis, ...sweep.filter((t) => t.id !== basis.id)];
     }
 
+    // Batch-35 (pass 1319b): if no current-cost basis could be established
+    // (basis null — empty sweep — or the defensive commodity guard zeroed it),
+    // computing savings against a phantom $0 baseline would inflate every row
+    // into fake "savings". Null the deltas and disclose instead.
+    const hasCostBasis = currentCost != null;
     const currentTotal = currentCost?.breakdown.total ?? 0;
     for (const t of sweepRows.slice(0, 24)) {
       const elig = tariffEligible(
@@ -272,7 +295,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         eligible: elig.eligible,
         ineligibleReason: elig.reason,
         annualCost: cost?.breakdown ?? { energy: 0, demand: 0, fixed: 0, cp: null, cpMethodology: "cp_omitted_no_interval_data", total: 0 },
-        savingsVsCurrent: cost ? currentTotal - cost.breakdown.total : 0,
+        savingsVsCurrent: cost && hasCostBasis ? currentTotal - cost.breakdown.total : 0,
         // Batch-34 (pass 1279): when the platform already KNOWS the rate is
         // ineligible, telling the user to "confirm final eligibility" was
         // contradictory — the specific reason replaces the generic caveat.

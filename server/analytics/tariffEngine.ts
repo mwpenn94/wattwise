@@ -386,10 +386,19 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       );
     } else {
       // Batch-32 (pass 1192): the tariff DOES carry a CP charge but no proxy
-      // events could be computed (no peaks in season / insufficient interval
-      // data) — disclose the omission instead of silently understating cost.
+      // events could be computed — disclose the omission instead of silently
+      // understating cost. Batch-35 (pass 1332): name the ACTUAL cause —
+      // interval points exist here (points.length > 0), so "no interval data"
+      // would be false. `da` null means demand could not be computed from the
+      // available intervals (e.g. a vacancy/net-export span where fewer than 10
+      // points carry usable demand); `da` present but zero events means no
+      // peaks fell in the CP season.
+      const cpOmissionCause =
+        da == null
+          ? "interval data exists but demand could not be computed from it (too few points with usable demand — e.g. a vacancy or net-export period)"
+          : "no qualifying seasonal peaks in the interval history";
       disclosures.push(
-        "This tariff includes a coincident-peak (CP) charge, but it could not be estimated from your data (no qualifying seasonal peaks in the interval history) — the cost shown EXCLUDES the CP component and understates the true bill on this rate.",
+        `This tariff includes a coincident-peak (CP) charge, but it could not be estimated from your data (${cpOmissionCause}) — the cost shown EXCLUDES the CP component and understates the true bill on this rate.`,
       );
     }
   } else if (structure.cp) {
