@@ -92,8 +92,19 @@ export function dispatchBattery(
   // rather than dispatching against garbage.
   const finiteRates = hourlyRate.filter((r) => Number.isFinite(r));
   const sortedRates = finiteRates.sort((a, b) => a - b);
-  const chargeThresh = sortedRates.length > 0 ? sortedRates[Math.floor(sortedRates.length * 0.3)] : -Infinity;
-  const dischargeThresh = sortedRates.length > 0 ? sortedRates[Math.floor(sortedRates.length * 0.8)] : Infinity;
+  let chargeThresh = sortedRates.length > 0 ? sortedRates[Math.floor(sortedRates.length * 0.3)] : -Infinity;
+  let dischargeThresh = sortedRates.length > 0 ? sortedRates[Math.floor(sortedRates.length * 0.8)] : Infinity;
+  // Batch-27 (pass 929): on a flat rate signal the 30th/80th percentiles
+  // collapse to the same value, making `rate <= chargeThresh` AND
+  // `rate >= dischargeThresh` both true for every hour — the else-if order
+  // would then GRID-CHARGE at every hour and never discharge (worse than
+  // idle: pure added load + losses with zero arbitrage value). With no price
+  // spread there is nothing to arbitrage — disable rate-driven dispatch
+  // explicitly; solar-surplus absorption (residual<0 branch) still operates.
+  if (!(chargeThresh < dischargeThresh)) {
+    chargeThresh = -Infinity;
+    dischargeThresh = Infinity;
+  }
 
   for (let h = 0; h < residual.length; h++) {
     const rate = hourlyRate[h] ?? 0;
@@ -182,7 +193,14 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): nu
         break;
       }
     }
-    if (!matched && structure.energy.length > 0) rate = fallbackRate;
+    // Batch-27 (pass 953): the fallback applies on ANY unmatched hour — the
+    // old `energy.length > 0` guard was redundant-but-confusing: with zero
+    // energy periods widestCoverageRate returns 0, so applying it is identical
+    // to leaving rate at 0. Note an energy-period-free tariff prices energy at
+    // $0/kWh by definition of the seeded structure (fixed/demand-only rate);
+    // the dispatch signal still carries the demand-window adders below, so
+    // "free energy" does not disable peak-shaving dispatch.
+    if (!matched) rate = fallbackRate;
     // demand-window adder to bias battery toward peak windows
     for (const dc of structure.demand) {
       if (!dc.months.includes(d.getMonth() + 1)) continue;
