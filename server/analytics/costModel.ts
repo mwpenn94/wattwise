@@ -88,9 +88,10 @@ export async function recordMeterEvent(e: MeterEvent): Promise<number> {
 export async function monthToDateLlmSpend(userId: number): Promise<number> {
   const db = await getDb();
   if (!db) return 0;
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  // Cycle 6 (pass 327): UTC month boundary — consistent with countUploadsThisMonth
+  // and countScenariosThisMonth (createdAt is stored in UTC).
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
   const rows = await db
     .select({ total: sql<number>`COALESCE(SUM(${metering.llmCostUsd}), 0)` })
     .from(metering)
