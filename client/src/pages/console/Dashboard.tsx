@@ -439,7 +439,7 @@ type TariffRow = {
 function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[] } | null }) {
   const rows = metrics?.comparisons ?? [];
   if (rows.length === 0) return null;
-  const noneEligible = rows.every((r) => !r.eligible);
+  const noneEligible = rows.length > 0 && rows.every((r) => !r.eligible);
   return (
     <>
     {noneEligible && (

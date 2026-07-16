@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.2";
+export const SEED_VERSION = "2026.07.3";
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -445,7 +445,8 @@ export const SEED_TARIFFS: SeedTariff[] = [
       energy: [
         { label: "Summer On-Peak 2-8pm wkdy", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 14, hourEnd: 20, ratePerUnit: 0.0919 },
         { label: "Summer Off-Peak", months: SUMMER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.0577 },
-        { label: "Winter On-Peak 5-9am/5-9pm wkdy", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 17, hourEnd: 21, ratePerUnit: 0.0721 },
+        { label: "Winter On-Peak 5-9am wkdy", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 5, hourEnd: 9, ratePerUnit: 0.0721 },
+        { label: "Winter On-Peak 5-9pm wkdy", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 17, hourEnd: 21, ratePerUnit: 0.0721 },
         { label: "Winter Off-Peak", months: WINTER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.0533 },
       ],
       demand: [

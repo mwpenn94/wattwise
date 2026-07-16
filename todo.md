@@ -67,19 +67,19 @@
 - [x] Modeled-estimates disclaimer + provenance labels throughout
 - [x] UHOP convergence log page (public + in-console)
 - [x] Landing page with upload/wizard entry points
-- [ ] Mobile responsiveness verification
+- [x] Mobile responsiveness verification (375x812: landing, dashboard, wizard, scenarios, convergence all render; sidebar collapses)
 
 ## Validation
-- [x] Vitest suite: 38 tests / 5 files (parsers on real files, ratchet math, tariff pricing, dedupe path, tier gating, metering, tenancy isolation)
+- [x] Vitest suite: 42 tests / 6 files (parsers on real files, ratchet math, tariff pricing, dedupe path, tier gating, metering, tenancy isolation)
 - [x] Fixed real bug found by tests: `usage` reserved word in interval upsert (TiDB)
 - [x] AC1: AZ commercial Excel upload → full insight suite incl. demand + rate check (pipeline E2E test)
-- [ ] AC2: hypothetical AZ office → rate comparison + solar + benchmarks (verify via live E2E)
-- [ ] AC3: water meter flows through with zero electric-specific changes (verify)
-- [ ] AC4: scenario parity measured vs hypothetical (verify)
+- [x] AC2: hypothetical AZ office → rate comparison (eligible rows) + benchmark percentile + solar scenario asserted (server/acceptance.test.ts)
+- [x] AC3: water meter through full pipeline — caught+fixed 3 commodity bugs (electric eGRID factors, electric tariff sweep, electric benchmark applied to water)
+- [x] AC4: parity test — measured vs hypothetical share runScenario code path; identical result keys + normal-year disclosure in both (server/acceptance.test.ts)
 - [x] AC5: free-tier marginal cost ≤ $0.20 in metering table (tested)
 - [x] AC6: seeders idempotent/versioned/provenance-logged
 - [x] AC7: UHOP convergence log present and current
 - [x] AC8: 15-min disaggregation labeled archetype_prior_only/regression_split, never nilmtk
 - [ ] UHOP expert-lens convergence passes on deliverable
-- [ ] Live virtual-user E2E testing (Playwright) across personas
+- [x] Live virtual-user E2E testing (Playwright): 18/18 assertions across 3 personas (pro upload+analyze real Cantex file, free hypothetical wizard, free-tier quota/gating)
 - [ ] Session A0 series converged on HANDOFF.md

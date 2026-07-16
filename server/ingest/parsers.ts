@@ -153,8 +153,13 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
 
   const footerTotals = extractFooterTotals(table.summaryRows);
   const ingestedUsageSum = points.reduce((a, p) => a + p.usage, 0);
-  const demands = points.filter((p) => p.demand != null).map((p) => p.demand as number);
-  const ingestedMaxDemand = demands.length ? Math.max(...demands.slice(0, 1_000_000)) : null;
+  // Cycle 5, pass 154: iterative max — spreading a large array into Math.max
+  // risks the engine's argument-count limit on very large files, and the old
+  // slice(0, 1M) silently ignored demand rows past the first million.
+  let ingestedMaxDemand: number | null = null;
+  for (const p of points) {
+    if (p.demand != null && (ingestedMaxDemand == null || p.demand > ingestedMaxDemand)) ingestedMaxDemand = p.demand;
+  }
 
   const notes: string[] = [];
   let pass = true;
@@ -292,18 +297,26 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
   points.sort((a, b) => a.ts - b.ts);
   const usageUnit = commodity === "electric" ? "kWh" : commodity === "gas" ? "therms" : "gal";
   const ingestedUsageSum = points.reduce((a, p) => a + p.usage, 0);
-  const demandVals = points.filter((p) => p.demand != null).map((p) => p.demand as number);
+  // Cycle 5, pass 154 (same class as Excel path): iterative max, no spread.
+  let espiMaxDemand: number | null = null;
+  let espiHasDemand = false;
+  for (const p of points) {
+    if (p.demand != null) {
+      espiHasDemand = true;
+      if (espiMaxDemand == null || p.demand > espiMaxDemand) espiMaxDemand = p.demand;
+    }
+  }
   return [
     {
       sourceKey: "espi_usage_point",
       commodity,
       usageUnit,
-      demandUnit: demandVals.length ? "kW" : null,
+      demandUnit: espiHasDemand ? "kW" : null,
       points,
       footerTotals: { raw: [] },
       validation: {
         ingestedUsageSum,
-        ingestedMaxDemand: demandVals.length ? Math.max(...demandVals) : null,
+        ingestedMaxDemand: espiMaxDemand,
         pass: true,
         notes: [
           `ESPI feed parsed: ${points.length} interval readings`,

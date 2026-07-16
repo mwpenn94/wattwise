@@ -155,10 +155,18 @@ function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFla
   // LEAST-specific (widest-coverage) period as the default rate rather than an
   // arbitrary array position, and flag the fallback so callers can disclose it.
   if (fallbackFlag) fallbackFlag.used = true;
-  let widest: { rate: number; cover: number } | null = null;
+  // Cycle 5, pass 182: coverage comparison must be strictly hierarchical —
+  // months dominate, then days-of-week, then hour span. (A weighted sum let a
+  // 1-month/24-hour period outrank a 12-month/1-hour one.)
+  let widest: { rate: number; key: [number, number, number] } | null = null;
   for (const p of structure.energy) {
-    const cover = p.months.length * 100 + p.daysOfWeek.length * 10 + (p.hourEnd - p.hourStart);
-    if (!widest || cover > widest.cover) widest = { rate: p.ratePerUnit, cover };
+    const key: [number, number, number] = [p.months.length, p.daysOfWeek.length, p.hourEnd - p.hourStart];
+    const wins =
+      !widest ||
+      key[0] > widest.key[0] ||
+      (key[0] === widest.key[0] && key[1] > widest.key[1]) ||
+      (key[0] === widest.key[0] && key[1] === widest.key[1] && key[2] > widest.key[2]);
+    if (wins) widest = { rate: p.ratePerUnit, key };
   }
   return widest ? widest.rate : 0;
 }
@@ -253,10 +261,13 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
         const kw = p.demand ?? (p.durationMin > 0 ? (p.usage * 60) / p.durationMin : 0);
         if (kw > windowPeak) windowPeak = kw;
       }
-      // if charge is anytime (no window), apply ratcheted billed demand
+      // Anytime charge (no window): the billing determinant is the RATCHETED
+      // monthly demand, never the raw window scan (cycle 5, pass 212 — made
+      // explicit: detailByMonth always has every month key by construction,
+      // and billedDemandKw ≥ actual peak, so the ratchet floor is applied).
       if (dc.hourStart == null) {
         const det = detailByMonth.get(mk);
-        windowPeak = det ? det.billedDemandKw : windowPeak;
+        windowPeak = det ? det.billedDemandKw : 0;
       }
       mDemand += windowPeak * dc.ratePerKw;
     }

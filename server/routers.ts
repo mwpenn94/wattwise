@@ -19,7 +19,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import * as h from "./dbHelpers";
 import { ensureSeeded } from "./seed/runSeeders";
-import { preParseGate, withParseTimeout } from "./ingest/hardening";
+import { preParseGate, rejectXxe, withParseTimeout } from "./ingest/hardening";
 import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, type ParsedMeterSeries } from "./ingest/parsers";
 import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
@@ -175,6 +175,16 @@ export const appRouter = router({
           console.error("[uploads.ingest] storagePut failed for upload", uploadId, e);
         }
 
+        // Cycle 5, pass 195: XXE gate runs BEFORE any parse work is scheduled —
+        // hostile DOCTYPE/ENTITY payloads are rejected up front rather than
+        // relying on the gate inside the timeout-wrapped parser.
+        if (input.format === "espi_xml") {
+          const xxe = rejectXxe(buf.toString("utf8"));
+          if (!xxe.ok) {
+            await h.updateUpload(uploadId, { status: "failed", error: xxe.reason });
+            throw new TRPCError({ code: "BAD_REQUEST", message: xxe.reason ?? "XML rejected (XXE protection)" });
+          }
+        }
         let series: ParsedMeterSeries[] = [];
         try {
           series = await withParseTimeout(() => {
@@ -633,17 +643,26 @@ function measuredTo8760(pts: Array<{ ts: number; durationMin: number; usage: num
 }
 
 function inferClimateZone(zip?: string, state?: string): string {
+  // Cycle 5, pass 146: full 50-state coarse IECC map (dominant-population zone
+  // per state) instead of defaulting most of the US to hot-dry 2B. ZIP-prefix
+  // refinements first for intra-state variation we know about (AZ elevations).
   const z3 = zip?.slice(0, 3);
   if (z3) {
-    if (["850", "851", "852", "853", "855", "859", "860", "863", "864", "865"].includes(z3)) return "2B"; // Phoenix/Havasu/Kingman
+    if (["850", "851", "852", "853", "855", "863", "864", "865"].includes(z3)) return "2B"; // Phoenix/Havasu/Kingman
     if (["856", "857"].includes(z3)) return "2B"; // Tucson
-    if (["859", "860"].includes(z3)) return "5B"; // Flagstaff-ish
+    if (["859", "860"].includes(z3)) return "5B"; // Flagstaff / high country
   }
-  if (state === "AZ") return "2B";
-  if (state === "NV") return "3B";
-  if (state === "CA") return "3B";
-  if (state === "TX") return "2A";
-  return "2B";
+  const STATE_ZONE: Record<string, string> = {
+    AL: "3A", AK: "7", AZ: "2B", AR: "3A", CA: "3B", CO: "5B", CT: "5A", DE: "4A",
+    DC: "4A", FL: "2A", GA: "3A", HI: "1A", ID: "5B", IL: "5A", IN: "5A", IA: "5A",
+    KS: "4A", KY: "4A", LA: "2A", ME: "6A", MD: "4A", MA: "5A", MI: "5A", MN: "6A",
+    MS: "3A", MO: "4A", MT: "6B", NE: "5A", NV: "3B", NH: "6A", NJ: "4A", NM: "4B",
+    NY: "5A", NC: "3A", ND: "7", OH: "5A", OK: "3A", OR: "4C", PA: "5A", RI: "5A",
+    SC: "3A", SD: "6A", TN: "4A", TX: "2A", UT: "5B", VT: "6A", VA: "4A", WA: "4C",
+    WV: "5A", WI: "6A", WY: "6B",
+  };
+  if (state && STATE_ZONE[state.toUpperCase()]) return STATE_ZONE[state.toUpperCase()];
+  return "4A"; // US-median fallback (mixed-humid), disclosed as inferred
 }
 
 export type AppRouter = typeof appRouter;

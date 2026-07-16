@@ -31,6 +31,13 @@ import * as h from "../dbHelpers";
 import { recordMeterEvent } from "./costModel";
 import type { Site, Meter } from "../../drizzle/schema";
 
+/**
+ * Unoccupied hours per year for a typical single-shift commercial facility:
+ * ~12 h/weeknight × 261 weekdays + 24 h × 104 weekend days ≈ 4,900 h.
+ * Used to scope after-hours baseload savings honestly (never 8760 h).
+ */
+const AFTER_HOURS_PER_YEAR = 4900;
+
 export interface PipelineResult {
   analysisId: number;
   demand: DemandAnalytics | null;
@@ -72,7 +79,18 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
     return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await h.updateAnalysis(analysisId, { status: msg.includes("timeout") ? "timeout" : "failed", error: msg, durationMs: Date.now() - t0 });
+    // Cycle 5, pass 209: failed/timed-out analyses still consumed compute —
+    // record the metering event on the failure path too so the free-tier cost
+    // cap can never be dodged by aborted runs; metering failure must not mask
+    // the original error.
+    const failDurationMs = Date.now() - t0;
+    try {
+      await recordMeterEvent({ userId, analysisId, kind: "analysis_pipeline_failed", computeMs: failDurationMs, tier });
+    } catch (meterErr) {
+      console.error("[pipeline] failed to record meter event for failed analysis", analysisId, meterErr);
+    }
+    await h.updateAnalysis(analysisId, { status: msg.includes("timeout") ? "timeout" : "failed", error: msg, durationMs: failDurationMs });
+    await h.audit(userId, "analysis_failed", "analysis", String(analysisId), { siteId: site.id, error: msg, durationMs: failDurationMs });
     throw e;
   }
 }
@@ -158,7 +176,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   let currentCost: CostResult | null = null;
   const comparisons: TariffComparison[] = [];
   if (costPoints.length > 0) {
-    const allTariffs = await h.listTariffs("electric", site.state ?? undefined);
+    // Commodity-aware sweep: a water/gas meter must never be costed on electric
+    // rates (caught by AC3 acceptance test). If no tariffs exist for the
+    // commodity, the comparison is legitimately empty.
+    const allTariffs = await h.listTariffs(meter?.commodity ?? "electric", site.state ?? undefined);
     const current = meter?.currentTariffId ? allTariffs.find((t) => t.id === meter.currentTariffId) : undefined;
     const utilityTariffs = allTariffs.filter(
       (t) => !site.utilityName || t.utilityName.toLowerCase().includes((site.utilityName ?? "").toLowerCase().split(" ")[0]),
@@ -219,8 +240,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   /* ---------- stage 4: benchmarking ---------- */
   let benchmark: PipelineResult["benchmark"] = null;
   const annualUsage = baseline?.normalizedAnnualUsage ?? (hasIntervals ? annualize(points) : null);
+  // Cycle 5, pass 149: when the data span is too short to annualize (<25 days)
+  // benchmark and emissions are intentionally omitted — say so explicitly
+  // instead of silently showing nothing.
+  const annualizeBlocked = annualUsage == null && baseline == null && hasIntervals;
   if (site.sqft && annualUsage != null && site.buildingType) {
-    const bench = await h.getBenchmark(site.buildingType, "electric");
+    const bench = await h.getBenchmark(site.buildingType, meter?.commodity ?? "electric");
     if (bench) {
       const siteEui = annualUsage / site.sqft; // kWh/sqft/yr for electric benchmark
       const pct = benchmarkPercentile(siteEui, { medianEui: bench.medianEui, p25Eui: bench.p25Eui, p75Eui: bench.p75Eui });
@@ -229,8 +254,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   }
 
   /* ---------- stage 5: emissions ---------- */
+  // eGRID CO2e factors are lb/MWh of ELECTRICITY — applying them to gas therms
+  // or water gallons would fabricate emissions (caught by AC3 acceptance test).
+  // Scope-1 gas factors / water embodied energy are a disclosed MVP gap.
   let emissions: PipelineResult["emissions"] = null;
-  if (annualUsage != null) {
+  if (annualUsage != null && (meter?.commodity ?? "electric") === "electric") {
     const zip3 = (site.zip ?? "850").slice(0, 3);
     const { factor, subregion, mapped } = await h.getEmissionsFactor(zip3);
     if (factor) {
@@ -241,6 +269,22 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   /* ---------- stage 6: insights ---------- */
   const insightRows: Parameters<typeof h.replaceInsights>[1] = [];
   const dis = DISAGG_LANGUAGE[disaggMethod];
+
+  if (annualizeBlocked) {
+    insightRows.push({
+      siteId: site.id,
+      meterId: meter?.id ?? null,
+      analysisId,
+      kind: "data_coverage",
+      title: "Data span too short to annualize — benchmarking and emissions omitted",
+      body: "Your interval data covers fewer than 25 days, which is too short to reliably annualize usage. EUI benchmarking and annual emissions estimates are omitted rather than extrapolated from a short window. Upload at least ~1 month of data (ideally 12 months) to unlock them.",
+      severity: "warning",
+      disaggregationMethod: disaggMethod,
+      confidence: "high",
+      provenance: { method: "annualize_span_gate", minSpanDays: 25 },
+      metrics: { pointCount: points.length },
+    });
+  }
 
   if (demand) {
     if (demand.loadFactor < 0.35) {
@@ -425,11 +469,14 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         key: "baseload_reduction",
         title: "After-hours baseload reduction (equipment shutdown audit)",
         category: "operations",
-        annualSavingsUsdLo: baseloadKw * 0.1 * 8760 * kWhRate * 0.5,
-        annualSavingsUsdHi: baseloadKw * 0.25 * 8760 * kWhRate,
+        // Savings apply only during unoccupied hours (~12 h/night × 365 + weekend
+        // adjustment ≈ 4,900 h/yr for a typical single-shift facility), NOT 8760 h —
+        // an overnight-measured baseload cannot be "saved" during occupied hours.
+        annualSavingsUsdLo: baseloadKw * 0.1 * AFTER_HOURS_PER_YEAR * kWhRate * 0.5,
+        annualSavingsUsdHi: baseloadKw * 0.25 * AFTER_HOURS_PER_YEAR * kWhRate,
         capexBand: "none",
-        confidence: "high",
-        rationale: `Overnight baseload averages ${baseloadKw.toFixed(1)} kW — ${((baseloadKw / demand.avgKw) * 100).toFixed(0)}% of your average load runs 24/7. Measured directly from your interval data.`,
+        confidence: "medium",
+        rationale: `Overnight baseload averages ${baseloadKw.toFixed(1)} kW — ${((baseloadKw / demand.avgKw) * 100).toFixed(0)}% of your average load runs 24/7. Measured directly from your interval data. Savings estimated over ~${AFTER_HOURS_PER_YEAR.toLocaleString()} unoccupied hours/year.`,
         disclosures: [MODELED_ESTIMATES_DISCLAIMER],
       });
     }

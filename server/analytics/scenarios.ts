@@ -38,7 +38,16 @@ function solarHourlyShape(hourOfYear: number): number {
   return Math.sin(Math.PI * x) * seasonal;
 }
 
+/** True when the climate zone has a mapped PVWatts-typical yield. */
+export function solarZoneMapped(climateZone: string): boolean {
+  return SOLAR_YIELD_BY_ZONE[climateZone] != null;
+}
+
 export function solarProduction8760(kwDc: number, climateZone: string): number[] {
+  // SOLAR_YIELD_BY_ZONE values are NREL PVWatts *typical net* kWh/kW-yr —
+  // they already include standard system losses (~14%: soiling, wiring,
+  // inverter, availability). Callers must NOT derate kwDc again
+  // (deliverable convergence cycle 5: double-loss finding, 8 passes).
   const annualYield = (SOLAR_YIELD_BY_ZONE[climateZone] ?? 1500) * kwDc;
   const raw: number[] = new Array(8760);
   let sum = 0;
@@ -127,7 +136,11 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): nu
       if (!dc.months.includes(d.getMonth() + 1)) continue;
       if (dc.daysOfWeek && !dc.daysOfWeek.includes(d.getDay())) continue;
       if (dc.hourStart != null && dc.hourEnd != null && d.getHours() >= dc.hourStart && d.getHours() < dc.hourEnd) {
-        rate += dc.ratePerKw / 100; // heuristic adder
+        // Dispatch-signal heuristic only (never used for billing): spread a
+        // monthly $/kW demand charge across ~100 window-hours per month
+        // (≈ 5 h/day × 21 weekdays) to yield an hourly $/kWh-equivalent adder
+        // that biases discharge into demand windows.
+        rate += dc.ratePerKw / 100;
       }
     }
     out[h] = rate;
@@ -196,9 +209,20 @@ export function runScenario(
   }
 
   if ((input.kind === "solar" || input.kind === "solar_battery") && input.solarKwDc) {
-    const prod = solarProduction8760(input.solarKwDc * (1 - SOLAR_DEFAULTS.systemLossFraction), climateZone);
+    // Pass nameplate kW DC directly: zone yields are PVWatts-typical *net of
+    // system losses* — applying systemLossFraction here would double-count
+    // losses and understate production (convergence cycle-5 fix).
+    const prod = solarProduction8760(input.solarKwDc, climateZone);
     hourly = hourly.map((v, h) => v - prod[h]); // may go negative = export
     disclosures.push(SOLAR_DISCLOSURE);
+    disclosures.push(
+      `Solar yield basis: PVWatts-typical net annual yield for climate zone ${climateZone} (system losses ~${Math.round(SOLAR_DEFAULTS.systemLossFraction * 100)}% already included in the zone yield).`,
+    );
+    if (!solarZoneMapped(climateZone)) {
+      disclosures.push(
+        `Climate zone "${climateZone}" has no mapped solar-yield entry — a generic 1,500 kWh/kW-yr default was used; treat solar production as low confidence.`,
+      );
+    }
   }
 
   if ((input.kind === "battery" || input.kind === "solar_battery") && input.batteryKwh) {

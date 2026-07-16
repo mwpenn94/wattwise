@@ -162,6 +162,16 @@ export function fitCaltrackMonthly(
     // Cycle 3, pass 71: degree days can never be negative — clamp both
     // balance-point-adjusted CDD and HDD at zero, and never let a single month
     // contribute negative energy to the annualized total.
+    //
+    // Dimensional note (cycle 5, pass 181 adjudication): the OLS fit is per-day
+    // (y = kWh/day, x = DD/day), so a month's contribution is
+    // days×(b0 + b1·cddPerDay) = b0·days + b1·monthlyCDD — nrm.cddBase65 is a
+    // MONTHLY total, so multiplying it by the per-day slope is correct.
+    // The balance-point shift term converts a per-day DD delta (°F shift ×
+    // 0.35 occurrence fraction) into a monthly DD delta via ×daysInMonth —
+    // also dimensionally consistent; 0.35 ≈ fraction of days whose mean temp
+    // falls inside the shifted balance band (flat-distribution approximation,
+    // disclosed as an approximation).
     const cdd = Math.max(0, nrm.cddBase65 + Math.max(0, 65 - cb) * daysInMonth[m] * 0.35); // balance-point adjustment approximation
     const hdd = Math.max(0, nrm.hddBase65 - Math.max(0, 65 - hb) * daysInMonth[m] * 0.35);
     annual += Math.max(0, fit.b0 * daysInMonth[m] + fit.b1 * cdd + fit.b2 * hdd);

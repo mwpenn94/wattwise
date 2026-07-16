@@ -2,7 +2,7 @@
  * Feature query helpers — every tenant-scoped read/write goes through
  * ownership-asserting wrappers (Cycle 5 multi-tenancy enforcement).
  */
-import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import {
   analyses,
@@ -142,10 +142,21 @@ export async function createUpload(data: typeof uploads.$inferInsert) {
 
 export async function findUploadByHash(userId: number, sha256: string) {
   const db = await requireDb();
+  // Only treat as duplicate when the prior upload fully succeeded AND the raw
+  // file was durably stored (fileKey present). A prior attempt whose storagePut
+  // failed must NOT short-circuit a re-upload, or the raw source becomes
+  // permanently unrecoverable for re-parse/audit.
   const rows = await db
     .select()
     .from(uploads)
-    .where(and(eq(uploads.userId, userId), eq(uploads.sha256, sha256)))
+    .where(
+      and(
+        eq(uploads.userId, userId),
+        eq(uploads.sha256, sha256),
+        eq(uploads.status, "parsed"),
+        isNotNull(uploads.fileKey),
+      ),
+    )
     .limit(1);
   return rows[0];
 }
@@ -162,9 +173,10 @@ export async function listUploads(userId: number) {
 
 export async function countUploadsThisMonth(userId: number): Promise<number> {
   const db = await requireDb();
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  // UTC month boundary — createdAt is stored in UTC; a server-local boundary
+  // would mis-count quota near month edges.
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const rows = await db
     .select({ n: sql<number>`COUNT(*)` })
     .from(uploads)
@@ -316,9 +328,9 @@ export async function listScenarios(siteId: number, userId: number) {
 
 export async function countScenariosThisMonth(userId: number): Promise<number> {
   const db = await requireDb();
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
+  // UTC month boundary — createdAt is stored in UTC (see countUploadsThisMonth).
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const rows = await db
     .select({ n: sql<number>`COUNT(*)` })
     .from(scenarios)
@@ -330,7 +342,24 @@ export async function countScenariosThisMonth(userId: number): Promise<number> {
 export async function createBill(data: typeof bills.$inferInsert, userId: number) {
   await assertMeterOwner(data.meterId, userId);
   const db = await requireDb();
-  // Corrected-bill handling (Cycle 5): same meter+period → revision
+  // Corrected-bill handling (Cycle 5): same meter+period → revision.
+  // Cycle 5, pass 146b: a caller-provided supersedesBillId is authoritative —
+  // the user knows which bill they are correcting (e.g. period dates were also
+  // wrong on the original). Auto-detection only runs when it is absent, and it
+  // never overwrites an explicit link.
+  if (data.supersedesBillId != null) {
+    const target = await db
+      .select({ id: bills.id, billRevision: bills.billRevision, meterId: bills.meterId })
+      .from(bills)
+      .where(eq(bills.id, data.supersedesBillId))
+      .limit(1);
+    if (target.length === 0 || target[0].meterId !== data.meterId) {
+      throw new Error("supersedesBillId does not reference an existing bill on this meter");
+    }
+    data = { ...data, billRevision: (target[0].billRevision ?? 0) + 1 };
+    const res = await db.insert(bills).values(data);
+    return { id: Number((res as unknown as [{ insertId: number }])[0].insertId), isRevision: true };
+  }
   const existing = await db
     .select({ id: bills.id, billRevision: bills.billRevision })
     .from(bills)
@@ -382,20 +411,44 @@ export async function exportUserData(userId: number) {
   const userOpps = siteIds.length > 0 ? await db.select().from(opportunities).where(inArray(opportunities.siteId, siteIds)) : [];
   const userUploads = await db.select().from(uploads).where(eq(uploads.userId, userId));
   const userMetering = await db.select().from(metering).where(eq(metering.userId, userId));
-  // intervals can be large — export summary stats + first/last window per meter
+  // Cycle 5, pass 196: a data export must include the user's raw interval
+  // readings, not only summary stats — capped at 100k rows per meter with an
+  // explicit truncation note so completeness is never silently lost.
+  const INTERVAL_EXPORT_CAP = 100_000;
   const intervalSummaries = [];
+  const intervalPoints: Array<{ meterId: number; truncatedAtRows: number | null; points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }> }> = [];
   for (const mid of meterIds) {
     const st = await db
       .select({ n: sql<number>`COUNT(*)`, minTs: sql<number>`MIN(${intervals.ts})`, maxTs: sql<number>`MAX(${intervals.ts})`, total: sql<number>`SUM(${intervals.usage})` })
       .from(intervals)
       .where(eq(intervals.meterId, mid));
     intervalSummaries.push({ meterId: mid, ...st[0] });
+    const rows = await db
+      .select({ ts: intervals.ts, durationMin: intervals.durationMin, usage: intervals.usage, demand: intervals.demand })
+      .from(intervals)
+      .where(eq(intervals.meterId, mid))
+      .orderBy(intervals.ts)
+      .limit(INTERVAL_EXPORT_CAP + 1);
+    const truncated = rows.length > INTERVAL_EXPORT_CAP;
+    intervalPoints.push({
+      meterId: mid,
+      truncatedAtRows: truncated ? INTERVAL_EXPORT_CAP : null,
+      points: (truncated ? rows.slice(0, INTERVAL_EXPORT_CAP) : rows).map((r) => ({
+        ts: Number(r.ts),
+        durationMin: r.durationMin,
+        usage: Number(r.usage),
+        demand: r.demand == null ? null : Number(r.demand),
+      })),
+    });
   }
   return {
     exportedAt: new Date().toISOString(),
     sites: userSites,
     meters: userMeters,
     intervalSummaries,
+    intervalPoints,
+    intervalExportNote:
+      "Raw interval readings included per meter, capped at 100,000 rows each (oldest first); intervalSummaries reflect the full stored range. Meters exceeding the cap are flagged via truncatedAtRows.",
     bills: userBills,
     baselines: userBaselines,
     scenarios: userScenarios,
