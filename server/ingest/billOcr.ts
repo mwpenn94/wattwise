@@ -103,12 +103,13 @@ export async function extractBill(
     const raw = resp.choices?.[0]?.message?.content;
     const usage = resp.usage;
     // Cycle 7 (pass 367): when the provider omits `usage`, estimate tokens from
-    // actual payload sizes rather than a fixed 1500/300 — fixed defaults either
-    // inflate the budget kill-switch or under-meter real spend. Image inputs are
-    // billed as vision tiles, so the conservative floor for the prompt side is
-    // derived from the data-URL byte length (base64 chars / 4 per token is a
-    // deliberate overestimate — the cap must fail safe, never under-count).
-    const estPromptTokens = Math.max(800, Math.ceil(imageDataUrl.length / 2000) * 85);
+    // actual payload sizes rather than a fixed 1500/300. Batch-15 (pass 137):
+    // vision billing scales with image TILES/resolution, not base64 byte length,
+    // so the estimate is BOUNDED — floor 800 (conservative base for one image),
+    // ceiling 2600 (≈ realistic hi-detail cost for a single bill photo plus
+    // prompt text). An unbounded length-proportional estimate would prematurely
+    // trip the free-tier kill-switch on large photos while still failing safe.
+    const estPromptTokens = Math.min(2600, Math.max(800, Math.ceil(imageDataUrl.length / 8000) * 85));
     const estCompletionTokens = Math.ceil((typeof raw === "string" ? raw.length : 0) / 4);
     await recordMeterEvent({
       userId,

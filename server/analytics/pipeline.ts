@@ -250,7 +250,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
           "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.",
       });
     }
-    // Cycle 5: stale demotion — fresh/verified rank above stale at equal savings
+    // Cycle 5: stale demotion — fresh/verified rank above stale at equal savings.
+    // Batch-15 (pass 149) adjudication: this ordering is INTENTIONAL — a stale
+    // rate's computed "savings" may be mispriced by the very staleness that
+    // demoted it, so promoting a stale-but-bigger-savings row above verified
+    // rates would rank unreliable figures first. Savings ranks within each
+    // freshness class; eligibility outranks both.
     comparisons.sort((a, b) => {
       if (!a.eligible !== !b.eligible) return a.eligible ? -1 : 1;
       const freshRank = (f: string) => (f === "verified" || f === "urdb_refreshed_150" || f === "manual" ? 0 : 1);
@@ -530,7 +535,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         // Savings apply only during unoccupied hours (~12 h/night × 365 + weekend
         // adjustment ≈ 4,900 h/yr for a typical single-shift facility), NOT 8760 h —
         // an overnight-measured baseload cannot be "saved" during occupied hours.
-        annualSavingsUsdLo: baseloadKw * 0.1 * AFTER_HOURS_PER_YEAR * kWhRate * 0.5,
+        // Batch-15 (pass 149): the low estimate maps directly to the 10% reduction
+        // named in the rationale — the earlier extra ×0.5 made the displayed range
+        // inconsistent with the stated 10–25% reduction band.
+        annualSavingsUsdLo: baseloadKw * 0.1 * AFTER_HOURS_PER_YEAR * kWhRate,
         annualSavingsUsdHi: baseloadKw * 0.25 * AFTER_HOURS_PER_YEAR * kWhRate,
         capexBand: "none",
         confidence: "medium",

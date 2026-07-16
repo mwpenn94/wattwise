@@ -202,7 +202,7 @@ export default function Dashboard() {
               ? `${
                   String(benchmarkInsight.percentileBand ?? "").match(/\(([^)]+)\)/)?.[1] ??
                   String(benchmarkInsight.percentileBand ?? "")
-                } vs national peer EUI`.trim()
+                } vs national median EUI`.trim()
               : ""
           }
         />
@@ -210,7 +210,7 @@ export default function Dashboard() {
           icon={<Leaf className="h-4 w-4" />}
           label="Emissions"
           value={emissionsInsight ? `${fmtNum(emissionsInsight.annualCo2eLb ?? null)} lb CO₂e/yr` : "—"}
-          sub={emissionsInsight?.subregion ?? ""}
+          sub={emissionsInsight?.subregion ? `${emissionsInsight.subregion} · eGRID annual avg` : ""}
         />
       </div>
 
@@ -444,7 +444,7 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[] } | nul
     <>
     {noneEligible && (
       <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
-        No seeded rate matches this site's sector and peak-demand size. The seeded rate library is a snapshot — your actual utility rate may not be included. Cost figures use the closest available rate structure as a modeling basis.
+        No seeded rate matches this site's sector and peak-demand size. The seeded rate library is a snapshot — your actual utility rate may not be included. Cost figures use the closest available rate structure as a modeling basis, for reference only — you may not be eligible for that rate.
       </p>
     )}
     <Table className="mt-3">

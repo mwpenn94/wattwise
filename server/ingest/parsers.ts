@@ -110,6 +110,13 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
   if (table.data.length < 3) return null;
   const headers = table.headers;
 
+  // Column precedence (batch-15, pass 144): a combined datetime/timestamp column
+  // (dtCol) always wins in the timestamp calculation below — dateCol is only the
+  // date-only fallback (its exclusion list drops headers containing "time", so a
+  // "DateTime" header cannot be picked as the date-only column). The trailing
+  // `?? findHeader(datetime)` on dateCol only guarantees dateCol is non-null when
+  // ONLY a datetime column exists; it never overrides dtCol's priority in the
+  // row loop (`dtCol ? … : combineDateTime(…)`).
   const dateCol = findHeader(headers, [/^date$/i, /^date[^a-z]/i, /date/i], [/time/i]) ?? findHeader(headers, [/date.?time|timestamp/i]);
   const dtCol = findHeader(headers, [/date.?time|timestamp/i]);
   const timeCol = findHeader(headers, [/^time$/i, /interval.?time|^end.?time|^start.?time/i], [/date/i]);
@@ -127,6 +134,11 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
   if (/therm|ccf|mcf|gas/.test(headerBlob)) commodity = "gas";
   else if (/gallon|gal\b|hcf|water/.test(headerBlob)) commodity = "water";
   const usageUnit = commodity === "electric" ? "kWh" : commodity === "gas" ? "therms" : "gal";
+  // Batch-15 (pass 144): a bare "Wh" usage header (matched by the generic
+  // usage/energy regex, NOT the kwh regex) would be ingested as-is yet labeled
+  // kWh — a 1000× unit error. Detect Watt-hour headers and convert to kWh.
+  const usageIsWh = commodity === "electric" && usageCol != null && kwhCol == null && /(^|[^km])wh\b/i.test(usageCol);
+  const usageScale = usageIsWh ? 1 / 1000 : 1;
 
   const points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }> = [];
   let skipped = 0;
@@ -138,7 +150,8 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
       skipped++;
       continue;
     }
-    const usage = usageCol ? numberValue(r[usageCol]) : null;
+    const usageRaw = usageCol ? numberValue(r[usageCol]) : null;
+    const usage = usageRaw != null ? usageRaw * usageScale : null;
     const demand = kwCol ? numberValue(r[kwCol]) : null;
     if (usage == null && demand == null) {
       skipped++;

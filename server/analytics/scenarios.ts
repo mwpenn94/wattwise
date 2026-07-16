@@ -302,7 +302,7 @@ export function runScenario(
     const lo = paybackYears * 0.75;
     const hi = paybackYears * 1.5;
     paybackBand = `${lo.toFixed(1)}–${hi.toFixed(1)} years`;
-    disclosures.push("Payback shown as a range reflecting modeling uncertainty (−25%/+50% around the point estimate); excludes incentives, financing, degradation, and rate escalation.");
+    disclosures.push("Payback shown as a range reflecting modeling uncertainty — the band spans 75% to 150% of the point estimate; excludes incentives, financing, degradation, and rate escalation.");
   }
 
   const confidence = extrapolated ? "low" : baselineConfidence === "high" ? "medium" : "low";
