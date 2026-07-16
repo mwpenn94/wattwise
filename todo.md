@@ -45,7 +45,7 @@
 - [x] Opportunity engine: ranked measures, $/yr, payback band, confidence
 - [x] Scenario engine: solar, battery (sequential dispatch disclosed), efficiency, EV, tariff switch — one code path
 - [x] Emissions: eGRID subregion factors + scenario CO₂e deltas
-- [ ] Anomaly detection: residuals >10% change-point detection (basic residual QC only — documented limitation)
+- [x] Anomaly detection: residuals >10% + sustained change-point detection (detectResidualAnomalies; honesty-gated on valid fit + ≥6 months; 5 vitest specs)
 
 ## A5 — Tier gating + unit economics
 - [x] Tier gating (free/plus/pro) on procedures; free site quota enforced (tested)

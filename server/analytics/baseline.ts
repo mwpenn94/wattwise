@@ -288,3 +288,96 @@ export function archetypeBaseline(
     },
   };
 }
+
+/* ---------------- residual anomaly detection (handoff A4 item) ---------------- */
+export interface MonthlyAnomaly {
+  month: string; // YYYY-MM
+  actual: number;
+  predicted: number;
+  residualPct: number; // signed, e.g. +0.18 = 18% above model
+  kind: "single_month_spike" | "single_month_drop" | "sustained_shift";
+}
+
+export interface AnomalyResult {
+  anomalies: MonthlyAnomaly[];
+  changePointMonth: string | null; // first month of a detected sustained shift
+  method: "caltrack_residual_10pct_v1";
+  disclosures: string[];
+}
+
+/**
+ * Residual-based anomaly detection on the fitted CalTRACK-monthly model:
+ * - Per-month residual = (actual − predicted) / predicted; |residual| > 10%
+ *   flags the month (spike or drop).
+ * - Change-point: the earliest month from which ALL subsequent residuals
+ *   (≥ 3 months) share the same sign and each exceeds 10% — a sustained
+ *   consumption shift (schedule change, equipment addition/failure) rather
+ *   than a one-off. Flagged months inside the shift are re-labeled
+ *   `sustained_shift`.
+ *
+ * Honesty gates: requires a real weather fit (non-null R²) and ≥ 6 usable
+ * months — residuals from a flat-mean fallback or a thin fit would fabricate
+ * anomalies from model error rather than consumption change.
+ */
+export function detectResidualAnomalies(
+  monthly: MonthlyUsage[],
+  monthDailyTemps: Map<string, number[]>,
+  fit: BaselineFit,
+): AnomalyResult {
+  const disclosures = [
+    "Anomalies are flagged where actual monthly usage deviates >10% from the weather-model prediction — weather-driven variation is already accounted for by the model; remaining deviations reflect operational/equipment change, model error, or data issues.",
+  ];
+  const empty: AnomalyResult = { anomalies: [], changePointMonth: null, method: "caltrack_residual_10pct_v1", disclosures };
+  if (fit.method !== "caltrack_monthly" || fit.rSquared == null) {
+    disclosures.push("Anomaly detection skipped — no statistically valid weather fit to compute residuals against.");
+    return empty;
+  }
+  const usable = monthly.filter((m) => monthDailyTemps.has(m.month) && m.days > 20);
+  if (usable.length < 6) {
+    disclosures.push("Anomaly detection skipped — fewer than 6 usable months of coverage.");
+    return empty;
+  }
+  const c = fit.coefficients;
+  const rows = usable.map((m) => {
+    const temps = monthDailyTemps.get(m.month)!;
+    const cddPerDay = degreeDays(temps, c.coolingBalanceF, "cdd") / m.days;
+    const hddPerDay = degreeDays(temps, c.heatingBalanceF, "hdd") / m.days;
+    const predictedPerDay = c.baseloadPerDay + c.coolingSlope * cddPerDay + c.heatingSlope * hddPerDay;
+    const predicted = predictedPerDay * m.days;
+    const residualPct = predicted > 0 ? (m.usage - predicted) / predicted : 0;
+    return { month: m.month, actual: m.usage, predicted, residualPct };
+  });
+
+  const flagged = rows.filter((r) => Math.abs(r.residualPct) > 0.1);
+
+  // Change-point: earliest index i such that rows[i..] all share sign and all >10%
+  let changePointMonth: string | null = null;
+  for (let i = 0; i <= rows.length - 3; i++) {
+    const tail = rows.slice(i);
+    const sign = Math.sign(tail[0].residualPct);
+    if (sign === 0) continue;
+    if (tail.every((r) => Math.sign(r.residualPct) === sign && Math.abs(r.residualPct) > 0.1)) {
+      changePointMonth = tail[0].month;
+      break;
+    }
+  }
+
+  const anomalies: MonthlyAnomaly[] = flagged.map((r) => ({
+    month: r.month,
+    actual: Math.round(r.actual * 100) / 100,
+    predicted: Math.round(r.predicted * 100) / 100,
+    residualPct: Math.round(r.residualPct * 1000) / 1000,
+    kind:
+      changePointMonth != null && r.month >= changePointMonth
+        ? "sustained_shift"
+        : r.residualPct > 0
+          ? "single_month_spike"
+          : "single_month_drop",
+  }));
+  if (changePointMonth) {
+    disclosures.push(
+      `Sustained shift detected from ${changePointMonth}: all subsequent months deviate >10% in the same direction — consistent with an operational or equipment change, not weather.`,
+    );
+  }
+  return { anomalies, changePointMonth, method: "caltrack_residual_10pct_v1", disclosures };
+}

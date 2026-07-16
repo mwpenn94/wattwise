@@ -22,6 +22,8 @@ import {
   intervalsToMonthly,
   normalsAsDailyTemps,
   archetypeBaseline,
+  detectResidualAnomalies,
+  AnomalyResult,
   BaselineFit,
   MonthNormalRow,
 } from "./baseline";
@@ -121,10 +123,14 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   const arch = await h.getArchetype(site.buildingType ?? "office", climateZone, vintageBand(site.vintage));
   if (arch) endUseFractions = arch.endUseFractions as Record<string, number>;
 
+  let anomalyResult: AnomalyResult | null = null;
   if (hasIntervals) {
     const monthly = intervalsToMonthly(points);
     const temps = normalsAsDailyTemps(monthly.map((m) => m.month), normals);
     baseline = fitCaltrackMonthly(monthly, temps, normals, { weatherIsNormalsProxy: true });
+    // A4: residual anomaly detection (>10% deviation from weather model +
+    // sustained change-point). Honest gates inside: needs valid fit + ≥6 months.
+    anomalyResult = detectResidualAnomalies(monthly, temps, baseline);
     // NILMTK gate (Cycle 4): <1-min data → regression_split at best, never nilmtk
     const resolutionMin = points[0]?.durationMin ?? 15;
     disaggMethod = resolutionMin < 1 ? "nilmtk_1min_plus" : "regression_split";
@@ -353,7 +359,41 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       metrics: { endUseFractions },
     });
   }
-  // Cycle 6 finding 13: free-tier solar teaser for high-resource zones
+  // A4: anomaly insights — sustained shift is a warning (operational change),
+  // isolated spikes/drops are informational. Only emitted when the detector
+  // actually ran (valid weather fit + ≥6 months), never from fallback fits.
+  if (anomalyResult && anomalyResult.anomalies.length > 0) {
+    const shift = anomalyResult.changePointMonth;
+    const spikes = anomalyResult.anomalies.filter((a) => a.kind === "single_month_spike");
+    const drops = anomalyResult.anomalies.filter((a) => a.kind === "single_month_drop");
+    const parts: string[] = [];
+    if (shift) {
+      const shiftMonths = anomalyResult.anomalies.filter((a) => a.kind === "sustained_shift");
+      const dir = shiftMonths[0] && shiftMonths[0].residualPct > 0 ? "above" : "below";
+      parts.push(
+        `Sustained shift since ${shift}: ${shiftMonths.length} consecutive month(s) run >10% ${dir} the weather-normalized model — consistent with an operational or equipment change rather than weather.`,
+      );
+    }
+    if (spikes.length > 0) parts.push(`${spikes.length} isolated month(s) spiked >10% above the model: ${spikes.map((a) => `${a.month} (+${(a.residualPct * 100).toFixed(0)}%)`).join(", ")}.`);
+    if (drops.length > 0) parts.push(`${drops.length} isolated month(s) fell >10% below the model: ${drops.map((a) => `${a.month} (${(a.residualPct * 100).toFixed(0)}%)`).join(", ")}.`);
+    insightRows.push({
+      siteId: site.id,
+      meterId: meter?.id ?? null,
+      analysisId,
+      kind: "anomaly",
+      title: shift
+        ? `Consumption change-point detected (${shift}) — usage shifted vs. weather model`
+        : `${anomalyResult.anomalies.length} month(s) deviate >10% from your weather-normalized baseline`,
+      body: `${parts.join(" ")} ${anomalyResult.disclosures.join(" ")}`,
+      severity: shift ? "warning" : "info",
+      disaggregationMethod: disaggMethod,
+      confidence: baseline && baseline.confidence === "high" ? "medium" : "low",
+      provenance: { method: anomalyResult.method, changePointMonth: shift },
+      metrics: { anomalies: anomalyResult.anomalies },
+    });
+  }
+
+  // Cycle 6 finding 13: free-tier solar teaser for high-solar-resource zones
   const highSolarZones = ["2B", "3B", "2A"];
   if (highSolarZones.includes(climateZone)) {
     insightRows.push({
