@@ -114,8 +114,13 @@ describe.skipIf(!hasFixture)("real-file pipeline E2E (Cantex)", () => {
   it("AC5: per-analysis marginal cost is instrumented and ≤ $0.20", async () => {
     expect(analysisId).toBeGreaterThan(0);
     const cap = await assertFreeTierCostCap(analysisId);
-    expect(cap.capUsd).toBeLessThanOrEqual(0.2);
+    // Batch-29 (passes 1030/1040): assert the ACTUAL incurred cost against the
+    // cap — the previous `cap.capUsd <= 0.2` line only re-checked the constant
+    // (a tautology). `cap.ok` already encodes totalUsd <= capUsd, but the
+    // relation is asserted explicitly so a regression in `ok`'s definition
+    // cannot silently weaken AC5.
     expect(cap.totalUsd).toBeGreaterThanOrEqual(0);
+    expect(cap.totalUsd).toBeLessThanOrEqual(cap.capUsd);
     expect(cap.ok).toBe(true); // template-only pipeline must stay within the cap
   }, 60_000);
 });

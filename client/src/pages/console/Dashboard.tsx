@@ -204,7 +204,9 @@ export default function Dashboard() {
           icon={<Activity className="h-4 w-4" />}
           label="Load factor"
           value={demand ? `${(demand.loadFactor * 100).toFixed(0)}%` : "—"}
-          sub={demand ? (demand.loadFactor < 0.4 ? "peaky — demand-charge exposure" : "reasonably flat") : ""}
+          /* Batch-29 (pass 1018): a low load factor implies demand-charge exposure
+             only on tariffs that HAVE demand charges — phrase conditionally. */
+          sub={demand ? (demand.loadFactor < 0.4 ? "peaky profile — costly if your tariff has demand charges" : "reasonably flat") : ""}
         />
         <Kpi
           icon={<BarChart3 className="h-4 w-4" />}

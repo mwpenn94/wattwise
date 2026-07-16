@@ -38,6 +38,11 @@ function solarHourlyShape(hourOfYear: number): number {
   return Math.sin(Math.PI * x) * seasonal;
 }
 
+/** Batch-29 (pass 1019): single named constant for the unmapped-zone fallback
+ * yield — the computation and the user-facing disclosure MUST cite the same
+ * number (a reviewer caught the disclosure text drifting from the literal). */
+export const SOLAR_FALLBACK_YIELD_KWH_PER_KW = 1500;
+
 /** True when the climate zone has a mapped PVWatts-typical yield. */
 export function solarZoneMapped(climateZone: string): boolean {
   return SOLAR_YIELD_BY_ZONE[climateZone] != null;
@@ -48,7 +53,7 @@ export function solarProduction8760(kwDc: number, climateZone: string): number[]
   // they already include standard system losses (~14%: soiling, wiring,
   // inverter, availability). Callers must NOT derate kwDc again
   // (deliverable convergence cycle 5: double-loss finding, 8 passes).
-  const annualYield = (SOLAR_YIELD_BY_ZONE[climateZone] ?? 1500) * kwDc;
+  const annualYield = (SOLAR_YIELD_BY_ZONE[climateZone] ?? SOLAR_FALLBACK_YIELD_KWH_PER_KW) * kwDc;
   const raw: number[] = new Array(8760);
   let sum = 0;
   for (let h = 0; h < 8760; h++) {
@@ -290,7 +295,7 @@ export function runScenario(
     );
     if (!solarZoneMapped(climateZone)) {
       disclosures.push(
-        `Climate zone "${climateZone}" has no mapped solar-yield entry — a generic 1,500 kWh/kW-yr default was used; treat solar production as low confidence.`,
+        `Climate zone "${climateZone}" has no mapped solar-yield entry — a generic ${SOLAR_FALLBACK_YIELD_KWH_PER_KW.toLocaleString()} kWh/kW-yr default was used; treat solar production as low confidence.`,
       );
     }
   }
