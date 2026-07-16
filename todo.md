@@ -1,0 +1,85 @@
+# WattWise Project TODO
+
+## Session A0 — Handoff convergence gate (UHOP v4)
+- [x] Adapt cold_context_review_runner to sandbox LLM proxy (protocol semantics preserved)
+- [x] Cycle 4: 5 confirmed-material findings integrated into HANDOFF.md
+- [x] Cycle 5: 25 findings → 12 items integrated (v1.5)
+- [x] Cycle 6/7: 38 + 2 findings adjudicated; spec fixes folded into code + doc (v1.6)
+- [ ] Reach 100 consecutive clean cold-context passes on HANDOFF.md (running in background; confirmed findings integrate + reset per protocol)
+
+## A1 — Schema + seeders
+- [x] Canonical 20-table schema with provenance fields (sites, meters, intervals, bills, tariffs, archetype_profiles, baselines, insights, opportunities, scenarios, analyses, emission_factors, benchmarks, seeder_runs, metering, audit_log, weather_stations, uploads, convergence_log, users)
+- [x] Idempotent versioned seeders: eGRID emission factors (31 rows incl. AZNM/CAMX/RMPA/ERCT)
+- [x] Seeder: URDB-style tariff snapshot — 13 tariffs (APS/SRP/TEP/UNS + gas/water) w/ TOU, demand, ratchet, CP topN=4, export rates, freshness flags
+- [x] Seeder: archetype load profiles (36 shapes, 8760 normalized + end-use fractions; prototype-archetype fallback)
+- [x] Seeder: EUI benchmark tables (19 building types)
+- [x] Seeder: weather normals (5 AZ stations, monthly HDD/CDD + TMY-shape hourly)
+- [x] Seeder run registry: versioned, idempotent, provenance-logged
+- [x] User data-export endpoint (account.exportData)
+
+## A2 — Ingestion engine
+- [x] Excel interval parser (multi-sheet, header scoring to row 25, yyyymmdd dates, raw float precision, footer exclusion) — BUILD-010.3 verbatim port
+- [x] CSV interval parser (BUILD-010.3 logic reuse)
+- [x] ESPI XML Green Button parser (XXE-safe)
+- [x] Bill image pipeline: LLM vision + confidence + manual-entry degradation; PDF → manual entry
+- [x] Dedupe invariant: (meter, ts, duration) unique + precedence + overlap-window resolution
+- [x] Unit normalization (kWh/kW, therms, gallons) — commodity-agnostic
+- [x] Timezone handling (America/Phoenix default; no-DST correctness for AZ)
+- [x] Upload security: size caps, magic-byte validation, formula scrub, XXE-safe, parse timeout
+- [x] Verified real interval files parse (Cantex 35k+ rows ±0.5% footer check, Lake Havasu, American Woodmark, hourly CSV)
+
+## A3 — Manual intake + hypothetical wizard
+- [x] Multi-step wizard: building type, size, vintage, climate zone, utility, occupancy
+- [x] archetype_synthetic baseline generation from archetype profiles
+- [x] prototype-archetype fallback labeling (exact string)
+- [x] Actual + hypothetical flow through identical scenario code path
+
+## A4 — Analytics engine
+- [x] Normalize & QC (gap flags, provenance, qcFlags on intervals)
+- [x] Weather match + normals ("normal-year basis" exact label, tested)
+- [x] Baseline: CalTRACK-style HDD/CDD balance-point grid-search regression + archetype_synthetic
+- [x] Demand analytics: monthly peaks, ratchet sub-module, load factor, heatmap, peak timestamps
+- [x] Disaggregation gated by disaggregation_method enum (archetype_prior_only default; never nilmtk on ≥1-min)
+- [x] Tariff optimization: eligibility filter + eligibilityNote, ratchet-aware re-pricing, CP proxy w/ "estimated — not ISO system peaks" verbatim (tested)
+- [x] Benchmarking: EUI percentile vs seeded medians
+- [x] Opportunity engine: ranked measures, $/yr, payback band, confidence
+- [x] Scenario engine: solar, battery (sequential dispatch disclosed), efficiency, EV, tariff switch — one code path
+- [x] Emissions: eGRID subregion factors + scenario CO₂e deltas
+- [ ] Anomaly detection: residuals >10% change-point detection (basic residual QC only — documented limitation)
+
+## A5 — Tier gating + unit economics
+- [x] Tier gating (free/plus/pro) on procedures; free site quota enforced (tested)
+- [x] Metering table for LLM/compute spend per account
+- [x] Free-tier LLM budget kill-switch → template-only degradation (tested)
+- [x] Per-analysis compute timeout (60s pipeline guard)
+- [x] ≤ $0.20 marginal cost instrumented + enforced in code (AC5 test passes)
+
+## A6 — Insights UI
+- [x] DashboardLayout sidebar navigation
+- [x] Interval chart with peak-preserving decimation (BUILD-010.3)
+- [x] Demand heatmap (hour × day)
+- [x] Cost breakdown panel
+- [x] Tariff comparison table
+- [x] Scenario builder + results view
+- [x] Opportunity list with confidence labels
+- [x] Benchmarking percentile card
+- [x] Emissions summary
+- [x] Modeled-estimates disclaimer + provenance labels throughout
+- [x] UHOP convergence log page (public + in-console)
+- [x] Landing page with upload/wizard entry points
+- [ ] Mobile responsiveness verification
+
+## Validation
+- [x] Vitest suite: 38 tests / 5 files (parsers on real files, ratchet math, tariff pricing, dedupe path, tier gating, metering, tenancy isolation)
+- [x] Fixed real bug found by tests: `usage` reserved word in interval upsert (TiDB)
+- [x] AC1: AZ commercial Excel upload → full insight suite incl. demand + rate check (pipeline E2E test)
+- [ ] AC2: hypothetical AZ office → rate comparison + solar + benchmarks (verify via live E2E)
+- [ ] AC3: water meter flows through with zero electric-specific changes (verify)
+- [ ] AC4: scenario parity measured vs hypothetical (verify)
+- [x] AC5: free-tier marginal cost ≤ $0.20 in metering table (tested)
+- [x] AC6: seeders idempotent/versioned/provenance-logged
+- [x] AC7: UHOP convergence log present and current
+- [x] AC8: 15-min disaggregation labeled archetype_prior_only/regression_split, never nilmtk
+- [ ] UHOP expert-lens convergence passes on deliverable
+- [ ] Live virtual-user E2E testing (Playwright) across personas
+- [ ] Session A0 series converged on HANDOFF.md
