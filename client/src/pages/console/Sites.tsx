@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { Building2, Plus, Zap } from "lucide-react";
 import { useLocation } from "wouter";
 import { ProvChip } from "@/components/Honesty";
+import QuickStart from "@/components/QuickStart";
 
 const BUILDING_TYPES = [
   ["single_family", "Single-family home"],
@@ -126,6 +127,10 @@ export default function Sites() {
             </Button>
           </DialogContent>
         </Dialog>
+      </div>
+
+      <div className="mt-6">
+        <QuickStart compact />
       </div>
 
       <div className="mt-6 grid gap-4 md:grid-cols-2">

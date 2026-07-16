@@ -17,6 +17,7 @@ import {
   TariffComparison,
   TariffStructure,
   inferClimateZone,
+  quickStartAssumptions,
 } from "../../shared/wattwise";
 import {
   fitCaltrackMonthly,
@@ -296,6 +297,35 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   /* ---------- stage 6: insights ---------- */
   const insightRows: Parameters<typeof h.replaceInsights>[1] = [];
   const dis = DISAGG_LANGUAGE[disaggMethod];
+
+  // Progressive participation (Jul 2026): quick-start sites run on DISCLOSED
+  // placeholder attributes. replaceInsights below wipes the creation-time
+  // disclosure, so the pipeline re-emits it on every run while placeholders
+  // remain in effect (attrSource still quick_start_defaults) — the assumption
+  // list also powers the dashboard's "add detail" chips.
+  if (site.attrSource === "quick_start_defaults") {
+    const qsParse = { raw: site.address ?? "", state: site.state, zip: site.zip, city: site.city };
+    const qsAssumptions = quickStartAssumptions(qsParse).filter(
+      // once real interval data exists, drop the interval-data assumption line
+      (a) => !(a.field === "intervalData" && hasIntervals),
+    );
+    insightRows.push({
+      siteId: site.id,
+      meterId: meter?.id ?? null,
+      analysisId,
+      kind: "intake_assumptions",
+      title: "Quick-start analysis — placeholder assumptions in effect",
+      body:
+        `This analysis uses disclosed quick-start placeholders: ` +
+        qsAssumptions.map((a) => `${a.field} → ${a.assumed}`).join("; ") +
+        `. Refine any field (optional) to replace its placeholder — each "add detail" chip shows what it unlocks.`,
+      severity: "info",
+      disaggregationMethod: disaggMethod,
+      confidence: "low",
+      provenance: { method: "quick_start_intake_v1", parsedState: site.state, parsedZip: site.zip },
+      metrics: { assumptions: qsAssumptions },
+    });
+  }
 
   if (annualizeBlocked) {
     insightRows.push({

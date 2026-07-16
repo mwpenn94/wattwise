@@ -91,9 +91,11 @@
 - [x] governance.test.ts: deterministic site-quota test (cap-aware, precise over-cap assertion) (pass 300)
 
 ## Progressive / flexible participation (user request, Jul 16)
-- [ ] Quick-start entry: user can begin with JUST an address (state/zip parsed, sensible defaults) or JUST a bill photo/file — no multi-form gate
-- [ ] Quick-win result: immediate partial analysis after minimal input, with assumption disclosures
-- [ ] Progressive refinement prompts: optional "add detail" chips showing what each unlocks — full forms remain for users who prefer them
-- [ ] Backend: sites.quickCreate accepting free-text address; defaults + assumption disclosures recorded
+- [x] Quick-start entry: user can begin with JUST an address (state/zip parsed, sensible defaults) or JUST a bill photo/file — no multi-form gate
+- [x] Quick-win result: immediate partial analysis after minimal input, with assumption disclosures
+- [x] Progressive refinement prompts: optional "add detail" chips showing what each unlocks — full forms remain for users who prefer them
+- [x] Backend: sites.quickCreate accepting free-text address; defaults + assumption disclosures recorded
 - [ ] HANDOFF spec: pin progressive-participation principle as Cycle 22 (intake UX + assumption honesty)
-- [ ] Tests for quickCreate defaults + disclosure presence
+- [x] Tests for quickCreate defaults + disclosure presence (8 vitest specs: parse, defaults, disclosure pre/post-analysis, refine flip, zone re-inference)
+- [x] Bill-only quick start: persist OCR output — prefilled review form saves a real bill record via bills.createForSite (lazy bill-entry meter)
+- [x] Bill-only quick start: honest disclosure that figures remain placeholder-based until the bill is confirmed/saved (skip path + post-save toasts)

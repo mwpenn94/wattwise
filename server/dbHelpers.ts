@@ -101,6 +101,19 @@ export async function createSite(data: typeof sites.$inferInsert) {
   return Number((res as unknown as [{ insertId: number }])[0].insertId);
 }
 
+/** Progressive participation: refine a quick-start site's attributes. Only the
+ *  provided fields change; attrSource flips to user_entered once the user has
+ *  supplied real values for the core placeholder fields. */
+export async function updateSite(
+  siteId: number,
+  userId: number,
+  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource">>,
+) {
+  await assertSiteOwner(siteId, userId);
+  const db = await requireDb();
+  await db.update(sites).set(patch).where(eq(sites.id, siteId));
+}
+
 export async function countSites(userId: number): Promise<number> {
   const db = await requireDb();
   const rows = await db.select({ n: sql<number>`COUNT(*)` }).from(sites).where(eq(sites.userId, userId));
@@ -328,6 +341,16 @@ export async function replaceInsights(siteId: number, rows: Array<typeof insight
   const db = await requireDb();
   await db.delete(insights).where(eq(insights.siteId, siteId));
   if (rows.length > 0) await db.insert(insights).values(rows);
+}
+
+/** Insert a single standalone insight row (quick-start assumption disclosures).
+ *  NOTE: replaceInsights wipes all site insights on each analysis run, so the
+ *  pipeline re-emits the intake-assumption insight itself when the site's
+ *  attrSource is quick_start_defaults — this helper covers the pre-analysis
+ *  window so the disclosure exists from the moment the site is created. */
+export async function addInsight(row: typeof insights.$inferInsert) {
+  const db = await requireDb();
+  await db.insert(insights).values(row);
 }
 
 export async function listInsights(siteId: number, userId: number) {

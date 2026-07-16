@@ -291,3 +291,123 @@ export function inferClimateZone(zip?: string, state?: string): string {
   if (state && STATE_ZONE[state.toUpperCase()]) return STATE_ZONE[state.toUpperCase()];
   return "4A"; // US-median fallback (mixed-humid), disclosed as inferred
 }
+
+/* ---------- Progressive participation: quick-start intake (Jul 2026) ----------
+ * A user may begin with NOTHING but a free-text address (or a bill photo).
+ * parseQuickAddress extracts what it honestly can (2-letter state, 5-digit ZIP,
+ * city guess) from free text with zero external geocoding calls, and
+ * QUICK_START_DEFAULTS supplies disclosed placeholder attributes so the
+ * archetype pipeline can produce an immediate quick-win analysis. Every
+ * defaulted field is enumerated in the returned assumption list so the UI and
+ * insights can disclose exactly what was assumed and what refining it unlocks.
+ * Multi-step forms remain available but are strictly optional refinements. */
+
+const US_STATE_CODES = new Set([
+  "AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN","IA",
+  "KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM",
+  "NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA",
+  "WV","WI","WY",
+]);
+
+export interface QuickAddressParse {
+  /** Original free text, trimmed. */
+  raw: string;
+  state: string | null;
+  zip: string | null;
+  /** Best-effort city guess (token before ", ST" pattern), may be null. */
+  city: string | null;
+}
+
+export function parseQuickAddress(freeText: string): QuickAddressParse {
+  const raw = freeText.trim().replace(/\s+/g, " ");
+  // ZIP: last 5-digit (optionally ZIP+4) group in the string.
+  const zipMatches = raw.match(/\b(\d{5})(?:-\d{4})?\b(?!.*\b\d{5}\b)/);
+  const zip = zipMatches ? zipMatches[1] : null;
+  // State: 2-letter token that is a real USPS code, preferring the one
+  // immediately before the ZIP, else the last standalone match.
+  let state: string | null = null;
+  const tokenRe = /\b([A-Za-z]{2})\b/g;
+  let m: RegExpExecArray | null;
+  const candidates: Array<{ code: string; index: number }> = [];
+  while ((m = tokenRe.exec(raw)) !== null) {
+    const code = m[1].toUpperCase();
+    if (US_STATE_CODES.has(code)) candidates.push({ code, index: m.index });
+  }
+  if (candidates.length > 0) {
+    if (zip != null) {
+      const zipIdx = raw.indexOf(zip);
+      const before = candidates.filter((c) => c.index < zipIdx);
+      state = (before.length > 0 ? before[before.length - 1] : candidates[candidates.length - 1]).code;
+    } else {
+      state = candidates[candidates.length - 1].code;
+    }
+  }
+  // City guess: the comma-separated segment right before the state token.
+  let city: string | null = null;
+  if (state) {
+    const cityRe = new RegExp(`([A-Za-z .'-]{2,40}),?\\s+${state}\\b`, "i");
+    const cm = raw.match(cityRe);
+    if (cm) {
+      const seg = cm[1].split(",").pop()?.trim() ?? "";
+      // discard segments that look like street lines (start with a number)
+      if (seg && !/^\d/.test(seg)) city = seg;
+    }
+  }
+  return { raw, state, zip, city };
+}
+
+/** Disclosed placeholder attributes used ONLY for the quick-start first pass. */
+export const QUICK_START_DEFAULTS = {
+  buildingType: "office",
+  sqft: 10_000,
+  vintage: 2000,
+} as const;
+
+export interface QuickStartAssumption {
+  field: string;
+  assumed: string;
+  /** What providing the real value unlocks — surfaced on "add detail" chips. */
+  unlocks: string;
+}
+
+/** Build the honest assumption list for a quick-start site given what the
+ *  address parse actually recovered. */
+export function quickStartAssumptions(parse: QuickAddressParse): QuickStartAssumption[] {
+  const a: QuickStartAssumption[] = [
+    {
+      field: "buildingType",
+      assumed: `${QUICK_START_DEFAULTS.buildingType} (placeholder)`,
+      unlocks: "Correct building type re-selects the peer archetype load shape and the EUI benchmark peer group.",
+    },
+    {
+      field: "sqft",
+      assumed: `${QUICK_START_DEFAULTS.sqft.toLocaleString()} sqft (placeholder)`,
+      unlocks: "Real floor area scales the synthetic baseline and makes the EUI benchmark percentile meaningful.",
+    },
+    {
+      field: "vintage",
+      assumed: `built ~${QUICK_START_DEFAULTS.vintage} (placeholder)`,
+      unlocks: "Actual vintage picks the correct archetype efficiency band.",
+    },
+    {
+      field: "intervalData",
+      assumed: "none — synthetic archetype profile in use",
+      unlocks: "Uploading an interval file replaces every synthetic figure with measured demand analytics, real tariff re-pricing, and anomaly detection.",
+    },
+  ];
+  if (!parse.state) {
+    a.unshift({
+      field: "state",
+      assumed: "unknown — US-median climate assumptions applied",
+      unlocks: "A state (or full address) selects your climate zone, timezone, and the tariffs swept for the rate check.",
+    });
+  }
+  if (!parse.zip) {
+    a.push({
+      field: "zip",
+      assumed: parse.state ? `state-level climate/emissions defaults for ${parse.state}` : "US-median climate + emissions defaults",
+      unlocks: "A ZIP refines the climate zone and selects the correct eGRID emissions subregion.",
+    });
+  }
+  return a;
+}

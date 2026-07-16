@@ -13,6 +13,9 @@ import {
   SOLAR_DISCLOSURE,
   BATTERY_DISCLOSURE,
   inferClimateZone,
+  parseQuickAddress,
+  quickStartAssumptions,
+  QUICK_START_DEFAULTS,
   type TariffStructure,
 } from "@shared/wattwise";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -109,6 +112,95 @@ export const appRouter = router({
       await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name, hypothetical: input.isHypothetical });
       return { id };
     }),
+    /** Progressive participation (Jul 2026): start with NOTHING but a free-text
+     *  address. State/ZIP/city are parsed from the text; every other attribute
+     *  is a DISCLOSED placeholder (attrSource=quick_start_defaults) so the
+     *  archetype pipeline can produce an immediate quick-win analysis. An
+     *  intake-assumptions insight is written at creation time enumerating each
+     *  assumption and what refining it unlocks — forms are optional refinements,
+     *  never a gate. */
+    quickCreate: protectedProcedure
+      .input(z.object({ address: z.string().min(3).max(1000), name: z.string().max(255).optional() }))
+      .mutation(async ({ ctx, input }) => {
+        await seeded();
+        const tier = tierOf(ctx.user);
+        const parse = parseQuickAddress(input.address);
+        const assumptions = quickStartAssumptions(parse);
+        const id = await h.withUserQuotaLock(ctx.user.id, async () => {
+          if (tier === "free") {
+            const n = await h.countSites(ctx.user.id);
+            if (n >= FREE_TIER_MAX_SITES) {
+              throw new TRPCError({ code: "FORBIDDEN", message: `Free tier is limited to ${FREE_TIER_MAX_SITES} sites. Upgrade to add more.` });
+            }
+          }
+          return h.createSite({
+            userId: ctx.user.id,
+            name: input.name?.trim() || (parse.city ? `${parse.city} building` : parse.raw.slice(0, 60) || "My building"),
+            address: parse.raw,
+            city: parse.city,
+            state: parse.state,
+            zip: parse.zip,
+            buildingType: QUICK_START_DEFAULTS.buildingType,
+            sqft: QUICK_START_DEFAULTS.sqft,
+            vintage: QUICK_START_DEFAULTS.vintage,
+            climateZone: inferClimateZone(parse.zip ?? undefined, parse.state ?? undefined),
+            isHypothetical: false,
+            attrSource: "quick_start_defaults",
+          });
+        });
+        // Disclosure exists from the moment the site does — before any analysis.
+        await h.addInsight({
+          siteId: id,
+          kind: "intake_assumptions",
+          title: "Quick-start analysis — placeholder assumptions in effect",
+          body:
+            `This site was created from just an address. The first analysis uses disclosed placeholders: ` +
+            assumptions.map((a) => `${a.field} → ${a.assumed}`).join("; ") +
+            `. Each "add detail" chip on the dashboard shows exactly what refining a field unlocks. ${MODELED_ESTIMATES_DISCLAIMER}`,
+          severity: "info",
+          confidence: "low",
+          provenance: { method: "quick_start_intake_v1", parsedState: parse.state, parsedZip: parse.zip },
+          metrics: { assumptions },
+        });
+        await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name ?? parse.raw.slice(0, 60), quickStart: true });
+        return { id, parse, assumptions };
+      }),
+    /** Optional refinement path for quick-start sites — each supplied field
+     *  replaces its placeholder; attrSource flips to user_entered once any core
+     *  attribute (buildingType/sqft/vintage) is provided by the user. */
+    refine: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          buildingType: z.string().max(64).optional(),
+          sqft: z.number().positive().max(50_000_000).optional(),
+          vintage: z.number().int().min(1850).max(2030).optional(),
+          occupancyHours: z.record(z.string(), z.unknown()).optional(),
+          utilityName: z.string().max(128).optional(),
+          state: z.string().max(8).optional(),
+          zip: z.string().max(16).optional(),
+          name: z.string().min(1).max(255).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        const { siteId, ...patch } = input;
+        const provided = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+        if (Object.keys(provided).length === 0) return { ok: true as const, updated: [] as string[] };
+        const coreProvided = ["buildingType", "sqft", "vintage"].some((k) => k in provided);
+        const nextState = (provided.state as string | undefined) ?? site.state ?? undefined;
+        const nextZip = (provided.zip as string | undefined) ?? site.zip ?? undefined;
+        await h.updateSite(siteId, ctx.user.id, {
+          ...provided,
+          // re-infer zone when location changed and zone was never user-set
+          ...((provided.state || provided.zip) && site.attrSource !== "user_entered"
+            ? { climateZone: inferClimateZone(nextZip, nextState) }
+            : {}),
+          ...(coreProvided && site.attrSource === "quick_start_defaults" ? { attrSource: "user_entered" } : {}),
+        });
+        await h.audit(ctx.user.id, "site_refined", "site", String(siteId), { fields: Object.keys(provided) });
+        return { ok: true as const, updated: Object.keys(provided) };
+      }),
     meters: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
       return h.listMeters(input.siteId, ctx.user.id);
     }),
@@ -355,6 +447,57 @@ export const appRouter = router({
           ctx.user.id,
         );
         return { id };
+      }),
+    /** Progressive participation (Jul 2026): persist a bill against a SITE that
+     *  may not have a meter yet (quick-start bill-first entry). Lazily creates
+     *  a bill-entry meter so OCR output is never discarded. */
+    createForSite: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          periodStart: z.string(),
+          periodEnd: z.string(),
+          totalUsage: z.number(),
+          usageUnit: z.string().max(16).default("kWh"),
+          billedDemandKw: z.number().nullable().optional(),
+          totalCostUsd: z.number(),
+          source: z.enum(["manual", "parsed_pdf", "parsed_image"]).default("parsed_image"),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        const meters = await h.listMeters(input.siteId, ctx.user.id);
+        let meter = meters.find((m) => m.commodity === "electric") ?? meters[0] ?? null;
+        if (!meter) {
+          const meterId = await h.createMeter(
+            {
+              siteId: input.siteId,
+              userId: ctx.user.id,
+              commodity: "electric",
+              label: "Bill entry",
+              usageUnit: input.usageUnit,
+              demandUnit: "kW",
+              timezone: tzForState(site.state),
+            },
+            ctx.user.id,
+          );
+          meter = (await h.listMeters(input.siteId, ctx.user.id)).find((m) => m.id === meterId)!;
+        }
+        const id = await h.createBill(
+          {
+            meterId: meter.id,
+            periodStart: new Date(input.periodStart),
+            periodEnd: new Date(input.periodEnd),
+            usage: input.totalUsage,
+            demandBilled: input.billedDemandKw ?? null,
+            demandBilledSource: input.billedDemandKw != null ? "parsed_bill" : null,
+            totalCost: input.totalCostUsd,
+            source: input.source,
+          },
+          ctx.user.id,
+        );
+        await h.audit(ctx.user.id, "bill_created", "bill", String(id), { siteId: input.siteId, quickStart: true });
+        return { id, meterId: meter.id };
       }),
   }),
 

@@ -16,6 +16,8 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { Activity, BarChart3, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown } from "lucide-react";
 import { decimateForChart, fmtNum, fmtUsd, type ChartPoint } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
+import QuickStart from "@/components/QuickStart";
+import RefineChips from "@/components/RefineChips";
 import { Link, useSearch } from "wouter";
 
 type Demand = {
@@ -125,20 +127,25 @@ export default function Dashboard() {
         <Activity className="mx-auto h-10 w-10 text-muted-foreground" />
         <h1 className="mt-4 font-display text-2xl font-bold">Welcome to WattWise</h1>
         <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-          Start by creating a site and uploading interval data — or model a fully hypothetical building with no meter data
-          at all.
+          The fastest start needs only an address — or a bill photo. Detailed forms exist too, but they are always
+          optional.
         </p>
-        <div className="mt-6 flex justify-center gap-3">
+        <div className="mt-6 text-left">
+          <QuickStart />
+        </div>
+        <div className="mt-5 flex justify-center gap-3">
           <Link href="/app/sites">
-            <Button>Create a site</Button>
+            <Button variant="outline">Full site form</Button>
           </Link>
           <Link href="/app/wizard">
-            <Button variant="outline">Hypothetical building</Button>
+            <Button variant="outline">Guided wizard</Button>
           </Link>
         </div>
       </div>
     );
   }
+
+  const activeSite = (sites.data ?? []).find((s) => s.id === activeSiteId) ?? null;
 
   return (
     <div className="container max-w-6xl py-8">
@@ -169,6 +176,12 @@ export default function Dashboard() {
       <div className="mt-4">
         <DisclaimerBanner />
       </div>
+
+      {/* Progressive participation: optional add-detail chips while quick-start
+          placeholders remain in effect — each names what refining unlocks. */}
+      {activeSite?.attrSource === "quick_start_defaults" && activeSiteId != null && (
+        <RefineChips siteId={activeSiteId} onRefined={() => run.mutate({ siteId: activeSiteId })} />
+      )}
 
       {latest.data == null && !latest.isLoading && (
         <Card className="mt-6 border-dashed">
