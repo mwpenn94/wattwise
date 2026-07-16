@@ -120,7 +120,11 @@ export async function monthToDateLlmSpend(userId: number): Promise<number> {
  * manual-entry prompt.
  */
 export async function llmBudgetAllows(userId: number, tier: string, estimatedCallCostUsd = 0.02): Promise<boolean> {
-  if (tier !== "free") return true;
+  // Batch-28 (pass 997): explicit allowlist of KNOWN paid tiers instead of
+  // `tier !== "free"` — a malformed or unrecognized tier string must fail
+  // CLOSED into the free-tier budget check rather than silently bypassing all
+  // LLM cost enforcement. Keep in sync with the Tier union in server/routers.ts.
+  if (tier === "plus" || tier === "pro") return true;
   const mtd = await monthToDateLlmSpend(userId);
   return mtd + estimatedCallCostUsd <= FREE_TIER_MONTHLY_LLM_BUDGET_USD;
 }

@@ -521,7 +521,12 @@ function Kpi({ icon, label, value, sub }: { icon: React.ReactNode; label: string
 
 function Heatmap({ grid }: { grid: number[][] }) {
   const flat = grid.flat().filter((v) => v > 0);
-  const max = Math.max(...flat, 0.001);
+  // Batch-28 (pass 998): use the TRUE data maximum — the previous
+  // `Math.max(...flat, 0.001)` floor inflated max above tiny-but-real values
+  // (grids where every cell < 0.001 kW), which clipped legitimate readings to
+  // zero intensity and rendered real demand as absent. Empty grids take the
+  // explicit empty-state branch below; uniform grids the fixed mid intensity.
+  const max = flat.length ? Math.max(...flat) : 0;
   const min = flat.length ? Math.min(...flat) : 0;
   // Pass-458: when every non-zero cell shares one value (max === min), the
   // normalized intensity collapses to 0 and the whole heatmap renders as
