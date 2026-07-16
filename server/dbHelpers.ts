@@ -40,6 +40,30 @@ async function requireDb() {
   return db;
 }
 
+/**
+ * Batch-13 (passes 56/76/86/95): serialize quota check-then-create sequences
+ * per user with a MySQL named lock so concurrent requests cannot all pass a
+ * count-based free-tier check before any row is inserted (sites, uploads,
+ * scenarios). The 5s wait bound keeps pile-ups from becoming timeout cascades;
+ * GET_LOCK is released in finally and auto-releases if the session dies.
+ */
+export async function withUserQuotaLock<T>(userId: number, fn: () => Promise<T>): Promise<T> {
+  const db = await requireDb();
+  const lockName = `ww:quota:${userId}`;
+  const got = await db.execute(sql`SELECT GET_LOCK(${lockName}, 5) AS ok`);
+  const rows = (got as unknown as [Array<{ ok: number | string | null }>])[0];
+  if (Number(rows?.[0]?.ok) !== 1) throw new Error("Could not acquire quota lock; please retry");
+  try {
+    return await fn();
+  } finally {
+    try {
+      await db.execute(sql`SELECT RELEASE_LOCK(${lockName})`);
+    } catch {
+      /* auto-released when the session ends; never mask fn()'s outcome */
+    }
+  }
+}
+
 /* ---------------- tenancy assertions ---------------- */
 export async function assertSiteOwner(siteId: number, userId: number) {
   const db = await requireDb();

@@ -36,21 +36,29 @@ export interface DemandAnalytics {
 
 export function computeDemandAnalytics(points: IntervalPoint[], cpTopN = 4, cpSeasonMonths: number[] = [6, 7, 8, 9], tz: string = DEFAULT_TZ): DemandAnalytics | null {
   const withDemand = points
-    .map((p) => ({ ts: p.ts, kw: p.demand ?? (p.durationMin > 0 ? (p.usage * 60) / p.durationMin : 0) }))
+    .map((p) => ({ ts: p.ts, kw: p.demand ?? (p.durationMin > 0 ? (p.usage * 60) / p.durationMin : 0), durationMin: p.durationMin }))
     .filter((p) => Number.isFinite(p.kw));
   if (withDemand.length < 10) return null;
 
   let peakKw = -Infinity;
   let peakTimestamp = 0;
-  let sum = 0;
+  // Batch-13 (pass 61): DURATION-WEIGHTED average — with mixed interval lengths
+  // (e.g. 15-min data plus hourly data after a meter swap) a simple per-reading
+  // mean skews toward whichever granularity contributes more rows. Weighting by
+  // interval duration yields the true time-averaged demand, keeping loadFactor
+  // ≡ avg/peak physically meaningful.
+  let weightedSum = 0;
+  let weightMin = 0;
   for (const p of withDemand) {
     if (p.kw > peakKw) {
       peakKw = p.kw;
       peakTimestamp = p.ts;
     }
-    sum += p.kw;
+    const w = p.durationMin > 0 ? p.durationMin : 1;
+    weightedSum += p.kw * w;
+    weightMin += w;
   }
-  const avgKw = sum / withDemand.length;
+  const avgKw = weightMin > 0 ? weightedSum / weightMin : 0;
 
   const sorted = [...withDemand].sort((a, b) => b.kw - a.kw);
   // True top decile (10%) of interval demand readings; capped at 50 points for display/transport.
@@ -339,6 +347,27 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       cp = avgCpKw * structure.cp.ratePerKw * cpMonths;
       cpMethodology = "cp_proxy_top_n_customer_peaks";
       cpTopNApplied = topN;
+      // Batch-13 (pass 62): fold the CP $/kW-month charge into monthlyCosts so
+      // Σ(monthly totals) reconciles with breakdown.total — a UI summing the
+      // monthly rows must never disagree with the annual figure. The determinant
+      // is billed per month; allocate one month's CP charge to each covered
+      // month (all months when chargeMonths spans the year, else spread across
+      // the months actually present, capped at cpMonths).
+      const cpPerMonth = avgCpKw * structure.cp.ratePerKw;
+      const cpMonthsBilled = Math.min(cpMonths, monthlyCosts.length);
+      let cpAllocated = 0;
+      for (let i = 0; i < monthlyCosts.length && i < cpMonthsBilled; i++) {
+        monthlyCosts[i].demand += cpPerMonth;
+        monthlyCosts[i].total += cpPerMonth;
+        cpAllocated += cpPerMonth;
+      }
+      // Remainder (cpMonths beyond the data span) stays in the annual cp figure
+      // and is disclosed — it cannot be attributed to a month with no data.
+      if (cpAllocated < cp - 0.005) {
+        disclosures.push(
+          `CP charge spans ${cpMonths} billing months but only ${cpMonthsBilled} months of data are present — monthly rows include ${cpMonthsBilled} month(s) of CP charges; the annual total includes the full ${cpMonths}-month determinant.`,
+        );
+      }
       disclosures.push(
         `CP/4CP charge uses your top-${topN} seasonal customer peaks as proxy coincident peaks (${LABEL_CP_ESTIMATED}), billed as a $/kW-month determinant over ${cpMonths} months. Actual ISO/utility CP timing may differ materially.`,
       );
@@ -367,6 +396,9 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     breakdown: {
       energy: energyTotal,
       demand: demandTotal,
+      // Batch-13 (pass 62, minor): `fixed` is fixedMonthly × months-with-data
+      // (the covered span), not a calendar-year annualization — callers that
+      // annualize must scale by data coverage (annualize() does).
       fixed: fixedTotal,
       cp,
       cpMethodology,

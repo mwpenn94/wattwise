@@ -213,6 +213,14 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       utilityTariffs[0] ??
       sweep[0];
     if (basis) currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz });
+    // Batch-13 (pass 60): when the LAST-RESORT basis (first same-utility rate,
+    // possibly ineligible) is used, every downstream dollar figure is priced on
+    // a rate the customer may not qualify for — disclose it, never silently.
+    if (basis && !current && !isElig(basis) && currentCost) {
+      currentCost.disclosures.push(
+        "No rate in the seeded tariff snapshot is eligible for this site's sector/size — baseline costs use the nearest available rate as a reference only. Assign your actual tariff for accurate figures.",
+      );
+    }
     const basisTariffId = basis?.id ?? null;
 
     const currentTotal = currentCost?.breakdown.total ?? 0;
@@ -590,11 +598,18 @@ function vintageBand(vintage: number | null): string {
 
 function hourlyPoints(hourly: number[], refYear = 2025): IntervalPoint[] {
   const start = new Date(refYear, 0, 1).getTime();
+  // Batch-13 (pass 63, adjudicated): for 60-minute intervals, kWh-per-hour and
+  // average kW are numerically identical (kW = kWh × 60 / 60), so demand = usage
+  // is exact — not an approximation. If synthetic resolution ever changes,
+  // demand must become usage × 60 / durationMin.
   return hourly.map((usage, hIdx) => ({ ts: start + hIdx * 3600_000, durationMin: 60, usage, demand: usage }));
 }
 
 function annualize(points: IntervalPoint[]): number | null {
   if (points.length === 0) return null;
+  // Batch-13 (pass 59): import-only sum — negative (export) intervals are
+  // excluded so annualized CONSUMPTION isn't understated for solar sites; this
+  // matches the benchmark definition (site EUI uses gross consumption).
   const total = points.reduce((a, p) => a + Math.max(0, p.usage), 0);
   const spanMs = points[points.length - 1].ts + points[points.length - 1].durationMin * 60000 - points[0].ts;
   const spanDays = spanMs / 86_400_000;

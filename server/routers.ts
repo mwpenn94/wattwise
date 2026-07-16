@@ -90,17 +90,21 @@ export const appRouter = router({
     }),
     create: protectedProcedure.input(siteInput).mutation(async ({ ctx, input }) => {
       const tier = tierOf(ctx.user);
-      if (tier === "free") {
-        const n = await h.countSites(ctx.user.id);
-        if (n >= FREE_TIER_MAX_SITES) {
-          throw new TRPCError({ code: "FORBIDDEN", message: `Free tier is limited to ${FREE_TIER_MAX_SITES} sites. Upgrade to add more.` });
+      // Batch-13 (passes 56/76/86/95): count-then-create runs under a per-user
+      // named lock so concurrent requests cannot all pass the free-tier check.
+      const id = await h.withUserQuotaLock(ctx.user.id, async () => {
+        if (tier === "free") {
+          const n = await h.countSites(ctx.user.id);
+          if (n >= FREE_TIER_MAX_SITES) {
+            throw new TRPCError({ code: "FORBIDDEN", message: `Free tier is limited to ${FREE_TIER_MAX_SITES} sites. Upgrade to add more.` });
+          }
         }
-      }
-      const id = await h.createSite({
-        ...input,
-        userId: ctx.user.id,
-        climateZone: input.climateZone ?? inferClimateZone(input.zip, input.state),
-        attrSource: "user_entered",
+        return h.createSite({
+          ...input,
+          userId: ctx.user.id,
+          climateZone: input.climateZone ?? inferClimateZone(input.zip, input.state),
+          attrSource: "user_entered",
+        });
       });
       await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name, hypothetical: input.isHypothetical });
       return { id };
@@ -133,12 +137,6 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         await seeded();
         const tier = tierOf(ctx.user);
-        if (tier === "free") {
-          const n = await h.countUploadsThisMonth(ctx.user.id);
-          if (n >= FREE_TIER_MAX_UPLOADS_PER_MONTH) {
-            throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_MAX_UPLOADS_PER_MONTH} uploads/month.` });
-          }
-        }
         const site = await h.getSite(input.siteId, ctx.user.id);
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
@@ -158,15 +156,26 @@ export const appRouter = router({
         }
 
         const t0 = Date.now();
-        const uploadId = await h.createUpload({
-          userId: ctx.user.id,
-          siteId: input.siteId,
-          filename: input.filename,
-          sha256,
-          format: input.format,
-          parser: verifiedFormat === "xlsx" ? "excel_build0103" : verifiedFormat === "csv" ? "csv_build0103" : "espi_xml",
-          parserVersion: PARSER_VERSION,
-          status: "pending",
+        // Batch-13 (passes 56/76/86/95): the monthly-quota count and the upload-row
+        // insert run under a per-user named lock so concurrent requests cannot all
+        // pass the count check before any row exists.
+        const uploadId = await h.withUserQuotaLock(ctx.user.id, async () => {
+          if (tier === "free") {
+            const n = await h.countUploadsThisMonth(ctx.user.id);
+            if (n >= FREE_TIER_MAX_UPLOADS_PER_MONTH) {
+              throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_MAX_UPLOADS_PER_MONTH} uploads/month.` });
+            }
+          }
+          return h.createUpload({
+            userId: ctx.user.id,
+            siteId: input.siteId,
+            filename: input.filename,
+            sha256,
+            format: input.format,
+            parser: verifiedFormat === "xlsx" ? "excel_build0103" : verifiedFormat === "csv" ? "csv_build0103" : "espi_xml",
+            parserVersion: PARSER_VERSION,
+            status: "pending",
+          });
         });
 
         // Store raw file in S3 (source of truth for re-parse). Cycle 3, pass 55:
@@ -440,6 +449,9 @@ export const appRouter = router({
         const tier = tierOf(ctx.user);
         // Tier gates: solar/battery modeling = Plus features (free teaser insight only)
         if (["solar", "battery", "solar_battery"].includes(input.kind)) requireTier(tier, "plus", "Solar/battery scenario modeling");
+        // Batch-13: fast-fail pre-check only; the authoritative quota check runs
+        // under the per-user lock at save time (see below) so concurrent runs
+        // cannot all pass a count taken before any row exists.
         if (tier === "free") {
           const n = await h.countScenariosThisMonth(ctx.user.id);
           if (n >= FREE_TIER_SCENARIOS_PER_MONTH) {
@@ -475,17 +487,25 @@ export const appRouter = router({
         } else {
           (results.assumptions as Record<string, unknown>).ratchetConfidence = "measured";
         }
-        const id = await h.saveScenario({
-          siteId: site.id,
-          userId: ctx.user.id,
-          name: input.name,
-          transform: input.kind === "solar" ? "solar" : input.kind === "battery" || input.kind === "solar_battery" ? "battery_peak_shave" : input.kind === "efficiency" ? "led_equipment" : "ev_charging",
-          params: scenarioInput as unknown as Record<string, unknown>,
-          loadBasis,
-          results: results as unknown as Record<string, unknown>,
-          status: "complete",
-          confidenceLabel: results.confidenceLabel,
-          extrapolated: results.extrapolated,
+        const id = await h.withUserQuotaLock(ctx.user.id, async () => {
+          if (tier === "free") {
+            const n = await h.countScenariosThisMonth(ctx.user.id);
+            if (n >= FREE_TIER_SCENARIOS_PER_MONTH) {
+              throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_SCENARIOS_PER_MONTH} scenario runs/month.` });
+            }
+          }
+          return h.saveScenario({
+            siteId: site.id,
+            userId: ctx.user.id,
+            name: input.name,
+            transform: input.kind === "solar" ? "solar" : input.kind === "battery" || input.kind === "solar_battery" ? "battery_peak_shave" : input.kind === "efficiency" ? "led_equipment" : "ev_charging",
+            params: scenarioInput as unknown as Record<string, unknown>,
+            loadBasis,
+            results: results as unknown as Record<string, unknown>,
+            status: "complete",
+            confidenceLabel: results.confidenceLabel,
+            extrapolated: results.extrapolated,
+          });
         });
         await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0, tier });
         await h.audit(ctx.user.id, "scenario_run", "scenario", String(id), { kind: input.kind, siteId: site.id });
