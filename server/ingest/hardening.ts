@@ -83,12 +83,17 @@ export function rejectXxe(xmlText: string): { ok: boolean; reason?: string } {
  * dangerous (leading tab) yet exempt (trims to numeric) and was returned
  * unscrubbed with the tab intact; a genuinely numeric cell with incidental
  * whitespace is now returned trimmed, and non-numeric dangerous values are
- * scrubbed on the trimmed form. */
+ * scrubbed on the trimmed form.
+ * Batch-34 (pass 1275): leading single-quote added to the danger class —
+ * a value like "'=SUM(1,1)" previously passed unscrubbed; spreadsheet apps
+ * treat a leading ' as a formula-escape prefix, but some downstream CSV
+ * consumers strip it before evaluation, re-arming the payload. Quoting it
+ * again ("''=...") keeps the literal rendering safe everywhere. */
 export function scrubCell(value: string): string {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   const isNumeric = /^-?\d+(\.\d+)?$/.test(trimmed);
-  if (/^[=+\-@\t\r]/.test(trimmed) && !isNumeric) {
+  if (/^[=+\-@\t\r']/.test(trimmed) && !isNumeric) {
     return "'" + trimmed;
   }
   // Leading whitespace can itself hide a dangerous prefix from naive consumers

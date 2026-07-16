@@ -188,7 +188,14 @@ export function fitCaltrackMonthly(
   // Batch-18 (pass 421): when coverage (<9 months) is WHY confidence is low, the
   // label must say so — a good-looking R² with a vague "extrapolated" suffix let
   // customers read a thin fit as reliable. Name the causal reason explicitly.
-  const extrap = coverage < 9 ? ` — low confidence because only ${coverage} months of data (needs ≥9); annualized figures are extrapolated beyond observed coverage` : "";
+  // Batch-34 (pass 1301): the same causal-reason rule applies when a WEAK FIT
+  // is the driver — with coverage ≥9 but R²<0.5 the label previously carried no
+  // reason at all, inviting the wrong inference that coverage was the issue.
+  const reasons: string[] = [];
+  if (coverage < 9) reasons.push(`only ${coverage} months of data (needs ≥9); annualized figures are extrapolated beyond observed coverage`);
+  if (fit.r2 < 0.5) reasons.push(`weather model fit is weak (R²=${fit.r2.toFixed(2)}, needs ≥0.5) — usage is not well explained by temperature`);
+  else if (fit.r2 < 0.7 && confidence !== "high") reasons.push(`moderate fit (R²=${fit.r2.toFixed(2)} < 0.7 needed for high confidence)`);
+  const extrap = confidence !== "high" && reasons.length > 0 ? ` — ${confidence} confidence because ${reasons.join("; ")}` : "";
   return {
     method: "caltrack_monthly",
     coefficients: {

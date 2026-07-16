@@ -273,8 +273,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         ineligibleReason: elig.reason,
         annualCost: cost?.breakdown ?? { energy: 0, demand: 0, fixed: 0, cp: null, cpMethodology: "cp_omitted_no_interval_data", total: 0 },
         savingsVsCurrent: cost ? currentTotal - cost.breakdown.total : 0,
-        eligibilityNote:
-          "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.",
+        // Batch-34 (pass 1279): when the platform already KNOWS the rate is
+        // ineligible, telling the user to "confirm final eligibility" was
+        // contradictory — the specific reason replaces the generic caveat.
+        eligibilityNote: elig.reason
+          ? `Ineligible: ${elig.reason}`
+          : "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.",
       });
     }
     // Cycle 5: stale demotion — fresh/verified rank above stale at equal savings.
@@ -618,14 +622,18 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       key: "rate_switch",
       title: `Rate switch: ${bestSwitch.tariffName}`,
       category: "tariff",
-      annualSavingsUsdLo: bestSwitch.savingsVsCurrent * 0.6,
+      // Batch-34 (pass 1269): a rate switch is a deterministic repricing of the
+      // measured load — the old 0.6 haircut on the lower bound misrepresented a
+      // computed figure as uncertain. Both bounds now equal the repriced savings;
+      // the residual (future load drift) is disclosed in the rationale instead.
+      annualSavingsUsdLo: bestSwitch.savingsVsCurrent,
       annualSavingsUsdHi: bestSwitch.savingsVsCurrent,
       capexBand: "none",
       confidence: bestSwitch.freshness === "urdb_stale" ? "low" : "medium",
       rationale:
         bestSwitch.freshness === "urdb_stale"
           ? "Rate data unverified — structure may have changed; verify current rates with your utility before switching."
-          : "Re-priced your actual load profile on this tariff's published structure.",
+          : "Re-priced your actual load profile on this tariff's published structure — exact for the observed period; assumes your load pattern repeats.",
       disclosures: [MODELED_ESTIMATES_DISCLAIMER],
     });
   }
