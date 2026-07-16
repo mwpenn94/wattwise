@@ -248,9 +248,10 @@ export function runScenario(
   const deltaCost = scenCost.breakdown.total - baseCost.breakdown.total; // negative = savings
   // emissions: grid CO2e on net consumption (exports credited at grid average — disclosed)
   const deltaCo2eLb = (deltaUsage / 1000) * co2eLbPerMwh;
-  if (deltaUsage < 0) {
-    disclosures.push("Emissions deltas use annual-average grid intensity (eGRID subregion) — marginal/hourly intensity differs.");
-  }
+  // Cycle 6 (pass 313): the annual-average limitation applies regardless of the
+  // delta's sign — increased consumption may coincide with high-marginal-intensity
+  // peaker dispatch just as decreases may — so the disclosure is unconditional.
+  disclosures.push("Emissions deltas use annual-average grid intensity (eGRID subregion) — marginal/hourly intensity differs.");
 
   const basePeak = Math.max(...baselineHourly);
   const scenPeak = Math.max(...hourly);

@@ -144,6 +144,11 @@ export const appRouter = router({
         const buf = Buffer.from(input.contentBase64, "base64");
         const gate = preParseGate(buf, input.format);
         if (!gate.ok) throw new TRPCError({ code: "BAD_REQUEST", message: gate.reason ?? "File rejected" });
+        // Parser routing is based on the gate-verified DETECTED content type, not
+        // the user-supplied format label — a mislabeled upload cannot steer content
+        // into a parser that never inspected it (defense-in-depth on top of the gate).
+        const verifiedFormat: "xlsx" | "csv" | "espi_xml" =
+          gate.detected === "xlsx" || gate.detected === "xls" ? "xlsx" : gate.detected === "csv_text" ? "csv" : "espi_xml";
 
         const sha256 = createHash("sha256").update(buf).digest("hex");
         const dup = await h.findUploadByHash(ctx.user.id, sha256);
@@ -158,7 +163,7 @@ export const appRouter = router({
           filename: input.filename,
           sha256,
           format: input.format,
-          parser: input.format === "xlsx" ? "excel_build0103" : input.format === "csv" ? "csv_build0103" : "espi_xml",
+          parser: verifiedFormat === "xlsx" ? "excel_build0103" : verifiedFormat === "csv" ? "csv_build0103" : "espi_xml",
           parserVersion: PARSER_VERSION,
           status: "pending",
         });
@@ -178,7 +183,7 @@ export const appRouter = router({
         // Cycle 5, pass 195: XXE gate runs BEFORE any parse work is scheduled —
         // hostile DOCTYPE/ENTITY payloads are rejected up front rather than
         // relying on the gate inside the timeout-wrapped parser.
-        if (input.format === "espi_xml") {
+        if (verifiedFormat === "espi_xml") {
           const xxe = rejectXxe(buf.toString("utf8"));
           if (!xxe.ok) {
             await h.updateUpload(uploadId, { status: "failed", error: xxe.reason });
@@ -188,10 +193,10 @@ export const appRouter = router({
         let series: ParsedMeterSeries[] = [];
         try {
           series = await withParseTimeout(() => {
-            if (input.format === "xlsx") return parseExcelIntervals(buf);
-            if (input.format === "csv") return parseCsvIntervals(buf.toString("utf8"), input.filename);
+            if (verifiedFormat === "xlsx") return parseExcelIntervals(buf);
+            if (verifiedFormat === "csv") return parseCsvIntervals(buf.toString("utf8"), input.filename);
             return parseEspiXml(buf.toString("utf8"));
-          }, `parse_${input.format}`);
+          }, `parse_${verifiedFormat}`);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           await h.updateUpload(uploadId, { status: "failed", error: msg });
