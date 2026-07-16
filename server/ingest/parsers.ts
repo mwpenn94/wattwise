@@ -270,11 +270,21 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
         const value = parseFloat(String(r.value ?? "0"));
         if (!start || !Number.isFinite(value)) continue;
         const mult = Math.pow(10, powerOfTen);
-        // uom 72 = Wh → kWh; 38 = W (power); 119 = ft3; 128 = US gal
+        // uom 72 = Wh → kWh; 38 = W (power → kW demand); 119 = ft3; 128 = US gal
         let usage = value * mult;
+        let demand: number | null = null;
         if (uom === "72") usage = usage / 1000;
-        if (uom === "119") usage = (usage / 100) * 1.037; // ccf→therms approx
-        points.push({ ts: start * 1000, durationMin: Math.round(durationSec / 60), usage, demand: null });
+        // Cycle 3, pass 54: Watts feeds are DEMAND readings — convert W → kW and
+        // derive interval energy from demand × duration; never ingest raw Watts
+        // into a kWh-typed usage field (1000× error).
+        if (uom === "38") {
+          demand = (value * mult) / 1000;
+          usage = (demand * durationSec) / 3600;
+        }
+        // Cycle 3, pass 34: ft³ → therms via 100 ft³ per ccf × 1.037 therms/ccf
+        // (EIA national-average heat content) — disclosed in series notes below.
+        if (uom === "119") usage = (usage / 100) * 1.037;
+        points.push({ ts: start * 1000, durationMin: Math.round(durationSec / 60), usage, demand });
       }
     }
   }
@@ -282,19 +292,26 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
   points.sort((a, b) => a.ts - b.ts);
   const usageUnit = commodity === "electric" ? "kWh" : commodity === "gas" ? "therms" : "gal";
   const ingestedUsageSum = points.reduce((a, p) => a + p.usage, 0);
+  const demandVals = points.filter((p) => p.demand != null).map((p) => p.demand as number);
   return [
     {
       sourceKey: "espi_usage_point",
       commodity,
       usageUnit,
-      demandUnit: null,
+      demandUnit: demandVals.length ? "kW" : null,
       points,
       footerTotals: { raw: [] },
       validation: {
         ingestedUsageSum,
-        ingestedMaxDemand: null,
+        ingestedMaxDemand: demandVals.length ? Math.max(...demandVals) : null,
         pass: true,
-        notes: [`ESPI feed parsed: ${points.length} interval readings`],
+        notes: [
+          `ESPI feed parsed: ${points.length} interval readings`,
+          ...(uom === "119"
+            ? ["Gas volumes converted ft³ → therms using EIA national-average heat content (1.037 therms/ccf); your utility's billing factor may differ slightly."]
+            : []),
+          ...(uom === "38" ? ["Power (W) readings converted to kW demand; interval energy derived from demand × duration."] : []),
+        ],
       },
       headerRowIndex: 0,
       rowsIngested: points.length,

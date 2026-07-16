@@ -163,12 +163,16 @@ export const appRouter = router({
           status: "pending",
         });
 
-        // Store raw file in S3 (source of truth for re-parse)
+        // Store raw file in S3 (source of truth for re-parse). Cycle 3, pass 55:
+        // a storage failure is disclosed on the upload record (re-parse will not
+        // be possible) and logged loudly — never silently swallowed.
+        let storageWarning: string | null = null;
         try {
           const put = await storagePut(`uploads/${ctx.user.id}/${uploadId}-${input.filename}`, buf, "application/octet-stream");
           await h.updateUpload(uploadId, { fileKey: put.key, fileUrl: put.url });
-        } catch {
-          /* storage failure is non-fatal for ingestion */
+        } catch (e) {
+          storageWarning = `Raw file could not be durably stored (${e instanceof Error ? e.message : "storage error"}); parsing proceeded but re-parse from source will not be possible.`;
+          console.error("[uploads.ingest] storagePut failed for upload", uploadId, e);
         }
 
         let series: ParsedMeterSeries[] = [];
@@ -194,30 +198,46 @@ export const appRouter = router({
         const out: Array<{ meterId: number; label: string; points: number; validationPass: boolean }> = [];
         let totalIn = 0;
         let totalSkip = 0;
-        for (const s of series.filter((x) => x.points.length > 0)) {
-          const commodity = input.commodityHint ?? s.commodity;
-          const label = s.sourceKey;
-          let meter = existing.find((m) => m.label === label && m.commodity === commodity);
-          if (!meter) {
-            const meterId = await h.createMeter(
-              {
-                siteId: input.siteId,
-                userId: ctx.user.id,
-                commodity,
-                label,
-                usageUnit: s.usageUnit,
-                demandUnit: s.demandUnit,
-                timezone: "America/Phoenix",
-              },
-              ctx.user.id,
-            );
-            meter = (await h.listMeters(input.siteId, ctx.user.id)).find((m) => m.id === meterId)!;
+        // Cycle 1 pass 16: a mid-loop write failure must not leave the upload
+        // marked 'parsed' — catch, record the partial-write state, and fail.
+        try {
+          for (const s of series.filter((x) => x.points.length > 0)) {
+            const commodity = input.commodityHint ?? s.commodity;
+            const label = s.sourceKey;
+            let meter = existing.find((m) => m.label === label && m.commodity === commodity);
+            if (!meter) {
+              const meterId = await h.createMeter(
+                {
+                  siteId: input.siteId,
+                  userId: ctx.user.id,
+                  commodity,
+                  label,
+                  usageUnit: s.usageUnit,
+                  demandUnit: s.demandUnit,
+                  // Cycle 3, passes 36/66: timezone derived from the site's
+                  // state, never hardcoded.
+                  timezone: tzForState(site.state),
+                },
+                ctx.user.id,
+              );
+              meter = (await h.listMeters(input.siteId, ctx.user.id)).find((m) => m.id === meterId)!;
+            }
+            const db = (await getDb())!;
+            const w = await writeIntervals(db, meter.id, s, uploadId, 2);
+            totalIn += s.rowsIngested;
+            totalSkip += s.rowsSkipped;
+            out.push({ meterId: meter.id, label, points: w.inserted + w.replaced, validationPass: s.validation.pass });
           }
-          const db = (await getDb())!;
-          const w = await writeIntervals(db, meter.id, s, uploadId, 2);
-          totalIn += s.rowsIngested;
-          totalSkip += s.rowsSkipped;
-          out.push({ meterId: meter.id, label, points: w.inserted + w.replaced, validationPass: s.validation.pass });
+        } catch (writeErr) {
+          const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+          await h.updateUpload(uploadId, {
+            status: "failed",
+            error: `Interval write failed after ${out.length} of ${series.length} series were written: ${msg}`,
+            rowsIngested: totalIn,
+            rowsSkipped: totalSkip,
+          });
+          await recordMeterEvent({ userId: ctx.user.id, kind: `parse_${input.format}`, computeMs: Date.now() - t0, tier });
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "File parsed but interval storage failed partway — no analysis will use partial data until re-upload succeeds." });
         }
 
         await h.updateUpload(uploadId, {
@@ -227,7 +247,9 @@ export const appRouter = router({
           sheetsFound: series.length,
           parseConfidence: series.every((s) => s.validation.pass) ? 1 : 0.8,
           footerTotals: series.map((s) => s.footerTotals),
-          validation: series.map((s) => s.validation),
+          validation: storageWarning
+            ? [...series.map((s) => ({ ...s.validation, notes: [...s.validation.notes, storageWarning] }))]
+            : series.map((s) => s.validation),
         });
         await recordMeterEvent({ userId: ctx.user.id, kind: `parse_${input.format}`, computeMs: Date.now() - t0, tier });
         await h.audit(ctx.user.id, "upload_ingested", "upload", String(uploadId), {
@@ -412,7 +434,7 @@ export const appRouter = router({
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
         // Build baseline hourly profile: measured intervals if available, else archetype
-        const { hourly, loadBasis, confidence, extrapolated, structure, co2eLbPerMwh, climateZone } = await buildScenarioBasis(site, ctx.user.id);
+        const { hourly, loadBasis, confidence, extrapolated, structure, co2eLbPerMwh, climateZone, tariffBasisDisclosure } = await buildScenarioBasis(site, ctx.user.id);
         const t0 = Date.now();
         const scenarioInput: ScenarioInput = {
           kind: input.kind,
@@ -425,6 +447,17 @@ export const appRouter = router({
           capexUsd: input.capexUsd,
         };
         const results = runScenario(hourly, scenarioInput, structure, climateZone, co2eLbPerMwh, confidence, extrapolated);
+        if (tariffBasisDisclosure) results.disclosures.push(tariffBasisDisclosure);
+        if (loadBasis === "archetype_scaled") {
+          // v1.6 convergence (pass 41): demand-charge and ratchet exposure on a
+          // typical archetype shape is only as accurate as its peak fidelity.
+          results.disclosures.push(
+            "Demand charges and ratchet exposure are estimated from a typical archetype load shape (ratchet basis: archetype-derived, not measured) — actual exposure may differ materially.",
+          );
+          (results.assumptions as Record<string, unknown>).ratchetConfidence = "archetype_derived";
+        } else {
+          (results.assumptions as Record<string, unknown>).ratchetConfidence = "measured";
+        }
         const id = await h.saveScenario({
           siteId: site.id,
           userId: ctx.user.id,
@@ -479,6 +512,24 @@ export const appRouter = router({
 });
 
 /* ---------------- scenario basis builder ---------------- */
+/** Cycle 3, passes 36/66: meter timezone derived from the site's state. */
+function tzForState(state: string | null | undefined): string {
+  const map: Record<string, string> = {
+    AZ: "America/Phoenix",
+    CA: "America/Los_Angeles", NV: "America/Los_Angeles", WA: "America/Los_Angeles", OR: "America/Los_Angeles",
+    CO: "America/Denver", NM: "America/Denver", UT: "America/Denver", MT: "America/Denver", WY: "America/Denver", ID: "America/Denver",
+    TX: "America/Chicago", IL: "America/Chicago", MN: "America/Chicago", MO: "America/Chicago", WI: "America/Chicago", IA: "America/Chicago",
+    KS: "America/Chicago", NE: "America/Chicago", OK: "America/Chicago", AR: "America/Chicago", LA: "America/Chicago", MS: "America/Chicago",
+    AL: "America/Chicago", TN: "America/Chicago", SD: "America/Chicago", ND: "America/Chicago",
+    NY: "America/New_York", FL: "America/New_York", PA: "America/New_York", OH: "America/New_York", GA: "America/New_York",
+    NC: "America/New_York", SC: "America/New_York", VA: "America/New_York", WV: "America/New_York", MD: "America/New_York",
+    DE: "America/New_York", NJ: "America/New_York", CT: "America/New_York", RI: "America/New_York", MA: "America/New_York",
+    VT: "America/New_York", NH: "America/New_York", ME: "America/New_York", MI: "America/New_York", IN: "America/New_York", KY: "America/New_York", DC: "America/New_York",
+    HI: "Pacific/Honolulu", AK: "America/Anchorage",
+  };
+  return map[(state ?? "").toUpperCase().trim()] ?? "America/Phoenix";
+}
+
 async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.getSite>>>, userId: number) {
   const climateZone = site.climateZone ?? "2B";
   const meters = await h.listMeters(site.id, userId);
@@ -516,11 +567,16 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
 
   const tariffRows = await h.listTariffs("electric", site.state ?? undefined);
   const current = meter?.currentTariffId ? tariffRows.find((t) => t.id === meter.currentTariffId) : undefined;
-  const chosen =
-    current ??
-    tariffRows.find((t) => site.utilityName && t.utilityName.toLowerCase().includes(site.utilityName.toLowerCase().split(" ")[0])) ??
-    tariffRows[0];
+  const utilityMatch = tariffRows.find((t) => site.utilityName && t.utilityName.toLowerCase().includes(site.utilityName.toLowerCase().split(" ")[0]));
+  const chosen = current ?? utilityMatch ?? tariffRows[0];
   if (!chosen) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No tariff data available for scenario costing" });
+  // Cycle 3, pass 56: disclose when the cost basis was not the user's actual
+  // assigned rate — an arbitrary seeded tariff can materially shift projections.
+  const tariffBasisDisclosure = current
+    ? null
+    : utilityMatch
+      ? `Cost basis: ${chosen.utilityName} ${chosen.name} matched by utility name — assign your actual rate on the meter for firmer numbers.`
+      : `Cost basis: no rate is assigned to this meter and no seeded rate matched your utility, so the first available ${chosen.utilityName} ${chosen.name} rate was used. Projections may shift materially on your actual tariff.`;
 
   const zip3 = (site.zip ?? "850").slice(0, 3);
   const ef = await h.getEmissionsFactor(zip3);
@@ -532,6 +588,7 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
     structure: chosen.structure as TariffStructure,
     co2eLbPerMwh: ef.factor?.co2eLbPerMwh ?? 727.9,
     climateZone,
+    tariffBasisDisclosure,
   };
 }
 

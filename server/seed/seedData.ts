@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.1";
+export const SEED_VERSION = "2026.07.2";
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -352,6 +352,33 @@ export const SEED_TARIFFS: SeedTariff[] = [
       demand: [
         { label: "Summer demand", months: SUMMER, ratePerKw: 18.481 },
         { label: "Winter demand", months: WINTER, ratePerKw: 13.276 },
+      ],
+      ratchet: { lookbackMonths: 11, ratchetPct: 0.8, applicablePeriod: "all" },
+      exportRate: { type: "net_billing_avoided_cost", ratePerKwh: 0.0665 },
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2025-01-01",
+  },
+  {
+    urdbId: "aps-e34",
+    utilityName: "Arizona Public Service Co (APS)",
+    name: "E-34 General Service Extra Large (>400 kW) w/ 80% ratchet",
+    sector: "industrial",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: 401,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 250.0,
+      energy: [
+        { label: "Summer on-peak 4-7pm wkdy", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 16, hourEnd: 19, ratePerUnit: 0.06522 },
+        { label: "Summer off-peak", months: SUMMER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.04982 },
+        { label: "Winter on-peak 4-7pm wkdy", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 16, hourEnd: 19, ratePerUnit: 0.05877 },
+        { label: "Winter off-peak", months: WINTER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.04516 },
+      ],
+      demand: [
+        { label: "Summer demand", months: SUMMER, ratePerKw: 16.294 },
+        { label: "Winter demand", months: WINTER, ratePerKw: 11.641 },
       ],
       ratchet: { lookbackMonths: 11, ratchetPct: 0.8, applicablePeriod: "all" },
       exportRate: { type: "net_billing_avoided_cost", ratePerKwh: 0.0665 },

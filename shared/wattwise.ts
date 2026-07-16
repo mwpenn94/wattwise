@@ -20,6 +20,67 @@ export const ANALYSIS_TIMEOUT_MS = 60_000;
 export const PARSE_TIMEOUT_MS = 45_000;
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
+/* ---------- Timezone-aware local time parts (deliverable cycle 3) ----------
+ * All interval timestamps are UTC ms. TOU matching, demand windows, heatmaps
+ * and baseload windows must be computed in the METER'S timezone, never the
+ * server's. Cached formatters keep this fast enough for 35k-point sweeps. */
+const _dtfCache = new Map<string, Intl.DateTimeFormat>();
+function dtfFor(tz: string): Intl.DateTimeFormat {
+  let f = _dtfCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      hour12: false,
+      weekday: "short",
+    });
+    _dtfCache.set(tz, f);
+  }
+  return f;
+}
+const DOW_MAP: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+export interface LocalParts {
+  year: number;
+  month: number; // 1-12
+  day: number;
+  hour: number; // 0-23
+  dow: number; // 0=Sun
+  monthKey: string; // "YYYY-MM"
+}
+export function localParts(tsMs: number, tz: string): LocalParts {
+  try {
+    const parts = dtfFor(tz).formatToParts(tsMs);
+    let year = 0,
+      month = 0,
+      day = 0,
+      hour = 0,
+      dow = 0;
+    for (const p of parts) {
+      if (p.type === "year") year = parseInt(p.value, 10);
+      else if (p.type === "month") month = parseInt(p.value, 10);
+      else if (p.type === "day") day = parseInt(p.value, 10);
+      else if (p.type === "hour") hour = parseInt(p.value, 10) % 24;
+      else if (p.type === "weekday") dow = DOW_MAP[p.value] ?? 0;
+    }
+    return { year, month, day, hour, dow, monthKey: `${year}-${String(month).padStart(2, "0")}` };
+  } catch {
+    // Unknown tz string — fall back to server-local interpretation (disclosed by callers).
+    const d = new Date(tsMs);
+    return {
+      year: d.getFullYear(),
+      month: d.getMonth() + 1,
+      day: d.getDate(),
+      hour: d.getHours(),
+      dow: d.getDay(),
+      monthKey: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+    };
+  }
+}
+export const DEFAULT_TZ = "America/Phoenix";
+
 /* ---------- Commodity abstraction: (flow, peak_rate_of_flow) ---------- */
 export type Commodity = "electric" | "gas" | "water";
 export const COMMODITY_UNITS: Record<
@@ -88,7 +149,10 @@ export interface CpCharge {
   /** default N=4, overridable per tariff */
   topN: number;
   peakSeasonMonths: number[];
+  /** $/kW-MONTH applied to the CP-average billing determinant (ERCOT 4CP pattern). */
   ratePerKw: number;
+  /** number of billing months the CP determinant is charged (default 12) */
+  chargeMonths?: number;
 }
 
 export interface ExportRateStructure {
@@ -131,6 +195,8 @@ export interface TariffComparison {
   tariffName: string;
   utilityName: string;
   freshness: string;
+  /** True when this rate was used as the current-cost basis for savings math. */
+  isCurrentBasis?: boolean;
   eligible: boolean;
   ineligibleReason?: string;
   annualCost: CostBreakdown;

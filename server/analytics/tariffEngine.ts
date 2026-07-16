@@ -16,7 +16,7 @@ import type {
   MonthlyDemandDetail,
   TariffStructure,
 } from "../../shared/wattwise";
-import { LABEL_CP_ESTIMATED } from "../../shared/wattwise";
+import { DEFAULT_TZ, LABEL_CP_ESTIMATED, localParts } from "../../shared/wattwise";
 
 export interface DemandAnalytics {
   peakKw: number;
@@ -34,7 +34,7 @@ export interface DemandAnalytics {
   } | null;
 }
 
-export function computeDemandAnalytics(points: IntervalPoint[], cpTopN = 4, cpSeasonMonths: number[] = [6, 7, 8, 9]): DemandAnalytics | null {
+export function computeDemandAnalytics(points: IntervalPoint[], cpTopN = 4, cpSeasonMonths: number[] = [6, 7, 8, 9], tz: string = DEFAULT_TZ): DemandAnalytics | null {
   const withDemand = points
     .map((p) => ({ ts: p.ts, kw: p.demand ?? (p.durationMin > 0 ? (p.usage * 60) / p.durationMin : 0) }))
     .filter((p) => Number.isFinite(p.kw));
@@ -53,27 +53,29 @@ export function computeDemandAnalytics(points: IntervalPoint[], cpTopN = 4, cpSe
   const avgKw = sum / withDemand.length;
 
   const sorted = [...withDemand].sort((a, b) => b.kw - a.kw);
-  const topDecilePeaks = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.001))).slice(0, 50).map((p) => ({ ts: p.ts, kw: p.kw }));
+  // True top decile (10%) of interval demand readings; capped at 50 points for display/transport.
+  const topDecilePeaks = sorted.slice(0, Math.max(1, Math.floor(sorted.length * 0.1))).slice(0, 50).map((p) => ({ ts: p.ts, kw: p.kw }));
 
   const monthly = new Map<string, { peakKw: number; peakTs: number }>();
   const heat: number[][] = Array.from({ length: 7 }, () => new Array(24).fill(0));
   const heatN: number[][] = Array.from({ length: 7 }, () => new Array(24).fill(0));
   for (const p of withDemand) {
-    const d = new Date(p.ts);
-    const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-    const rec = monthly.get(mk);
-    if (!rec || p.kw > rec.peakKw) monthly.set(mk, { peakKw: p.kw, peakTs: p.ts });
-    heat[d.getDay()][d.getHours()] += p.kw;
-    heatN[d.getDay()][d.getHours()]++;
+    // Cycle 3, pass 59/66: all calendar bucketing computed in the meter's
+    // timezone, never the server's.
+    const lp = localParts(p.ts, tz);
+    const rec = monthly.get(lp.monthKey);
+    if (!rec || p.kw > rec.peakKw) monthly.set(lp.monthKey, { peakKw: p.kw, peakTs: p.ts });
+    heat[lp.dow][lp.hour] += p.kw;
+    heatN[lp.dow][lp.hour]++;
   }
   for (let dow = 0; dow < 7; dow++) for (let h = 0; h < 24; h++) heat[dow][h] = heatN[dow][h] > 0 ? heat[dow][h] / heatN[dow][h] : 0;
 
-  // CP proxy: top-N distinct-day peaks within peak season
-  const seasonal = withDemand.filter((p) => cpSeasonMonths.includes(new Date(p.ts).getMonth() + 1));
+  // CP proxy: top-N distinct-day peaks within peak season (meter-local days)
+  const seasonal = withDemand.filter((p) => cpSeasonMonths.includes(localParts(p.ts, tz).month));
   const byDay = new Map<string, { ts: number; kw: number }>();
   for (const p of seasonal) {
-    const d = new Date(p.ts);
-    const dk = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    const lp = localParts(p.ts, tz);
+    const dk = `${lp.year}-${lp.month}-${lp.day}`;
     const rec = byDay.get(dk);
     if (!rec || p.kw > rec.kw) byDay.set(dk, { ts: p.ts, kw: p.kw });
   }
@@ -104,9 +106,14 @@ export function applyRatchet(
     let billed = m.peakKw;
     let applied = false;
     if (ratchet) {
+      // Deliverable cycle 2, pass 22: the ratchet determinant window includes
+      // the current month — billed = max(current peak, pct × max peak over the
+      // lookback INCLUDING current). For pct < 1 the inclusion is a no-op on
+      // the current month itself (pct×own ≤ own), but it makes the convention
+      // explicit and correct for pct ≥ 1 riders.
       const lookStart = Math.max(0, i - ratchet.lookbackMonths);
       let lookPeak = 0;
-      for (let j = lookStart; j < i; j++) {
+      for (let j = lookStart; j <= i; j++) {
         const mm = monthlyPeaks[j];
         if (ratchet.applicablePeriod === "summer") {
           const mon = parseInt(mm.month.split("-")[1], 10);
@@ -126,27 +133,42 @@ export function applyRatchet(
 }
 
 /* ---------------- TOU matching ---------------- */
-function touRate(structure: TariffStructure, ts: number): number {
-  const d = new Date(ts);
-  const month = d.getMonth() + 1;
-  const dow = d.getDay();
-  const hour = d.getHours();
-  // First matching *specific* period wins (periods listed specific → general)
-  for (const p of structure.energy) {
+function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFlag?: { used: boolean }): number {
+  const { month, dow, hour } = localParts(ts, tz);
+  // Most-specific matching period wins regardless of array order (deliverable
+  // convergence cycle 1, pass 2): specificity = narrower month set + narrower
+  // day set + narrower hour window. Ties fall back to earlier array position.
+  let best: { rate: number; score: number; idx: number } | null = null;
+  for (let i = 0; i < structure.energy.length; i++) {
+    const p = structure.energy[i];
     if (!p.months.includes(month)) continue;
     if (!p.daysOfWeek.includes(dow)) continue;
-    if (hour >= p.hourStart && hour < p.hourEnd) return p.ratePerUnit;
+    if (!(hour >= p.hourStart && hour < p.hourEnd)) continue;
+    const score =
+      (12 - p.months.length) * 100 + (7 - p.daysOfWeek.length) * 10 + (24 - (p.hourEnd - p.hourStart));
+    if (!best || score > best.score || (score === best.score && i < best.idx)) {
+      best = { rate: p.ratePerUnit, score, idx: i };
+    }
   }
-  return structure.energy.length > 0 ? structure.energy[structure.energy.length - 1].ratePerUnit : 0;
+  if (best) return best.rate;
+  // Cycle 3, pass 52: no matching TOU period — fall back to the tariff's
+  // LEAST-specific (widest-coverage) period as the default rate rather than an
+  // arbitrary array position, and flag the fallback so callers can disclose it.
+  if (fallbackFlag) fallbackFlag.used = true;
+  let widest: { rate: number; cover: number } | null = null;
+  for (const p of structure.energy) {
+    const cover = p.months.length * 100 + p.daysOfWeek.length * 10 + (p.hourEnd - p.hourStart);
+    if (!widest || cover > widest.cover) widest = { rate: p.ratePerUnit, cover };
+  }
+  return widest ? widest.rate : 0;
 }
 
-function demandWindowMatch(dc: { hourStart?: number; hourEnd?: number; daysOfWeek?: number[]; months: number[] }, ts: number): boolean {
-  const d = new Date(ts);
-  if (!dc.months.includes(d.getMonth() + 1)) return false;
-  if (dc.daysOfWeek && !dc.daysOfWeek.includes(d.getDay())) return false;
+function demandWindowMatch(dc: { hourStart?: number; hourEnd?: number; daysOfWeek?: number[]; months: number[] }, ts: number, tz: string): boolean {
+  const { month, dow, hour } = localParts(ts, tz);
+  if (!dc.months.includes(month)) return false;
+  if (dc.daysOfWeek && !dc.daysOfWeek.includes(dow)) return false;
   if (dc.hourStart != null && dc.hourEnd != null) {
-    const h = d.getHours();
-    if (h < dc.hourStart || h >= dc.hourEnd) return false;
+    if (hour < dc.hourStart || hour >= dc.hourEnd) return false;
   }
   return true;
 }
@@ -164,12 +186,13 @@ export interface CostResult {
  * ratchet, CP proxy, export credits. Points may include negative usage
  * (net metering export intervals).
  */
-export function costOnTariff(points: IntervalPoint[], structure: TariffStructure, opts?: { cpTopNOverride?: number }): CostResult {
+export function costOnTariff(points: IntervalPoint[], structure: TariffStructure, opts?: { cpTopNOverride?: number; tz?: string }): CostResult {
+  const tz = opts?.tz ?? DEFAULT_TZ;
   const disclosures: string[] = [];
+  const touFallback = { used: false };
   const byMonth = new Map<string, IntervalPoint[]>();
   for (const p of points) {
-    const d = new Date(p.ts);
-    const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const mk = localParts(p.ts, tz).monthKey;
     const arr = byMonth.get(mk) ?? [];
     arr.push(p);
     byMonth.set(mk, arr);
@@ -206,14 +229,14 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     let mExport = 0;
     for (const p of pts) {
       if (p.usage >= 0) {
-        mEnergy += p.usage * touRate(structure, p.ts);
+        mEnergy += p.usage * touRate(structure, p.ts, tz, touFallback);
       } else {
         // Cycle 5: export asymmetry — credit at export rate only
         const er = structure.exportRate;
         if (!er || er.type === "zero") {
           // no credit
         } else if (er.type === "net_metering_retail") {
-          mExport += -p.usage * touRate(structure, p.ts);
+          mExport += -p.usage * touRate(structure, p.ts, tz, touFallback);
         } else {
           mExport += -p.usage * er.ratePerKwh;
         }
@@ -226,7 +249,7 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       if (!dc.months.includes(monthNum)) continue;
       let windowPeak = 0;
       for (const p of pts) {
-        if (!demandWindowMatch(dc, p.ts)) continue;
+        if (!demandWindowMatch(dc, p.ts, tz)) continue;
         const kw = p.demand ?? (p.durationMin > 0 ? (p.usage * 60) / p.durationMin : 0);
         if (kw > windowPeak) windowPeak = kw;
       }
@@ -238,8 +261,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       mDemand += windowPeak * dc.ratePerKw;
     }
     const mFixed = structure.fixedMonthly;
-    let mTotal = mEnergy + mDemand + mFixed - mExport;
-    if (structure.minBill != null && mTotal < structure.minBill) mTotal = structure.minBill;
+    // Minimum bill applies to charges BEFORE export credits (cycle 1, pass 12):
+    // export credits reduce the bill after the minimum floor is established,
+    // so exporters are not silently stripped of credit value by the floor.
+    let mCharges = mEnergy + mDemand + mFixed;
+    if (structure.minBill != null && mCharges < structure.minBill) mCharges = structure.minBill;
+    const mTotal = mCharges - mExport;
     energyTotal += mEnergy;
     demandTotal += mDemand;
     fixedTotal += mFixed;
@@ -253,18 +280,29 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
   let cpTopNApplied: number | undefined;
   if (structure.cp && points.length > 0) {
     const topN = opts?.cpTopNOverride ?? structure.cp.topN;
-    const da = computeDemandAnalytics(points, topN, structure.cp.peakSeasonMonths);
+    const da = computeDemandAnalytics(points, topN, structure.cp.peakSeasonMonths, tz);
     if (da?.cpProxy && da.cpProxy.events.length > 0) {
       const avgCpKw = da.cpProxy.events.reduce((a, e) => a + e.kw, 0) / da.cpProxy.events.length;
-      cp = avgCpKw * structure.cp.ratePerKw * 12;
+      // CP transmission-style charges (ERCOT 4CP pattern): the CP average sets a
+      // billing determinant applied at $/kW-month for each month of the billing
+      // year. cp.ratePerKw is defined as $/kW-month (documented in shared type
+      // + seeds); annualized here as ratePerKw × 12 months (cycle 1, pass 12:
+      // unit semantics made explicit rather than ambiguous annual-vs-monthly).
+      const cpMonths = structure.cp.chargeMonths ?? 12;
+      cp = avgCpKw * structure.cp.ratePerKw * cpMonths;
       cpMethodology = "cp_proxy_top_n_customer_peaks";
       cpTopNApplied = topN;
       disclosures.push(
-        `CP/4CP charge uses your top-${topN} seasonal customer peaks as proxy coincident peaks (${LABEL_CP_ESTIMATED}). Actual ISO/utility CP timing may differ materially.`,
+        `CP/4CP charge uses your top-${topN} seasonal customer peaks as proxy coincident peaks (${LABEL_CP_ESTIMATED}), billed as a $/kW-month determinant over ${cpMonths} months. Actual ISO/utility CP timing may differ materially.`,
       );
     }
   }
 
+  if (touFallback.used) {
+    disclosures.push(
+      "Some intervals fell outside every defined TOU period on this tariff — they were priced at the tariff's widest-coverage (default) rate. Verify the tariff's period definitions cover all hours.",
+    );
+  }
   const anyRatchet = monthlyDetails.some((m) => m.ratchetApplied);
   if (anyRatchet) {
     disclosures.push(
@@ -300,9 +338,12 @@ export function tariffEligible(
   site: { sectorClass: string },
   peakKw: number | null,
 ): { eligible: boolean; reason?: string } {
+  // Cycle 3, pass 62: industrial sites must match industrial AND commercial
+  // tariffs (industrial rates are a subset of C&I offerings).
   const sectorMap: Record<string, string[]> = {
     residential: ["residential"],
     commercial: ["commercial", "industrial"],
+    industrial: ["commercial", "industrial"],
   };
   const allowed = sectorMap[site.sectorClass] ?? ["commercial"];
   if (!allowed.includes(t.sector)) return { eligible: false, reason: `Tariff is ${t.sector}; site is ${site.sectorClass}` };

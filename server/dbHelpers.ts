@@ -401,7 +401,9 @@ export async function exportUserData(userId: number) {
     scenarios: userScenarios,
     insights: userInsights,
     opportunities: userOpps,
-    uploads: userUploads.map((u) => ({ ...u, fileKey: undefined })),
+    // Cycle 1 pass 16: destructuring genuinely removes the keys (assigning
+    // undefined leaves them present in superjson serialization).
+    uploads: userUploads.map(({ fileKey: _fk, fileUrl: _fu, ...rest }: Record<string, unknown>) => rest),
     metering: userMetering,
   };
 }

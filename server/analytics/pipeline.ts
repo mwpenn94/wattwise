@@ -7,8 +7,10 @@
 import {
   ANALYSIS_TIMEOUT_MS,
   COMMODITY_UNITS,
+  DEFAULT_TZ,
   DISAGG_LANGUAGE,
   IntervalPoint,
+  localParts,
   LABEL_CP_ESTIMATED,
   LABEL_NORMAL_YEAR,
   MODELED_ESTIMATES_DISCLAIMER,
@@ -87,7 +89,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     points = rows.map((r) => ({ ts: r.ts, durationMin: r.durationMin, usage: r.usage, demand: r.demand }));
   }
   const hasIntervals = points.length >= 10;
-  const demand = hasIntervals ? computeDemandAnalytics(points) : null;
+  // Cycle 3 (passes 36/66): all hour-of-day logic runs in the meter's IANA
+  // timezone, never the server's.
+  const tz = meter?.timezone ?? DEFAULT_TZ;
+  const demand = hasIntervals ? computeDemandAnalytics(points, 4, [6, 7, 8, 9], tz) : null;
 
   /* ---------- stage 2: baseline ---------- */
   let baseline: BaselineFit | null = null;
@@ -108,7 +113,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   } else if (site.sqft && arch) {
     const outOfRange =
       (arch.calibMinSqft != null && site.sqft < arch.calibMinSqft) || (arch.calibMaxSqft != null && site.sqft > arch.calibMaxSqft);
-    const ab = archetypeBaseline(arch.shape8760 as number[], arch.annualUsePerSqft, site.sqft, { outOfCalibrationRange: !!outOfRange });
+    const calibMid =
+      arch.calibMinSqft != null && arch.calibMaxSqft != null ? (arch.calibMinSqft + arch.calibMaxSqft) / 2 : (arch.calibMaxSqft ?? arch.calibMinSqft ?? null);
+    const ab = archetypeBaseline(arch.shape8760 as number[], arch.annualUsePerSqft, site.sqft, {
+      outOfCalibrationRange: !!outOfRange,
+      calibMidSqft: calibMid,
+    });
     baseline = ab.fit;
     archetypeHourly = ab.hourly;
     disaggMethod = "archetype_prior_only";
@@ -153,12 +163,27 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     const utilityTariffs = allTariffs.filter(
       (t) => !site.utilityName || t.utilityName.toLowerCase().includes((site.utilityName ?? "").toLowerCase().split(" ")[0]),
     );
-    const sweep = utilityTariffs.length > 0 ? utilityTariffs : allTariffs;
     const peakKw = demand?.peakKw ?? null;
     const sectorClass = site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? "residential" : "commercial";
+    const isElig = (t: (typeof allTariffs)[number]) =>
+      tariffEligible({ sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax }, { sectorClass }, peakKw).eligible;
+    // Sweep = same-utility rates plus any eligible rates statewide (a large site
+    // may have no eligible rate at its own utility in the seeded snapshot).
+    const eligibleAnywhere = allTariffs.filter(isElig);
+    const sweepSet = new Map<number, (typeof allTariffs)[number]>();
+    for (const t of [...utilityTariffs, ...eligibleAnywhere]) sweepSet.set(t.id, t);
+    const sweep = sweepSet.size > 0 ? Array.from(sweepSet.values()) : allTariffs;
 
-    if (current) currentCost = costOnTariff(costPoints, current.structure as TariffStructure);
-    else if (sweep.length > 0) currentCost = costOnTariff(costPoints, sweep[0].structure as TariffStructure);
+    // Current basis: assigned tariff → else first ELIGIBLE same-utility rate →
+    // else first eligible rate statewide → else first same-utility rate.
+    const basis =
+      current ??
+      utilityTariffs.find(isElig) ??
+      eligibleAnywhere[0] ??
+      utilityTariffs[0] ??
+      sweep[0];
+    if (basis) currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz });
+    const basisTariffId = basis?.id ?? null;
 
     const currentTotal = currentCost?.breakdown.total ?? 0;
     for (const t of sweep.slice(0, 24)) {
@@ -167,12 +192,13 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         { sectorClass },
         peakKw,
       );
-      const cost = elig.eligible ? costOnTariff(costPoints, t.structure as TariffStructure) : null;
+      const cost = elig.eligible ? costOnTariff(costPoints, t.structure as TariffStructure, { tz }) : null;
       comparisons.push({
         tariffId: t.id,
         tariffName: t.name,
         utilityName: t.utilityName,
         freshness: t.freshness,
+        isCurrentBasis: t.id === basisTariffId,
         eligible: elig.eligible,
         ineligibleReason: elig.reason,
         annualCost: cost?.breakdown ?? { energy: 0, demand: 0, fixed: 0, cp: null, cpMethodology: "cp_omitted_no_interval_data", total: 0 },
@@ -224,7 +250,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         analysisId,
         kind: "load_factor",
         title: `Low load factor (${(demand.loadFactor * 100).toFixed(0)}%) — demand charges are outsized for your usage`,
-        body: `Your average load is only ${(demand.loadFactor * 100).toFixed(0)}% of your peak (${demand.peakKw.toFixed(1)} kW at ${new Date(demand.peakTimestamp).toLocaleString("en-US", { timeZone: "America/Phoenix" })}). Flattening short peaks (staggering equipment starts, load scheduling) directly reduces demand charges.`,
+        body: `Your average load is only ${(demand.loadFactor * 100).toFixed(0)}% of your peak (${demand.peakKw.toFixed(1)} kW at ${new Date(demand.peakTimestamp).toLocaleString("en-US", { timeZone: tz })}). Flattening short peaks (staggering equipment starts, load scheduling) directly reduces demand charges.`,
         severity: "opportunity",
         disaggregationMethod: disaggMethod,
         confidence: "high",
@@ -303,6 +329,39 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       metrics: { climateZone },
     });
   }
+  // Machine-readable summary row: persists demand analytics (incl. heatmap),
+  // benchmark, emissions, current cost, and tariff comparisons so the dashboard
+  // KPI cards and panels survive page reloads (live-E2E pass-1 finding).
+  insightRows.push({
+    siteId: site.id,
+    meterId: meter?.id ?? null,
+    analysisId,
+    kind: "summary",
+    title: "Analysis summary (machine-readable)",
+    body: MODELED_ESTIMATES_DISCLAIMER,
+    severity: "info",
+    disaggregationMethod: disaggMethod,
+    confidence: baseline?.confidence ?? "low",
+    provenance: { method: "pipeline_summary_v1" },
+    metrics: {
+      demand,
+      benchmark,
+      emissions,
+      currentCost,
+      tariffComparisons: comparisons,
+      baseline: baseline
+        ? {
+            method: baseline.method,
+            rSquared: baseline.rSquared,
+            cvrmse: baseline.cvrmse,
+            confidence: baseline.confidence,
+            confidenceLabel: baseline.confidenceLabel,
+            normalizedAnnualUsage: baseline.normalizedAnnualUsage,
+            weatherBasis: baseline.weatherBasis,
+          }
+        : null,
+    },
+  });
   await h.replaceInsights(site.id, insightRows);
 
   /* ---------- stage 7: opportunities ---------- */
@@ -360,7 +419,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   }
   if (demand && annualUsage != null) {
     // overnight baseload from interval data (regression_split evidence)
-    const baseloadKw = overnightBaseload(points);
+    const baseloadKw = overnightBaseload(points, tz);
     if (baseloadKw != null && demand.avgKw > 0 && baseloadKw / demand.avgKw > 0.55) {
       oppCands.push({
         key: "baseload_reduction",
@@ -452,15 +511,24 @@ function annualize(points: IntervalPoint[]): number | null {
 }
 
 function estimateBlendedRate(cost: CostResult | null, annualUsage: number | null): number {
-  if (cost && annualUsage && annualUsage > 0) return Math.max(0.05, cost.breakdown.energy / annualUsage);
+  // All-in blended rate: total annual cost (energy + demand + fixed + CP − export)
+  // per kWh (cycle 1, passes 9/19). Energy-only understates ¢/kWh on
+  // demand-heavy tariffs and inflates opportunity paybacks.
+  // Cycle 3, pass 69: no fabricated $0.05 floor — a genuinely low blended rate
+  // (large industrial, heavy solar export) must flow through honestly; only
+  // guard against degenerate non-positive values.
+  if (cost && annualUsage && annualUsage > 0) {
+    const r = cost.breakdown.total / annualUsage;
+    if (Number.isFinite(r) && r > 0) return r;
+  }
   return 0.12;
 }
 
-/** Mean kW between 01:00–04:00 local — the honest baseload estimator. */
-function overnightBaseload(points: IntervalPoint[]): number | null {
+/** Mean kW between 01:00–04:00 in the meter's local timezone — the honest baseload estimator. */
+function overnightBaseload(points: IntervalPoint[], tz: string): number | null {
   const vals: number[] = [];
   for (const p of points) {
-    const hr = new Date(p.ts).getHours();
+    const hr = localParts(p.ts, tz).hour;
     if (hr >= 1 && hr < 4) {
       const kw = p.demand ?? (p.durationMin > 0 ? (p.usage * 60) / p.durationMin : 0);
       if (Number.isFinite(kw)) vals.push(kw);

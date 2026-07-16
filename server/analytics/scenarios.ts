@@ -80,20 +80,24 @@ export function dispatchBattery(
 
   for (let h = 0; h < residual.length; h++) {
     const rate = hourlyRate[h] ?? 0;
+    // RTE model (deliverable convergence cycle 1, passes 3/9/19): full
+    // round-trip losses are taken on the charge leg — energy stored in SoC is
+    // input kWh × rte; discharge delivers SoC kWh 1:1. Total delivered energy
+    // over a full cycle = input × rte, matching the round-trip definition.
     if (residual[h] < 0 && soc < usable) {
       // absorb solar surplus first
       const room = usable - soc;
-      const charge = Math.min(-residual[h], maxRate, room / Math.sqrt(rte));
-      soc += charge * Math.sqrt(rte);
+      const charge = Math.min(-residual[h], maxRate, room / rte);
+      soc += charge * rte;
       residual[h] += charge;
     } else if (rate <= chargeThresh && soc < usable) {
       const room = usable - soc;
-      const charge = Math.min(maxRate, room / Math.sqrt(rte));
-      soc += charge * Math.sqrt(rte);
+      const charge = Math.min(maxRate, room / rte);
+      soc += charge * rte;
       residual[h] += charge; // grid charging adds load
     } else if (rate >= dischargeThresh && soc > 0 && residual[h] > 0) {
-      const discharge = Math.min(residual[h], maxRate, soc * Math.sqrt(rte));
-      soc -= discharge / Math.sqrt(rte);
+      const discharge = Math.min(residual[h], maxRate, soc);
+      soc -= discharge;
       residual[h] -= discharge;
       cycled += discharge;
     }

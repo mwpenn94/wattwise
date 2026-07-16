@@ -145,7 +145,7 @@ export function fitCaltrackMonthly(
       cvrmse: null,
       monthsCoverage: coverage,
       confidence: "low",
-      confidenceLabel: `low confidence — ${coverage} months coverage, no valid weather fit`,
+      confidenceLabel: `low confidence — ${coverage} months coverage, no valid weather fit; flat per-day mean baseline used (no R²/CVRMSE — model was not fit)`,
       weatherBasis: LABEL_NORMAL_YEAR,
       normalizedAnnualUsage: annual,
       disclosures,
@@ -159,9 +159,12 @@ export function fitCaltrackMonthly(
   for (let m = 0; m < 12; m++) {
     const nrm = normals[m];
     // approximate normal-month daily temps as flat avg (HDD/CDD from normals directly)
-    const cdd = nrm.cddBase65 + Math.max(0, (65 - cb)) * daysInMonth[m] * 0.35; // balance-point adjustment approximation
-    const hdd = Math.max(0, nrm.hddBase65 - Math.max(0, (65 - hb)) * daysInMonth[m] * 0.35);
-    annual += fit.b0 * daysInMonth[m] + fit.b1 * cdd + fit.b2 * hdd;
+    // Cycle 3, pass 71: degree days can never be negative — clamp both
+    // balance-point-adjusted CDD and HDD at zero, and never let a single month
+    // contribute negative energy to the annualized total.
+    const cdd = Math.max(0, nrm.cddBase65 + Math.max(0, 65 - cb) * daysInMonth[m] * 0.35); // balance-point adjustment approximation
+    const hdd = Math.max(0, nrm.hddBase65 - Math.max(0, 65 - hb) * daysInMonth[m] * 0.35);
+    annual += Math.max(0, fit.b0 * daysInMonth[m] + fit.b1 * cdd + fit.b2 * hdd);
   }
   disclosures.push(`Annualized usage computed on ${LABEL_NORMAL_YEAR} (NOAA 1991–2020 station normals).`);
 
@@ -224,13 +227,31 @@ export function archetypeBaseline(
   shape8760: number[],
   annualUsePerSqft: number,
   sqft: number,
-  opts: { outOfCalibrationRange: boolean },
+  opts: { outOfCalibrationRange: boolean; calibMidSqft?: number | null },
 ): { hourly: number[]; fit: BaselineFit } {
   const annual = annualUsePerSqft * sqft;
-  const hourly = shape8760.map((f) => f * annual);
+  // Annual energy scales ~linearly with sqft at fixed EUI, but PEAK DEMAND
+  // does not — load diversity flattens peaks as floor area grows (v1.6
+  // convergence finding, pass 41). Beyond the calibration-cell midpoint,
+  // derate the shape's peakiness toward its mean by 1-1/sqrt(sizeRatio),
+  // capped at 25% flattening. Annual energy is preserved exactly.
+  const mid = opts.calibMidSqft ?? null;
+  let scalingMethod: "linear_eui" | "sqrt_demand_derating" = "linear_eui";
+  let hourly: number[];
+  if (mid != null && mid > 0 && sqft > mid) {
+    const flatten = Math.min(0.25, 1 - 1 / Math.sqrt(sqft / mid));
+    const mean = 1 / shape8760.length;
+    hourly = shape8760.map((f) => (f + (mean - f) * flatten) * annual);
+    scalingMethod = "sqrt_demand_derating";
+  } else {
+    hourly = shape8760.map((f) => f * annual);
+  }
   const disclosures = [
     `Baseline synthesized from ${LABEL_PROTOTYPE_ARCHETYPE} load shapes calibrated to your building inputs — no measured data underlies this estimate.`,
     `Annualized on ${LABEL_NORMAL_YEAR}.`,
+    scalingMethod === "sqrt_demand_derating"
+      ? "Peak demand derated for load diversity (sqrt-of-size) — raw linear scaling overstates peaks for floor areas above the archetype calibration midpoint."
+      : "Scaled linearly on floor area at the archetype's energy-use intensity.",
   ];
   if (opts.outOfCalibrationRange) {
     disclosures.push(
@@ -245,6 +266,8 @@ export function archetypeBaseline(
       rSquared: null,
       cvrmse: null,
       monthsCoverage: 0,
+      // scalingMethod recorded in disclosures; enum kept out of coefficients
+      // to preserve the BaselineFit numeric contract.
       confidence: opts.outOfCalibrationRange ? "low" : "medium",
       confidenceLabel: opts.outOfCalibrationRange
         ? `low confidence — ${LABEL_PROTOTYPE_ARCHETYPE}, outside calibration range (extrapolated)`

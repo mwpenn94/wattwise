@@ -73,6 +73,13 @@ export async function recordMeterEvent(e: MeterEvent): Promise<number> {
       totalCostUsd: total,
       tierAtTime: e.tier,
     });
+  } else {
+    // Cycle 1 pass 7: a silently dropped metering row would undermine the
+    // free-tier budget enforcement invariant. Fail loudly — the caller's
+    // pipeline error handling surfaces this rather than mis-metering.
+    console.error(
+      `[METERING-DROPPED] CRITICAL: metering event not recorded (db unavailable) — user=${e.userId} kind=${e.kind} estCost=$${total.toFixed(4)}`,
+    );
   }
   return total;
 }

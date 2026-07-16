@@ -100,7 +100,9 @@ describe("CalTRACK-grade monthly baseline", () => {
 });
 
 describe("Demand analytics", () => {
-  const da = computeDemandAnalytics(syntheticYear())!;
+  // Synthetic points sit on UTC boundaries — pass tz "UTC" explicitly so month
+  // bucketing is deterministic (the engine defaults to America/Phoenix).
+  const da = computeDemandAnalytics(syntheticYear(), 4, [6, 7, 8, 9], "UTC")!;
 
   it("computes peak, load factor, heatmap dimensions", () => {
     expect(da).not.toBeNull();
@@ -125,15 +127,15 @@ describe("Exact-rules tariff engine", () => {
   const pts = syntheticYear();
 
   it("flat tariff = fixed + energy·rate exactly", () => {
-    const res = costOnTariff(pts, FLAT);
+    const res = costOnTariff(pts, FLAT, { tz: "UTC" });
     const kwh = pts.reduce((s, p) => s + p.usage, 0);
     expect(res.breakdown.total).toBeCloseTo(20 * 12 + kwh * 0.1, 0);
     expect(res.breakdown.cpMethodology).toBeDefined();
   });
 
   it("TOU pricing bills on-peak energy above flat-only pricing and includes demand charges", () => {
-    const res = costOnTariff(pts, TOU_DEMAND);
-    const flatOnly = costOnTariff(pts, { ...TOU_DEMAND, energy: [TOU_DEMAND.energy[1]!] });
+    const res = costOnTariff(pts, TOU_DEMAND, { tz: "UTC" });
+    const flatOnly = costOnTariff(pts, { ...TOU_DEMAND, energy: [TOU_DEMAND.energy[1]!] }, { tz: "UTC" });
     expect(res.breakdown.energy).toBeGreaterThan(flatOnly.breakdown.energy);
     expect(res.breakdown.demand).toBeGreaterThan(0);
   });
@@ -153,6 +155,32 @@ describe("Exact-rules tariff engine", () => {
     const jul = details.find((b) => b.month === "2025-07")!;
     expect(jul.billedDemandKw).toBe(210);
     expect(jul.ratchetApplied).toBe(false);
+  });
+
+  it("ratchet window includes the current month (cycle-2 pass-22 convention)", () => {
+    // With pct = 1.0 the inclusion is observable: the current month's own peak
+    // enters the determinant window, so billed equals the max of the window
+    // including itself — and the following month ratchets off that new high.
+    const details = applyRatchet(
+      [
+        { month: "2025-06", peakKw: 100, peakTs: 1 },
+        { month: "2025-07", peakKw: 300, peakTs: 2 }, // new high in current month
+        { month: "2025-08", peakKw: 50, peakTs: 3 },
+      ],
+      { lookbackMonths: 11, ratchetPct: 1.0, applicablePeriod: "all" },
+    );
+    const jul = details.find((b) => b.month === "2025-07")!;
+    expect(jul.billedDemandKw).toBe(300); // own peak is the window max — no distortion
+    const aug = details.find((b) => b.month === "2025-08")!;
+    expect(aug.billedDemandKw).toBe(300); // ratchets off July's new high
+    expect(aug.ratchetApplied).toBe(true);
+    // pct < 1 behavior unchanged (no-op on the current month itself)
+    const d2 = applyRatchet(
+      [{ month: "2025-06", peakKw: 100, peakTs: 1 }],
+      { lookbackMonths: 11, ratchetPct: 0.8, applicablePeriod: "all" },
+    );
+    expect(d2[0].billedDemandKw).toBe(100);
+    expect(d2[0].ratchetApplied).toBe(false);
   });
 
   it("eligibility filter blocks ineligible rates with a reason", () => {

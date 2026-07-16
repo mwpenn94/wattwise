@@ -81,15 +81,34 @@ export default function Dashboard() {
     });
   }, [win.data]);
 
-  const insightRows = insights.data ?? [];
+  const allInsightRows = insights.data ?? [];
+  const summaryRow = allInsightRows.find((i) => i.kind === "summary");
+  const summary = (summaryRow?.metrics ?? null) as {
+    demand?: Demand | null;
+    benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
+    emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number } | null;
+    currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number } } | null;
+    tariffComparisons?: Array<{
+      tariffName: string;
+      utilityName: string;
+      freshness: string;
+      eligible: boolean;
+      ineligibleReason?: string | null;
+      annualCost: { total: number };
+      savingsVsCurrent: number;
+      eligibilityNote?: string;
+    }> | null;
+    baseline?: { method?: string; rSquared?: number | null; cvrmse?: number | null; confidenceLabel?: string } | null;
+  } | null;
+  // Narrative rows exclude the machine-readable summary
+  const insightRows = allInsightRows.filter((i) => i.kind !== "summary");
   const oppRows = opps.data ?? [];
-  const demandInsight = insightRows.find((i) => i.kind === "demand");
-  const demand = (demandInsight?.metrics ?? null) as Demand | null;
-  const benchmarkInsight = insightRows.find((i) => i.kind === "benchmark");
-  const emissionsInsight = insightRows.find((i) => i.kind === "emissions");
-  const costInsight = insightRows.find((i) => i.kind === "cost");
-  const tariffInsight = insightRows.find((i) => i.kind === "tariff_comparison");
-  const cpInsight = insightRows.find((i) => i.kind === "cp_proxy");
+  const demand = summary?.demand ?? null;
+  const benchmarkInsight = summary?.benchmark ?? null;
+  const emissionsInsight = summary?.emissions ?? null;
+  const costInsight = summary?.currentCost ?? null;
+  const tariffInsight = summary?.tariffComparisons ?? null;
+  const cpInsight = allInsightRows.find((i) => i.kind === "cp_exposure");
 
   if (sites.isLoading) {
     return (
@@ -177,25 +196,28 @@ export default function Dashboard() {
         <Kpi
           icon={<BarChart3 className="h-4 w-4" />}
           label="Benchmark"
-          value={benchmarkInsight ? ((benchmarkInsight.metrics as { percentileBand?: string })?.percentileBand ?? "—") : "—"}
-          sub={benchmarkInsight ? "vs national peer EUI" : ""}
+          value={benchmarkInsight?.percentileBand ? String(benchmarkInsight.percentileBand).split("(")[0].trim() : "—"}
+          sub={
+            benchmarkInsight
+              ? `${
+                  String(benchmarkInsight.percentileBand ?? "").match(/\(([^)]+)\)/)?.[1] ??
+                  String(benchmarkInsight.percentileBand ?? "")
+                } vs national peer EUI`.trim()
+              : ""
+          }
         />
         <Kpi
           icon={<Leaf className="h-4 w-4" />}
           label="Emissions"
-          value={
-            emissionsInsight
-              ? `${fmtNum((emissionsInsight.metrics as { annualCo2eLb?: number })?.annualCo2eLb ?? null)} lb CO₂e/yr`
-              : "—"
-          }
-          sub={emissionsInsight ? ((emissionsInsight.metrics as { subregion?: string })?.subregion ?? "") : ""}
+          value={emissionsInsight ? `${fmtNum(emissionsInsight.annualCo2eLb ?? null)} lb CO₂e/yr` : "—"}
+          sub={emissionsInsight?.subregion ?? ""}
         />
       </div>
 
       {/* Interval chart */}
       <Card className="mt-4 border-border/70">
         <CardHeader className="flex flex-row items-center justify-between pb-2">
-          <CardTitle className="font-display text-base">Interval demand — last 30 days</CardTitle>
+          <CardTitle className="font-display text-base">Interval demand — last 30 days of data</CardTitle>
           <div className="flex gap-1.5">
             <ProvChip>measured</ProvChip>
             <ProvChip>peak-preserving decimation</ProvChip>
@@ -234,7 +256,7 @@ export default function Dashboard() {
                   labelFormatter={(ts) => new Date(Number(ts)).toLocaleString()}
                   formatter={(v) => [`${v} kW`, "demand"]}
                 />
-                <Area type="monotone" dataKey="kw" stroke="oklch(0.8 0.16 80)" strokeWidth={1.5} fill="url(#kwFill)" />
+                <Area type="monotone" dataKey="kw" stroke="oklch(0.8 0.16 80)" strokeWidth={1.5} fill="url(#kwFill)" isAnimationActive={false} dot={false} />
               </AreaChart>
             </ResponsiveContainer>
           )}
@@ -248,7 +270,7 @@ export default function Dashboard() {
             <CardTitle className="flex items-center gap-2 font-display text-base">
               <Flame className="h-4 w-4 text-primary" /> Demand heatmap
             </CardTitle>
-            {demandInsight && <ConfidenceBadge level={demandInsight.confidence} />}
+            {demand && <ConfidenceBadge level={summaryRow?.confidence ?? "medium"} />}
           </CardHeader>
           <CardContent>
             {demand?.heatmap ? (
@@ -283,8 +305,8 @@ export default function Dashboard() {
                   <div>
                     <p className="font-mono text-[10px] uppercase text-muted-foreground">Fit</p>
                     <p className="font-mono text-xs">
-                      R² {baseline.data.rSquared != null ? baseline.data.rSquared.toFixed(2) : "—"} · CV(RMSE){" "}
-                      {baseline.data.cvrmse != null ? `${(baseline.data.cvrmse * 100).toFixed(0)}%` : "—"}
+                      R² {baseline.data.rSquared != null ? baseline.data.rSquared.toFixed(2) : "n/a"} · CV(RMSE){" "}
+                      {baseline.data.cvrmse != null ? `${(baseline.data.cvrmse * 100).toFixed(0)}%` : "n/a (flat or archetype baseline)"}
                     </p>
                   </div>
                 </div>
@@ -293,10 +315,18 @@ export default function Dashboard() {
             ) : (
               <p className="text-sm text-muted-foreground">No baseline yet.</p>
             )}
-            {costInsight && (
+            {costInsight?.breakdown && (
               <div className="border-t border-border pt-3">
-                <p className="text-sm font-medium">{costInsight.title}</p>
-                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{costInsight.body}</p>
+                <p className="text-sm font-medium">Modeled annual cost on current rate</p>
+                <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground sm:grid-cols-4">
+                  <span>energy {fmtUsd(costInsight.breakdown.energy)}</span>
+                  <span>demand {fmtUsd(costInsight.breakdown.demand)}</span>
+                  <span>fixed {fmtUsd(costInsight.breakdown.fixed)}</span>
+                  <span className="text-foreground">total {fmtUsd(costInsight.breakdown.total)}</span>
+                </div>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                  Modeled estimate on your interval data and the seeded rate structure — not a bill reproduction.
+                </p>
               </div>
             )}
           </CardContent>
@@ -304,15 +334,17 @@ export default function Dashboard() {
       </div>
 
       {/* Tariff comparison */}
-      {tariffInsight && (
+      {tariffInsight && tariffInsight.length > 0 && (
         <Card className="mt-4 border-border/70">
           <CardHeader className="pb-2">
             <CardTitle className="font-display text-base">Rate check</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm font-medium">{tariffInsight.title}</p>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{tariffInsight.body}</p>
-            <TariffTable metrics={tariffInsight.metrics as { comparisons?: TariffRow[] } | null} />
+            <p className="text-sm font-medium">Your load profile re-priced on every seeded rate you may be eligible for</p>
+            {tariffInsight[0]?.eligibilityNote && (
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{tariffInsight[0].eligibilityNote}</p>
+            )}
+            <TariffTable metrics={{ comparisons: tariffInsight as unknown as TariffRow[] }} />
           </CardContent>
         </Card>
       )}
@@ -395,42 +427,59 @@ export default function Dashboard() {
 type TariffRow = {
   tariffName: string;
   utilityName: string;
-  annualCostUsd: number;
-  deltaVsCurrentUsd: number | null;
-  isCurrent: boolean;
-  confidence: string;
+  freshness: string;
+  isCurrentBasis?: boolean;
+  eligible: boolean;
+  ineligibleReason?: string | null;
+  annualCost: { total: number };
+  savingsVsCurrent: number;
   eligibilityNote?: string;
-  disclosures?: string[];
 };
 
 function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[] } | null }) {
   const rows = metrics?.comparisons ?? [];
   if (rows.length === 0) return null;
+  const noneEligible = rows.every((r) => !r.eligible);
   return (
+    <>
+    {noneEligible && (
+      <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+        No seeded rate matches this site's sector and peak-demand size. The seeded rate library is a snapshot — your actual utility rate may not be included. Cost figures use the closest available rate structure as a modeling basis.
+      </p>
+    )}
     <Table className="mt-3">
       <TableHeader>
         <TableRow>
           <TableHead className="font-mono text-xs">Rate</TableHead>
           <TableHead className="text-right font-mono text-xs">Annual cost</TableHead>
-          <TableHead className="text-right font-mono text-xs">Δ vs current</TableHead>
-          <TableHead className="font-mono text-xs">Confidence</TableHead>
+          <TableHead className="text-right font-mono text-xs">Savings vs current</TableHead>
+          <TableHead className="font-mono text-xs">Data freshness</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {rows.map((r, i) => (
-          <TableRow key={i}>
+          <TableRow key={i} className={r.eligible ? "" : "opacity-50"}>
             <TableCell className="text-xs">
-              {r.utilityName} — {r.tariffName} {r.isCurrent && <ProvChip>current</ProvChip>}
+              {r.utilityName} — {r.tariffName}
+              {r.isCurrentBasis && <span className="ml-2 rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10px] text-primary">current basis</span>}
+              {!r.eligible && <span className="ml-2 font-mono text-[10px] text-muted-foreground">ineligible{r.ineligibleReason ? `: ${r.ineligibleReason}` : ""}</span>}
             </TableCell>
-            <TableCell className="text-right font-mono text-xs">{fmtUsd(r.annualCostUsd)}</TableCell>
-            <TableCell className={`text-right font-mono text-xs ${r.deltaVsCurrentUsd != null && r.deltaVsCurrentUsd < 0 ? "text-emerald-400" : ""}`}>
-              {r.deltaVsCurrentUsd == null ? "—" : `${r.deltaVsCurrentUsd < 0 ? "−" : "+"}${fmtUsd(Math.abs(r.deltaVsCurrentUsd))}`}
+            <TableCell className="text-right font-mono text-xs">{r.eligible ? fmtUsd(r.annualCost.total) : "—"}</TableCell>
+            <TableCell className={`text-right font-mono text-xs ${r.eligible && r.savingsVsCurrent > 0 ? "text-emerald-400" : ""}`}>
+              {!r.eligible
+                ? "—"
+                : r.isCurrentBasis
+                  ? "—"
+                  : r.savingsVsCurrent >= 0
+                    ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr`
+                    : `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr`}
             </TableCell>
-            <TableCell className="text-xs text-muted-foreground">{r.confidence}</TableCell>
+            <TableCell className="text-xs text-muted-foreground">{r.freshness === "urdb_stale" ? "stale — verify with utility" : r.freshness.replace(/_/g, " ")}</TableCell>
           </TableRow>
         ))}
       </TableBody>
     </Table>
+    </>
   );
 }
 
@@ -450,7 +499,9 @@ function Kpi({ icon, label, value, sub }: { icon: React.ReactNode; label: string
 }
 
 function Heatmap({ grid }: { grid: number[][] }) {
-  const max = Math.max(...grid.flat(), 0.001);
+  const flat = grid.flat().filter((v) => v > 0);
+  const max = Math.max(...flat, 0.001);
+  const min = flat.length ? Math.min(...flat) : 0;
   return (
     <div className="overflow-x-auto">
       <div className="min-w-[560px]">
@@ -471,7 +522,7 @@ function Heatmap({ grid }: { grid: number[][] }) {
                   key={`${d}-${h}`}
                   title={`${DAYS[d]} ${h}:00 — ${v.toFixed(1)} kW avg`}
                   className="m-px h-4 rounded-[2px]"
-                  style={{ background: `oklch(0.8 0.16 80 / ${Math.max(0.04, (v / max) * 0.95)})` }}
+                  style={{ background: `oklch(0.8 0.16 80 / ${Math.max(0.04, Math.pow(Math.max(0, (v - min) / (max - min || 1)), 1.6) * 0.95)})` }}
                 />
               ))}
             </>
