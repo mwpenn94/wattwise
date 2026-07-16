@@ -130,9 +130,29 @@ function inHourWindow(hour: number, hourStart: number, hourEnd: number): boolean
   if (hourStart <= hourEnd) return hour >= hourStart && hour < hourEnd;
   return hour >= hourStart || hour < hourEnd; // overnight wrap
 }
+/** Widest-coverage energy period rate — same hierarchical rule as touRate's
+ * fallback (months dominate, then days, then hour span). Cycle 10 (pass 553):
+ * the old `last array entry` fallback priced unmatched hours at an arbitrary
+ * period — often the peak rate — biasing dispatch. */
+function widestCoverageRate(structure: TariffStructure): number {
+  let widest: { rate: number; key: [number, number, number] } | null = null;
+  for (const p of structure.energy) {
+    const span = (p.hourEnd - p.hourStart + 24) % 24 || 24;
+    const key: [number, number, number] = [p.months.length, p.daysOfWeek.length, span];
+    const wins =
+      !widest ||
+      key[0] > widest.key[0] ||
+      (key[0] === widest.key[0] && key[1] > widest.key[1]) ||
+      (key[0] === widest.key[0] && key[1] === widest.key[1] && key[2] > widest.key[2]);
+    if (wins) widest = { rate: p.ratePerUnit, key };
+  }
+  return widest ? widest.rate : 0;
+}
+
 export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): number[] {
   const out: number[] = new Array(8760);
   const start = new Date(refYear, 0, 1).getTime();
+  const fallbackRate = widestCoverageRate(structure);
   for (let h = 0; h < 8760; h++) {
     const ts = start + h * 3600_000;
     const d = new Date(ts);
@@ -145,7 +165,7 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): nu
         break;
       }
     }
-    if (rate === 0 && structure.energy.length > 0) rate = structure.energy[structure.energy.length - 1].ratePerUnit;
+    if (rate === 0 && structure.energy.length > 0) rate = fallbackRate;
     // demand-window adder to bias battery toward peak windows
     for (const dc of structure.demand) {
       if (!dc.months.includes(d.getMonth() + 1)) continue;
@@ -274,7 +294,10 @@ export function runScenario(
 
   let paybackYears: number | null = null;
   let paybackBand: string | null = null;
-  if (input.capexUsd && deltaCost < 0) {
+  // Cycle 10 (pass 553): negligible savings (< $1/yr) produce astronomically
+  // long, meaningless payback figures — suppress the payback rather than show
+  // a 50,000-year number.
+  if (input.capexUsd && deltaCost < -1) {
     paybackYears = input.capexUsd / -deltaCost;
     const lo = paybackYears * 0.75;
     const hi = paybackYears * 1.5;

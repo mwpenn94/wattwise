@@ -237,10 +237,20 @@ export async function getArchetype(buildingType: string, climateZone: string, vi
       ),
     )
     .limit(1);
-  if (rows.length === 0) {
-    rows = await db.select().from(archetypeProfiles).where(eq(archetypeProfiles.buildingType, buildingType)).limit(1);
-  }
-  return rows[0];
+  if (rows.length > 0) return { ...rows[0], zoneMatched: true };
+  // Cycle 10 (pass 546): graduated degradation — same building type in the SAME
+  // climate zone (any vintage) before falling back to any-zone. A cold-climate
+  // archetype silently substituted for a hot-climate site materially skews the
+  // baseline, so the any-zone fallback is flagged via zoneMatched=false and
+  // callers disclose the mismatch.
+  rows = await db
+    .select()
+    .from(archetypeProfiles)
+    .where(and(eq(archetypeProfiles.buildingType, buildingType), eq(archetypeProfiles.climateZone, climateZone)))
+    .limit(1);
+  if (rows.length > 0) return { ...rows[0], zoneMatched: true };
+  rows = await db.select().from(archetypeProfiles).where(eq(archetypeProfiles.buildingType, buildingType)).limit(1);
+  return rows.length > 0 ? { ...rows[0], zoneMatched: false } : undefined;
 }
 
 export async function listSeederRuns() {

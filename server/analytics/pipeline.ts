@@ -453,7 +453,9 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
 
   /* ---------- stage 7: opportunities ---------- */
   const oppCands: OpportunityCandidate[] = [];
-  const kWhRate = estimateBlendedRate(currentCost, annualUsage);
+  const { rate: kWhRate, isFallback: rateIsFallback } = estimateBlendedRate(currentCost, annualUsage);
+  const fallbackRateDisclosure =
+    "Savings priced at a $0.12/kWh national-average assumption because your annual cost basis could not be established — actual savings scale with your real rate.";
   if (demand && currentCost) {
     const anyRatchet = currentCost.monthlyDetails.some((m) => m.ratchetApplied);
     const demandRate = currentCost.breakdown.demand > 0 && demand.peakKw > 0 ? currentCost.breakdown.demand / 12 / demand.peakKw : 0;
@@ -487,7 +489,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       capexBand: "low",
       confidence: disaggMethod === "archetype_prior_only" ? "low" : "medium",
       rationale: `Cooling is an estimated ${(endUseFractions.cooling * 100).toFixed(0)}% of annual use (${dis.label}). 5–15% cooling savings from setpoint/schedule optimization is typical.`,
-      disclosures: [dis.disclaimer],
+      disclosures: rateIsFallback ? [dis.disclaimer, fallbackRateDisclosure] : [dis.disclaimer],
     });
   }
   if (endUseFractions?.lighting && annualUsage != null && endUseFractions.lighting > 0.1) {
@@ -501,7 +503,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       capexBand: "medium",
       confidence: disaggMethod === "archetype_prior_only" ? "low" : "medium",
       rationale: `Lighting is an estimated ${(endUseFractions.lighting * 100).toFixed(0)}% of annual use (${dis.label}). LED conversion typically cuts lighting energy 30–55%.`,
-      disclosures: [dis.disclaimer],
+      disclosures: rateIsFallback ? [dis.disclaimer, fallbackRateDisclosure] : [dis.disclaimer],
     });
   }
   if (demand && annualUsage != null) {
@@ -520,7 +522,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         capexBand: "none",
         confidence: "medium",
         rationale: `Overnight baseload averages ${baseloadKw.toFixed(1)} kW — ${((baseloadKw / demand.avgKw) * 100).toFixed(0)}% of your average load runs 24/7. Measured directly from your interval data. Savings estimated over ~${AFTER_HOURS_PER_YEAR.toLocaleString()} unoccupied hours/year.`,
-        disclosures: [MODELED_ESTIMATES_DISCLAIMER],
+        disclosures: rateIsFallback ? [MODELED_ESTIMATES_DISCLAIMER, fallbackRateDisclosure] : [MODELED_ESTIMATES_DISCLAIMER],
       });
     }
   }
@@ -600,18 +602,21 @@ function annualize(points: IntervalPoint[]): number | null {
   return (total / spanDays) * 365;
 }
 
-function estimateBlendedRate(cost: CostResult | null, annualUsage: number | null): number {
+function estimateBlendedRate(cost: CostResult | null, annualUsage: number | null): { rate: number; isFallback: boolean } {
   // All-in blended rate: total annual cost (energy + demand + fixed + CP − export)
   // per kWh (cycle 1, passes 9/19). Energy-only understates ¢/kWh on
   // demand-heavy tariffs and inflates opportunity paybacks.
   // Cycle 3, pass 69: no fabricated $0.05 floor — a genuinely low blended rate
   // (large industrial, heavy solar export) must flow through honestly; only
   // guard against degenerate non-positive values.
+  // Cycle 10 (pass 549): when no cost basis exists, the $0.12 national-average
+  // fallback is flagged so callers disclose it instead of silently pricing
+  // savings on a rate the customer may not pay.
   if (cost && annualUsage && annualUsage > 0) {
     const r = cost.breakdown.total / annualUsage;
-    if (Number.isFinite(r) && r > 0) return r;
+    if (Number.isFinite(r) && r > 0) return { rate: r, isFallback: false };
   }
-  return 0.12;
+  return { rate: 0.12, isFallback: true };
 }
 
 /** Mean kW between 01:00–04:00 in the meter's local timezone — the honest baseload estimator. */

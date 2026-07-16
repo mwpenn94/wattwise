@@ -118,7 +118,7 @@ export async function writeIntervals(
   const CHUNK = 1000;
   for (let i = 0; i < rowsToInsert.length; i += CHUNK) {
     const chunk = rowsToInsert.slice(i, i + CHUNK);
-    await db
+    const insRes = await db
       .insert(intervals)
       .values(chunk)
       .onDuplicateKeyUpdate({
@@ -133,6 +133,16 @@ export async function writeIntervals(
           precedence: sql`GREATEST(\`precedence\`, VALUES(\`precedence\`))`,
         },
       });
+    // Cycle 10 (pass 554): honest WriteResult accounting. MySQL reports
+    // affectedRows = inserts + 2×(duplicate-key updates), so rows that hit the
+    // race fallback were counted as `inserted` in the pre-scan but were really
+    // updates — reclassify them so the report the user sees is accurate.
+    const affected = Number((insRes as unknown as [{ affectedRows?: number }])[0]?.affectedRows ?? chunk.length);
+    const dupUpdates = Math.max(0, affected - chunk.length);
+    if (dupUpdates > 0) {
+      res.inserted -= dupUpdates;
+      res.replaced += dupUpdates;
+    }
   }
   return res;
 }

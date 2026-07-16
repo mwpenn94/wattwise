@@ -450,7 +450,7 @@ export const appRouter = router({
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
         // Build baseline hourly profile: measured intervals if available, else archetype
-        const { hourly, loadBasis, confidence, extrapolated, structure, co2eLbPerMwh, climateZone, tariffBasisDisclosure } = await buildScenarioBasis(site, ctx.user.id);
+        const { hourly, loadBasis, confidence, extrapolated, structure, co2eLbPerMwh, climateZone, tariffBasisDisclosure, archetypeZoneDisclosure } = await buildScenarioBasis(site, ctx.user.id);
         const t0 = Date.now();
         const scenarioInput: ScenarioInput = {
           kind: input.kind,
@@ -464,6 +464,7 @@ export const appRouter = router({
         };
         const results = runScenario(hourly, scenarioInput, structure, climateZone, co2eLbPerMwh, confidence, extrapolated);
         if (tariffBasisDisclosure) results.disclosures.push(tariffBasisDisclosure);
+        if (archetypeZoneDisclosure) results.disclosures.push(archetypeZoneDisclosure);
         if (loadBasis === "archetype_scaled") {
           // v1.6 convergence (pass 41): demand-charge and ratchet exposure on a
           // typical archetype shape is only as accurate as its peak fidelity.
@@ -570,6 +571,7 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
       extrapolated = spanDays < 270;
     }
   }
+  let archetypeZoneDisclosure: string | null = null;
   if (!hourly) {
     const arch = site.buildingType ? await h.getArchetype(site.buildingType, climateZone, vintageBandLocal(site.vintage)) : null;
     if (!arch || !site.sqft) {
@@ -582,6 +584,11 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
     hourly = (arch.shape8760 as number[]).map((f) => f * annual);
     confidence = "low";
     extrapolated = (arch.calibMinSqft != null && site.sqft < arch.calibMinSqft) || (arch.calibMaxSqft != null && site.sqft > arch.calibMaxSqft);
+    // Cycle 10 (pass 546): an any-zone archetype fallback silently substitutes a
+    // different climate's load shape — disclose the mismatch explicitly.
+    if (arch.zoneMatched === false) {
+      archetypeZoneDisclosure = `Baseline uses a ${site.buildingType} archetype from a different climate zone (no ${climateZone} profile is seeded) — heating/cooling shape may differ materially from your climate.`;
+    }
   }
 
   const tariffRows = await h.listTariffs("electric", site.state ?? undefined);
@@ -608,6 +615,7 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
     co2eLbPerMwh: ef.factor?.co2eLbPerMwh ?? 727.9,
     climateZone,
     tariffBasisDisclosure,
+    archetypeZoneDisclosure,
   };
 }
 

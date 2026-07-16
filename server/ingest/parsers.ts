@@ -190,7 +190,9 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
     sourceKey: name,
     commodity,
     usageUnit,
-    demandUnit: kwCol ? "kW" : null,
+    // Cycle 10 (pass 554): report kW whenever demand values were actually
+    // ingested, matching the ESPI path's espiHasDemand rule.
+    demandUnit: kwCol || ingestedMaxDemand != null ? "kW" : null,
     points,
     footerTotals,
     validation: { ingestedUsageSum, ingestedMaxDemand, footerUsageDelta, footerUsageDeltaPct, footerMaxDelta, pass, notes },
