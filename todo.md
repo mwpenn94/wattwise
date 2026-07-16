@@ -108,3 +108,4 @@
 - [x] Batch-21: NaN-safe battery dispatch thresholds; location refine flips attrSource + always re-infers climate zone (tests extended)
 - [x] Batch-22: stale writeIntervals re-flag documented (already fixed; evidence line added)
 - [x] Batch-23: Dashboard cost breakdown renders CP proxy as its own "coincident-peak" line so components reconcile with total (pass 772)
+- [x] Batch-24: split-timezone-state disclosure insight on quick-start + bill-entry meter creation (FL panhandle etc. — TOU/CP 1h-shift warning, verify prompt); Heatmap explicit "no demand data" empty state instead of faint uniform grid (passes 846/848/856)

@@ -149,6 +149,10 @@ export const appRouter = router({
           });
         });
         // Disclosure exists from the moment the site does — before any analysis.
+        // Batch-24 (passes 846/856): quick-start meters inherit tzForState(state),
+        // which is single-valued per state — split-timezone states get the
+        // ambiguity warning appended so TOU/demand-window shifts are never silent.
+        const tzNote = tzAmbiguityNote(parse.state);
         await h.addInsight({
           siteId: id,
           kind: "intake_assumptions",
@@ -156,10 +160,12 @@ export const appRouter = router({
           body:
             `This site was created from just an address. The first analysis uses disclosed placeholders: ` +
             assumptions.map((a) => `${a.field} → ${a.assumed}`).join("; ") +
-            `. Each "add detail" chip on the dashboard shows exactly what refining a field unlocks. ${MODELED_ESTIMATES_DISCLAIMER}`,
+            `. Each "add detail" chip on the dashboard shows exactly what refining a field unlocks.` +
+            (tzNote ? ` ${tzNote}` : "") +
+            ` ${MODELED_ESTIMATES_DISCLAIMER}`,
           severity: "info",
           confidence: "low",
-          provenance: { method: "quick_start_intake_v1", parsedState: parse.state, parsedZip: parse.zip },
+          provenance: { method: "quick_start_intake_v1", parsedState: parse.state, parsedZip: parse.zip, tzAmbiguous: tzNote != null },
           metrics: { assumptions },
         });
         await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name ?? parse.raw.slice(0, 60), quickStart: true });
@@ -488,6 +494,22 @@ export const appRouter = router({
             ctx.user.id,
           );
           meter = (await h.listMeters(input.siteId, ctx.user.id)).find((m) => m.id === meterId)!;
+          // Batch-24 (passes 846/856): lazily created bill-entry meters in
+          // split-timezone states carry the same ambiguity disclosure as
+          // quick-start sites — never a silent dominant-zone assignment.
+          const billTzNote = tzAmbiguityNote(site.state);
+          if (billTzNote) {
+            await h.addInsight({
+              siteId: input.siteId,
+              kind: "data_coverage",
+              title: "Meter timezone assumed from state — verify if in a minority clock zone",
+              body: billTzNote,
+              severity: "info",
+              confidence: "low",
+              provenance: { method: "tz_state_inference_v1", state: site.state, meterId: meter.id },
+              metrics: null,
+            });
+          }
         }
         const id = await h.createBill(
           {
@@ -705,6 +727,27 @@ export const appRouter = router({
 
 /* ---------------- scenario basis builder ---------------- */
 /** Cycle 3, passes 36/66: meter timezone derived from the site's state. */
+// Batch-24 (passes 846/856): states that span two clock zones — the map's single
+// value covers the dominant-population zone, and any meter created from bare
+// state inference in one of these states gets an explicit timezone-ambiguity
+// disclosure (TOU/demand-window/CP alignment may be shifted 1h in the minority
+// region; user should verify/override). ZIP-level tz mapping stays out of MVP
+// scope — the fix is disclosure, not silence.
+const SPLIT_TZ_STATES: Record<string, string> = {
+  FL: "panhandle (Central)", ID: "northern panhandle (Pacific)", IN: "northwest/southwest counties (Central)",
+  KY: "western half (Central)", MI: "western Upper Peninsula (Central)", TN: "eastern third (Eastern)",
+  SD: "western half (Mountain)", ND: "southwest corner (Mountain)", TX: "far-west El Paso region (Mountain)",
+  KS: "far-west counties (Mountain)", NE: "western panhandle (Mountain)", OR: "eastern Malheur County (Mountain)",
+  NV: "West Wendover area (Mountain)", AK: "Aleutians west of 169.5°W (Hawaii–Aleutian)",
+};
+
+function tzAmbiguityNote(state: string | null | undefined): string | null {
+  const st = (state ?? "").toUpperCase().trim();
+  const region = SPLIT_TZ_STATES[st];
+  if (!region) return null;
+  return `Timezone assumed ${tzForState(st)} (dominant zone for ${st}); the ${region} region uses a different clock zone. If this site is in that region, time-of-use periods, demand windows, and coincident-peak seasons may be shifted by one hour — verify the meter timezone.`;
+}
+
 function tzForState(state: string | null | undefined): string {
   const map: Record<string, string> = {
     AZ: "America/Phoenix",

@@ -528,6 +528,16 @@ function Heatmap({ grid }: { grid: number[][] }) {
   // near-invisible — misleading "no load" appearance. Render presence at a
   // fixed mid intensity instead.
   const uniform = flat.length > 0 && max - min < 1e-9;
+  // Batch-24 (pass 848): an all-zero/empty grid previously rendered the faint
+  // 0.04-intensity background — visually implying a low constant baseline load
+  // where none exists. Render an explicit empty state instead.
+  if (flat.length === 0) {
+    return (
+      <p className="py-8 text-center text-sm text-muted-foreground">
+        No demand data available for the heatmap — upload interval data to populate it.
+      </p>
+    );
+  }
   const intensity = (v: number) =>
     v <= 0 ? 0.04 : uniform ? 0.55 : Math.max(0.04, Math.pow(Math.max(0, (v - min) / (max - min)), 1.6) * 0.95);
   return (
