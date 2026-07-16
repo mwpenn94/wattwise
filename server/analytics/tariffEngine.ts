@@ -363,7 +363,15 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       }
       // Remainder (cpMonths beyond the data span) stays in the annual cp figure
       // and is disclosed — it cannot be attributed to a month with no data.
-      if (cpAllocated < cp - 0.005) {
+      // Batch-19 (pass 522): condition directly on the CAUSE (fewer billed months
+      // than the determinant spans) instead of a float comparison of derived
+      // totals — cpAllocated < cp is mathematically guaranteed exactly when
+      // cpMonthsBilled < cpMonths, so the old epsilon test was an indirect,
+      // rounding-fragile restatement of this condition. `cpAllocated` remains
+      // as the reconciliation accumulator (kept: it documents the Batch-13
+      // Σ(monthly) ≡ annual invariant).
+      void cpAllocated;
+      if (cpMonthsBilled < cpMonths) {
         disclosures.push(
           `CP charge spans ${cpMonths} billing months but only ${cpMonthsBilled} months of data are present — monthly rows include ${cpMonthsBilled} month(s) of CP charges; the annual total includes the full ${cpMonths}-month determinant.`,
         );

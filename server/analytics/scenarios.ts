@@ -156,16 +156,25 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): nu
   for (let h = 0; h < 8760; h++) {
     const ts = start + h * 3600_000;
     const d = new Date(ts);
+    // Batch-20 (pass 549): explicit matched flag instead of the `rate === 0`
+    // sentinel — a legitimately zero-priced period (e.g. free-nights TOU rider)
+    // matched but was then clobbered by the widest-coverage fallback, biasing
+    // the dispatch signal upward in exactly the hours a battery should charge.
+    // Note the demand-window adder below runs AFTER this block unconditionally,
+    // so adders were never dropped on unmatched hours (that half of the review
+    // finding was incorrect); only the zero-rate sentinel collision was real.
     let rate = 0;
+    let matched = false;
     for (const p of structure.energy) {
       if (!p.months.includes(d.getMonth() + 1)) continue;
       if (!p.daysOfWeek.includes(d.getDay())) continue;
       if (inHourWindow(d.getHours(), p.hourStart, p.hourEnd)) {
         rate = p.ratePerUnit;
+        matched = true;
         break;
       }
     }
-    if (rate === 0 && structure.energy.length > 0) rate = fallbackRate;
+    if (!matched && structure.energy.length > 0) rate = fallbackRate;
     // demand-window adder to bias battery toward peak windows
     for (const dc of structure.demand) {
       if (!dc.months.includes(d.getMonth() + 1)) continue;

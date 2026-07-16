@@ -504,9 +504,15 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // Batch-18 (pass 419): pass the raw window total so short-history sites (<25
   // days, annualUsage null) still get their real blended rate instead of the
   // $0.12 fallback — the rate is window-invariant even when annualization isn't.
-  const { rate: kWhRate, isFallback: rateIsFallback } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null);
+  const { rate: kWhRate, isFallback: rateIsFallback, fallbackReason } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null);
+  // Batch-19 (pass 539): the disclosure names the actual cause — a customer
+  // with usage data but no identified tariff was being told their "cost basis
+  // could not be established", which misdirects them toward re-uploading data
+  // instead of selecting a tariff.
   const fallbackRateDisclosure =
-    "Savings priced at a $0.12/kWh national-average assumption because your annual cost basis could not be established — actual savings scale with your real rate.";
+    fallbackReason === "no_tariff_cost_basis"
+      ? "Savings priced at a $0.12/kWh national-average assumption because no tariff could be identified to compute your real rate — select or verify your tariff to price savings at your actual rate."
+      : "Savings priced at a $0.12/kWh national-average assumption because your annual cost basis could not be established — actual savings scale with your real rate.";
   if (demand && currentCost) {
     const anyRatchet = currentCost.monthlyDetails.some((m) => m.ratchetApplied);
     const demandRate = currentCost.breakdown.demand > 0 && demand.peakKw > 0 ? currentCost.breakdown.demand / 12 / demand.peakKw : 0;
@@ -629,6 +635,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     emissions,
     insightsCount: insightRows.length,
     opportunitiesCount: ranked.length,
+    // Batch-19 (pass 539, adjudication corrected): this 0 is the INITIAL value,
+    // not a final override — execute() cannot know its own compute cost while
+    // still running. runAnalysisPipeline() meters the full wall-clock duration
+    // AFTER execute() resolves and does `result.marginalCostUsd += computeCost`
+    // on this same object before returning/persisting it, so callers and the
+    // analyses row always see the accumulated cost, never this literal.
     marginalCostUsd: 0,
     disclaimer: MODELED_ESTIMATES_DISCLAIMER,
   };
@@ -673,7 +685,11 @@ function totalImportKwh(points: IntervalPoint[]): number {
   return points.reduce((a, p) => a + Math.max(0, p.usage), 0);
 }
 
-function estimateBlendedRate(cost: CostResult | null, annualUsage: number | null, rawUsageKwh?: number | null): { rate: number; isFallback: boolean } {
+function estimateBlendedRate(
+  cost: CostResult | null,
+  annualUsage: number | null,
+  rawUsageKwh?: number | null,
+): { rate: number; isFallback: boolean; fallbackReason?: "no_tariff_cost_basis" | "no_usage_data" } {
   // All-in blended rate: total annual cost (energy + demand + fixed + CP − export)
   // per kWh (cycle 1, passes 9/19). Energy-only understates ¢/kWh on
   // demand-heavy tariffs and inflates opportunity paybacks.
@@ -695,7 +711,16 @@ function estimateBlendedRate(cost: CostResult | null, annualUsage: number | null
     const r = cost.breakdown.total / rawUsageKwh;
     if (Number.isFinite(r) && r > 0) return { rate: r, isFallback: false };
   }
-  return { rate: 0.12, isFallback: true };
+  // Batch-19 (pass 539): name WHY the fallback fired so the disclosure can be
+  // accurate — "no tariff/cost basis" (usage exists but no cost could be
+  // computed, e.g. no tariff identified) is a different customer situation
+  // from "no usage data at all", and the generic wording blamed the wrong
+  // cause in the former case.
+  return {
+    rate: 0.12,
+    isFallback: true,
+    fallbackReason: (annualUsage && annualUsage > 0) || (rawUsageKwh && rawUsageKwh > 0) ? "no_tariff_cost_basis" : "no_usage_data",
+  };
 }
 
 /** Mean kW between 01:00–04:00 in the meter's local timezone — the honest baseload estimator. */
