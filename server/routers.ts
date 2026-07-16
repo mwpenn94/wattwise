@@ -356,6 +356,24 @@ export const appRouter = router({
                 ctx.user.id,
               );
               meter = (await h.listMeters(input.siteId, ctx.user.id)).find((m) => m.id === meterId)!;
+              // Batch-37 (pass 1505): file-upload meters in split-timezone
+              // states get the SAME ambiguity disclosure as quick-start and
+              // bill-entry meters (Batch-24) — a FL-panhandle upload must not
+              // be silently pinned to America/New_York when TOU/demand windows
+              // could shift by an hour.
+              const uploadTzNote = tzAmbiguityNote(site.state);
+              if (uploadTzNote) {
+                await h.addInsight({
+                  siteId: input.siteId,
+                  kind: "data_coverage",
+                  title: "Meter timezone assumed from state — verify if in a minority clock zone",
+                  body: uploadTzNote,
+                  severity: "info",
+                  confidence: "low",
+                  provenance: { method: "tz_state_inference_v1", state: site.state, meterId: meter.id, source: "file_upload" },
+                  metrics: null,
+                });
+              }
             }
             const db = (await getDb())!;
             const w = await writeIntervals(db, meter.id, s, uploadId, 2);

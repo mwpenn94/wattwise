@@ -330,6 +330,17 @@ describe("Scenario engine", () => {
     expect(Math.abs(delta)).toBeLessThanOrEqual(baselineTotal * 1.0001);
     expect(res.disclosures.join(" ")).toContain("capped at 100%");
   });
+
+  // Batch-37 (pass 1493): climate zone lookup is case/whitespace-normalized —
+  // a lowercase '2b' must yield the SAME solar production as '2B', never the
+  // generic fallback (which would silently misprice while claiming a zone match).
+  it("solar yield lookup is case-insensitive (lowercase zone matches, no silent fallback)", () => {
+    const upper = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, FLAT, "2B", 850, "medium", false);
+    const lower = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, FLAT, "2b", 850, "medium", false);
+    expect(lower.perCommodity.electric?.deltaUsage).toBeCloseTo(upper.perCommodity.electric?.deltaUsage ?? 0, 6);
+    // and the unmapped-zone low-confidence disclosure must NOT fire for '2b'
+    expect(lower.disclosures.join(" ")).not.toContain("no mapped solar-yield entry");
+  });
 });
 
 describe("Honest-labeling and cost-cap invariants", () => {

@@ -377,7 +377,11 @@ export default function Dashboard() {
             {tariffInsight[0]?.eligibilityNote && (
               <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{tariffInsight[0].eligibilityNote}</p>
             )}
-            <TariffTable metrics={{ comparisons: tariffInsight as unknown as TariffRow[] }} />
+            {/* Batch-37 (pass 1518): when no current-cost basis exists the
+                pipeline zeroes savingsVsCurrent (Batch-35) — rendering those
+                zeros as "saves $0/yr" would fake a comparison against a real
+                baseline. Pass the basis flag so the column can say so instead. */}
+            <TariffTable metrics={{ comparisons: tariffInsight as unknown as TariffRow[], hasCostBasis: costInsight != null }} />
           </CardContent>
         </Card>
       )}
@@ -469,10 +473,13 @@ type TariffRow = {
   eligibilityNote?: string;
 };
 
-function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[] } | null }) {
+function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCostBasis?: boolean } | null }) {
   const rows = metrics?.comparisons ?? [];
   if (rows.length === 0) return null;
   const noneEligible = rows.length > 0 && rows.every((r) => !r.eligible);
+  // Batch-37 (pass 1518): no current-cost basis → savings deltas are zero
+  // sentinels, not real comparisons — never render them as "$0/yr".
+  const hasCostBasis = metrics?.hasCostBasis ?? true;
   return (
     <>
     {noneEligible && (
@@ -506,9 +513,11 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[] } | nul
             <TableCell className={`text-right font-mono text-xs ${r.eligible && r.savingsVsCurrent > 0 ? "text-emerald-400" : !r.eligible ? "text-muted-foreground/70" : ""}`}>
               {r.isCurrentBasis
                 ? "—"
-                : r.savingsVsCurrent >= 0
-                  ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr${r.eligible ? "" : " (ref)"}` /* Batch-30 (pass 1078): verified both branches carry (ref) */
-                  : `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr${r.eligible ? "" : " (ref)"}`}
+                : !hasCostBasis
+                  ? "— (no current-cost baseline)" /* Batch-37 (pass 1518): zeroed sentinel, not a real delta */
+                  : r.savingsVsCurrent >= 0
+                    ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr${r.eligible ? "" : " (ref)"}` /* Batch-30 (pass 1078): verified both branches carry (ref) */
+                    : `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr${r.eligible ? "" : " (ref)"}`}
             </TableCell>
             <TableCell className="text-xs text-muted-foreground">{r.freshness === "urdb_stale" ? "stale — verify with utility" : r.freshness.replace(/_/g, " ")}</TableCell>
           </TableRow>

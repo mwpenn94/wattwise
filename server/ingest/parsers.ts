@@ -313,14 +313,22 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
       for (const r of readings) {
         const tp = r.timePeriod as Record<string, unknown> | undefined;
         const start = parseInt(String(tp?.start ?? "0"), 10);
-        const durationSec = parseInt(String(tp?.duration ?? "900"), 10);
+        // Batch-37 (passes 1494/1504): `?? "900"` only covers a MISSING duration.
+        // A present-but-malformed duration (parseInt → NaN) or a non-positive one
+        // (0 / negative) would poison downstream math — uom-38 feeds compute
+        // usage = demand × durationSec / 3600 (NaN usage corrupts every sum) and
+        // durationMin ≤ 0 rows are excluded from kW derivation. Treat those
+        // readings as malformed and skip them THROUGH the disclosed-skip path
+        // (counted in rowsSkipped + validation note), never silently defaulted.
+        const durationRaw = parseInt(String(tp?.duration ?? "900"), 10);
+        const durationSec = Number.isFinite(durationRaw) && durationRaw > 0 ? durationRaw : NaN;
         const value = parseFloat(String(r.value ?? "0"));
         // Batch-36 (pass 1374): a reading with an unparseable start time or a
         // non-numeric value is still SKIPPED (ingesting garbage would corrupt
         // totals), but the omission is now COUNTED and disclosed in validation
         // notes instead of silently vanishing — an unnoticed gap underestimates
         // usage/demand in every downstream cost analysis.
-        if (!start || !Number.isFinite(value)) {
+        if (!start || !Number.isFinite(value) || !Number.isFinite(durationSec)) {
           skippedReadings++;
           continue;
         }
@@ -374,7 +382,7 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
           // when malformed readings were dropped — disclose the count.
           ...(skippedReadings > 0
             ? [
-                `${skippedReadings} interval reading${skippedReadings === 1 ? " was" : "s were"} skipped (unparseable start time or non-numeric value) — ingested totals may underestimate actual usage; verify against your utility portal.`,
+                `${skippedReadings} interval reading${skippedReadings === 1 ? " was" : "s were"} skipped (unparseable start time, non-numeric value, or invalid duration) — ingested totals may underestimate actual usage; verify against your utility portal.`,
               ]
             : []),
           ...(uom === "119"

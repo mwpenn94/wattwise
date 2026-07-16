@@ -183,6 +183,35 @@ describe("ESPI Green Button XML parser", () => {
     expect(series[0]!.validation.notes.some((n) => n.includes("2 interval readings were skipped"))).toBe(true);
   });
 
+  // Batch-37 (passes 1494/1504): present-but-malformed or non-positive
+  // durations are skipped through the disclosed path — a uom-38 (Watts) feed
+  // with duration garbage must never produce NaN usage.
+  it("skips readings with malformed or zero durations (no NaN/inflated energy)", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:espi="http://naesb.org/espi">
+  <entry><content>
+    <espi:IntervalBlock>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>3600</espi:duration><espi:start>1717200000</espi:start></espi:timePeriod>
+        <espi:value>1500</espi:value>
+      </espi:IntervalReading>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>abc</espi:duration><espi:start>1717203600</espi:start></espi:timePeriod>
+        <espi:value>2500</espi:value>
+      </espi:IntervalReading>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>0</espi:duration><espi:start>1717207200</espi:start></espi:timePeriod>
+        <espi:value>2500</espi:value>
+      </espi:IntervalReading>
+    </espi:IntervalBlock>
+  </content></entry>
+</feed>`;
+    const series = parseEspiXml(xml);
+    expect(series[0]!.points.length).toBe(1);
+    expect(series[0]!.rowsSkipped).toBe(2);
+    expect(series[0]!.points.every((p) => Number.isFinite(p.usage) && p.durationMin > 0)).toBe(true);
+  });
+
   it("reports rowsSkipped 0 and no skip note for a clean feed", () => {
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:espi="http://naesb.org/espi">

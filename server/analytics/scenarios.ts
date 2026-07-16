@@ -44,8 +44,15 @@ function solarHourlyShape(hourOfYear: number): number {
 export const SOLAR_FALLBACK_YIELD_KWH_PER_KW = 1500;
 
 /** True when the climate zone has a mapped PVWatts-typical yield. */
+/** Batch-37 (pass 1493): zone keys are uppercase ("2B", "4A") but site
+ * climateZone is free-text user input (siteInput allows any ≤16-char string) —
+ * a lowercase "4a" must match its zone, not silently fall to the generic
+ * fallback yield while the disclosure names the zone as if it were mapped. */
+function normZone(climateZone: string): string {
+  return climateZone.trim().toUpperCase();
+}
 export function solarZoneMapped(climateZone: string): boolean {
-  return SOLAR_YIELD_BY_ZONE[climateZone] != null;
+  return SOLAR_YIELD_BY_ZONE[normZone(climateZone)] != null;
 }
 
 export function solarProduction8760(kwDc: number, climateZone: string): number[] {
@@ -53,7 +60,9 @@ export function solarProduction8760(kwDc: number, climateZone: string): number[]
   // they already include standard system losses (~14%: soiling, wiring,
   // inverter, availability). Callers must NOT derate kwDc again
   // (deliverable convergence cycle 5: double-loss finding, 8 passes).
-  const annualYield = (SOLAR_YIELD_BY_ZONE[climateZone] ?? SOLAR_FALLBACK_YIELD_KWH_PER_KW) * kwDc;
+  // Batch-37 (pass 1493): case/whitespace-normalized lookup — keeps the yield
+  // and the solarZoneMapped disclosure consistent for any input casing.
+  const annualYield = (SOLAR_YIELD_BY_ZONE[normZone(climateZone)] ?? SOLAR_FALLBACK_YIELD_KWH_PER_KW) * kwDc;
   const raw: number[] = new Array(8760);
   let sum = 0;
   for (let h = 0; h < 8760; h++) {
