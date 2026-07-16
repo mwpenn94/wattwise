@@ -687,6 +687,10 @@ export const appRouter = router({
             extrapolated: results.extrapolated,
           });
         });
+        // Batch-33 (pass 1225): metering stays AFTER the quota-locked save — a
+        // failed save must never consume quota. (Verified ordering; the LLM/
+        // compute meter events inside the pipeline are cost-metering, not
+        // scenario-quota events.)
         await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0, tier });
         await h.audit(ctx.user.id, "scenario_run", "scenario", String(id), { kind: input.kind, siteId: site.id });
         return { id, results };
@@ -817,14 +821,23 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   }
 
   const tariffRows = await h.listTariffs("electric", site.state ?? undefined);
-  const current = meter?.currentTariffId ? tariffRows.find((t) => t.id === meter.currentTariffId) : undefined;
+  // Batch-33 (pass 1225): the explicitly assigned tariff must be fetched
+  // DIRECTLY, not looked up inside the state-filtered list — otherwise an
+  // assigned rate whose eligibility list mismatches site.state silently
+  // vanished and the basis fell back to an arbitrary eligible tariff with no
+  // disclosure that the user's own assignment was ignored.
+  const assigned = meter?.currentTariffId ? await h.getTariff(meter.currentTariffId) : undefined;
+  const current = assigned && assigned.commodity === "electric" ? assigned : undefined;
+  const currentStateMismatch = current ? !tariffRows.some((t) => t.id === current.id) : false;
   const utilityMatch = tariffRows.find((t) => site.utilityName && t.utilityName.toLowerCase().includes(site.utilityName.toLowerCase().split(" ")[0]));
   const chosen = current ?? utilityMatch ?? tariffRows[0];
   if (!chosen) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No tariff data available for scenario costing" });
   // Cycle 3, pass 56: disclose when the cost basis was not the user's actual
   // assigned rate — an arbitrary seeded tariff can materially shift projections.
   const tariffBasisDisclosure = current
-    ? null
+    ? currentStateMismatch
+      ? `Cost basis: your assigned rate ${chosen.utilityName} ${chosen.name} — note its eligibility list does not include this site's state (${site.state ?? "unknown"}); verify the assignment is correct.`
+      : null
     : utilityMatch
       ? `Cost basis: ${chosen.utilityName} ${chosen.name} matched by utility name — assign your actual rate on the meter for firmer numbers.`
       : `Cost basis: no rate is assigned to this meter and no seeded rate matched your utility, so the first available ${chosen.utilityName} ${chosen.name} rate was used. Projections may shift materially on your actual tariff.`;

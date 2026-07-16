@@ -172,8 +172,14 @@ export function fitCaltrackMonthly(
     // also dimensionally consistent; 0.35 ≈ fraction of days whose mean temp
     // falls inside the shifted balance band (flat-distribution approximation,
     // disclosed as an approximation).
-    const cdd = Math.max(0, nrm.cddBase65 + Math.max(0, 65 - cb) * daysInMonth[m] * 0.35); // balance-point adjustment approximation
-    const hdd = Math.max(0, nrm.hddBase65 - Math.max(0, 65 - hb) * daysInMonth[m] * 0.35);
+    // Batch-33 (pass 1251): the balance-point shift must be SIGNED. The old
+    // Math.max(0, 65 - cb) truncated the CDD adjustment to zero whenever the
+    // fitted cooling balance sat ABOVE 65°F (cb > 65 must DECREASE base-65 CDD:
+    // a higher balance point means fewer cooling degree-days), and the HDD term
+    // similarly must INCREASE when hb > 65 and decrease when hb < 65. Only the
+    // outer clamp keeps a month's degree-days non-negative.
+    const cdd = Math.max(0, nrm.cddBase65 + (65 - cb) * daysInMonth[m] * 0.35); // balance-point adjustment approximation (signed)
+    const hdd = Math.max(0, nrm.hddBase65 + (hb - 65) * daysInMonth[m] * 0.35);
     annual += Math.max(0, fit.b0 * daysInMonth[m] + fit.b1 * cdd + fit.b2 * hdd);
   }
   disclosures.push(`Annualized usage computed on ${LABEL_NORMAL_YEAR} (NOAA 1991–2020 station normals).`);

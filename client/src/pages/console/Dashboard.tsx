@@ -204,9 +204,18 @@ export default function Dashboard() {
           icon={<Activity className="h-4 w-4" />}
           label="Load factor"
           value={demand ? `${(demand.loadFactor * 100).toFixed(0)}%` : "—"}
-          /* Batch-29 (pass 1018): a low load factor implies demand-charge exposure
-             only on tariffs that HAVE demand charges — phrase conditionally. */
-          sub={demand ? (demand.loadFactor < 0.4 ? "peaky profile — costly if your tariff has demand charges" : "reasonably flat") : ""}
+          /* Batch-29 (pass 1018) + Batch-33 (pass 1248): a low load factor implies
+             demand-charge exposure only on tariffs that HAVE demand charges — gate
+             the cost warning on the actual breakdown (demand or CP $ > 0). */
+          sub={
+            demand
+              ? demand.loadFactor < 0.4
+                ? (costInsight?.breakdown?.demand ?? 0) + (costInsight?.breakdown?.cp ?? 0) > 0
+                  ? "peaky profile — costly on your demand-charge rate"
+                  : "peaky profile — matters only on rates with demand charges"
+                : "reasonably flat"
+              : ""
+          }
         />
         <Kpi
           icon={<BarChart3 className="h-4 w-4" />}
