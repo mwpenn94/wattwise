@@ -94,10 +94,15 @@ export async function recordMeterEvent(e: MeterEvent): Promise<number> {
   return total;
 }
 
-/** Month-to-date LLM spend for the account. */
+/** Month-to-date LLM spend for the account.
+ * Batch-25 (pass 867 class): when the DB is unavailable the spend is UNKNOWN,
+ * not zero — returning 0 here would silently disable the free-tier LLM budget
+ * kill-switch. Fail closed: report the budget as exhausted (Infinity) so
+ * `llmBudgetAllows` degrades to template-only parsing rather than allowing
+ * unmetered LLM spend. */
 export async function monthToDateLlmSpend(userId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return 0;
+  if (!db) return Number.POSITIVE_INFINITY;
   // Cycle 6 (pass 327): UTC month boundary — consistent with countUploadsThisMonth
   // and countScenariosThisMonth (createdAt is stored in UTC).
   const now = new Date();
@@ -120,10 +125,13 @@ export async function llmBudgetAllows(userId: number, tier: string, estimatedCal
   return mtd + estimatedCallCostUsd <= FREE_TIER_MONTHLY_LLM_BUDGET_USD;
 }
 
-/** Per-analysis total; used by AC5 test and the dashboard unit-economics card. */
+/** Per-analysis total; used by AC5 test and the dashboard unit-economics card.
+ * Batch-25 (pass 867): DB unavailable means the total is UNKNOWN — returning 0
+ * would make `assertFreeTierCostCap` report false compliance. Throw so callers
+ * must handle the enforcement gap explicitly instead of silently passing. */
 export async function analysisTotalCost(analysisId: number): Promise<number> {
   const db = await getDb();
-  if (!db) return 0;
+  if (!db) throw new Error("cost enforcement unavailable: database connection required to verify per-analysis spend");
   const rows = await db
     .select({ total: sql<number>`COALESCE(SUM(${metering.totalCostUsd}), 0)` })
     .from(metering)
@@ -131,8 +139,15 @@ export async function analysisTotalCost(analysisId: number): Promise<number> {
   return Number(rows[0]?.total ?? 0);
 }
 
-/** Free-tier cost-cap assertion — logs breach and returns compliance. */
+/** Free-tier cost-cap assertion — logs breach and returns compliance.
+ * Batch-25 (pass 867): if the spend cannot be verified (DB down), fail closed
+ * with ok:false and totalUsd:NaN rather than reporting a false 'compliant'. */
 export async function assertFreeTierCostCap(analysisId: number): Promise<{ ok: boolean; totalUsd: number; capUsd: number }> {
-  const totalUsd = await analysisTotalCost(analysisId);
-  return { ok: totalUsd <= FREE_TIER_MAX_COST_USD, totalUsd, capUsd: FREE_TIER_MAX_COST_USD };
+  try {
+    const totalUsd = await analysisTotalCost(analysisId);
+    return { ok: totalUsd <= FREE_TIER_MAX_COST_USD, totalUsd, capUsd: FREE_TIER_MAX_COST_USD };
+  } catch {
+    console.error("[COST-CAP] enforcement check failed (db unavailable) — failing closed for analysis", analysisId);
+    return { ok: false, totalUsd: Number.NaN, capUsd: FREE_TIER_MAX_COST_USD };
+  }
 }

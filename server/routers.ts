@@ -618,7 +618,10 @@ export const appRouter = router({
           batteryKw: z.number().positive().max(500_000).optional(),
           efficiencyReductions: z.record(z.string(), z.number().min(0).max(0.9)).optional(),
           evAnnualKwh: z.number().positive().max(10_000_000).optional(),
-          capexUsd: z.number().positive().optional(),
+          // Batch-25 (pass 865): min(0), not positive() — capexUsd=0 is a valid
+          // no-capex scenario (Batch-18 gives it paybackYears=0, "immediate — no
+          // upfront cost"); positive() silently rejected it at the API boundary.
+          capexUsd: z.number().min(0).optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {

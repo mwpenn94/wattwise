@@ -109,3 +109,4 @@
 - [x] Batch-22: stale writeIntervals re-flag documented (already fixed; evidence line added)
 - [x] Batch-23: Dashboard cost breakdown renders CP proxy as its own "coincident-peak" line so components reconcile with total (pass 772)
 - [x] Batch-24: split-timezone-state disclosure insight on quick-start + bill-entry meter creation (FL panhandle etc. — TOU/CP 1h-shift warning, verify prompt); Heatmap explicit "no demand data" empty state instead of faint uniform grid (passes 846/848/856)
+- [x] Batch-25: capexUsd=0 accepted by scenario input schema (no-capex path reachable); cost enforcement fails closed on DB unavailability — LLM kill-switch engages (Infinity spend), analysisTotalCost throws, assertFreeTierCostCap returns ok:false/NaN instead of false compliance (passes 865/867)
