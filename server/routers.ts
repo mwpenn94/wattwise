@@ -130,6 +130,12 @@ export const appRouter = router({
           siteId: z.number(),
           filename: z.string().max(512),
           format: z.enum(["xlsx", "csv", "espi_xml"]),
+          // Batch-14 (pass 126): layered size caps — Express json body limit (50mb)
+          // rejects oversized payloads BEFORE zod/base64 decode; this zod max
+          // (≈50MB decoded: 50MiB × 4/3 base64 expansion ≈ 69.9M chars) matches
+          // MAX_UPLOAD_BYTES, and preParseGate re-checks the decoded byte length.
+          // A payload that exhausts memory can't reach Buffer.from: Express has
+          // already 413'd anything over 50mb on the wire.
           contentBase64: z.string().max(70_000_000),
           commodityHint: z.enum(["electric", "gas", "water"]).optional(),
         }),

@@ -87,12 +87,17 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
     // cap can never be dodged by aborted runs; metering failure must not mask
     // the original error.
     const failDurationMs = Date.now() - t0;
+    // Batch-14 (pass 129): persist the failure-path compute cost onto the
+    // analysis row too — the metering table already counted it toward the cap,
+    // but the analysis record showed $0 for failed runs, understating displayed
+    // marginal cost.
+    let failCost = 0;
     try {
-      await recordMeterEvent({ userId, analysisId, kind: "analysis_pipeline_failed", computeMs: failDurationMs, tier });
+      failCost = await recordMeterEvent({ userId, analysisId, kind: "analysis_pipeline_failed", computeMs: failDurationMs, tier });
     } catch (meterErr) {
       console.error("[pipeline] failed to record meter event for failed analysis", analysisId, meterErr);
     }
-    await h.updateAnalysis(analysisId, { status: msg.includes("timeout") ? "timeout" : "failed", error: msg, durationMs: failDurationMs });
+    await h.updateAnalysis(analysisId, { status: msg.includes("timeout") ? "timeout" : "failed", error: msg, durationMs: failDurationMs, marginalCostUsd: failCost });
     await h.audit(userId, "analysis_failed", "analysis", String(analysisId), { siteId: site.id, error: msg, durationMs: failDurationMs });
     throw e;
   }
