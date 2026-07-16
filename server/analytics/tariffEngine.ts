@@ -385,9 +385,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       "Demand ratchet applied in one or more months — billed demand reflects the tariff's ratchet floor from prior-period peaks, not that month's actual peak.",
     );
   }
-  if (exportTotal > 0 && structure.exportRate && structure.exportRate.type !== "net_metering_retail") {
+  // Batch-16 (pass 272): scope this disclosure to types that actually credit at a
+  // non-retail rate. net_metering_retail credits at full retail (disclosure would
+  // mislead), and "zero" pays nothing ("credited at buyback rate" would be false).
+  if (exportTotal > 0 && structure.exportRate && structure.exportRate.type !== "net_metering_retail" && structure.exportRate.type !== "zero") {
     disclosures.push(
-      "Exported energy is credited at the utility's export/buyback rate, which is below the retail import rate — export credits never offset fixed or demand charges at retail value.",
+      "Exported energy is credited at the utility's export/buyback rate, typically below the retail import rate — these credits do not offset fixed or demand charges at retail value.",
     );
   }
 

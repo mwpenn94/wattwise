@@ -461,17 +461,22 @@ export async function exportUserData(userId: number) {
       .from(intervals)
       .where(eq(intervals.meterId, mid));
     intervalSummaries.push({ meterId: mid, ...st[0] });
+    // Batch-16 (passes 256/266): when a meter exceeds the cap, keep the MOST
+    // RECENT rows (a data subject's recent history is the valuable part) and
+    // say so accurately in the note. Query newest-first, then reverse so the
+    // export artifact itself stays chronological (oldest→newest).
     const rows = await db
       .select({ ts: intervals.ts, durationMin: intervals.durationMin, usage: intervals.usage, demand: intervals.demand })
       .from(intervals)
       .where(eq(intervals.meterId, mid))
-      .orderBy(intervals.ts)
+      .orderBy(desc(intervals.ts))
       .limit(INTERVAL_EXPORT_CAP + 1);
     const truncated = rows.length > INTERVAL_EXPORT_CAP;
+    const kept = (truncated ? rows.slice(0, INTERVAL_EXPORT_CAP) : rows).reverse();
     intervalPoints.push({
       meterId: mid,
       truncatedAtRows: truncated ? INTERVAL_EXPORT_CAP : null,
-      points: (truncated ? rows.slice(0, INTERVAL_EXPORT_CAP) : rows).map((r) => ({
+      points: kept.map((r) => ({
         ts: Number(r.ts),
         durationMin: r.durationMin,
         usage: Number(r.usage),
@@ -486,7 +491,7 @@ export async function exportUserData(userId: number) {
     intervalSummaries,
     intervalPoints,
     intervalExportNote:
-      "Raw interval readings included per meter, capped at 100,000 rows each (oldest first); intervalSummaries reflect the full stored range. Meters exceeding the cap are flagged via truncatedAtRows.",
+      "Raw interval readings included per meter in chronological order. Meters with more than 100,000 stored rows are capped to the MOST RECENT 100,000 (older rows omitted) and flagged via truncatedAtRows; intervalSummaries reflect the full stored range.",
     bills: userBills,
     baselines: userBaselines,
     scenarios: userScenarios,

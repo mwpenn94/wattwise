@@ -210,7 +210,8 @@ export default function Dashboard() {
           icon={<Leaf className="h-4 w-4" />}
           label="Emissions"
           value={emissionsInsight ? `${fmtNum(emissionsInsight.annualCo2eLb ?? null)} lb CO₂e/yr` : "—"}
-          sub={emissionsInsight?.subregion ? `${emissionsInsight.subregion} · eGRID annual avg` : ""}
+          /* Batch-16 (pass 268): eGRID provenance label is unconditional whenever a figure is shown */
+          sub={emissionsInsight ? `${emissionsInsight.subregion ? `${emissionsInsight.subregion} · ` : ""}eGRID annual avg` : ""}
         />
       </div>
 

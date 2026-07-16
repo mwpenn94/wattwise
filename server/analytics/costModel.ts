@@ -54,7 +54,17 @@ export interface MeterEvent {
   tier: string;
 }
 
-/** Record a metering row; returns totalCostUsd for the event. */
+/**
+ * Record a metering row; returns totalCostUsd for the event.
+ *
+ * Batch-16 (pass 257) — two-cap model, adjudicated: `analysisId` MAY be null for
+ * pre-analysis events (e.g. bill OCR before an analysis row exists). Those events
+ * are excluded from `analysisTotalCost` (per-analysis AC5 cap), but they cannot
+ * bypass spend limits: every LLM call is gated BEFORE invocation by
+ * `llmBudgetAllows` → `monthToDateLlmSpend`, which aggregates by userId across
+ * ALL kinds regardless of analysisId. Callers that do have an analysisId must
+ * always pass it so per-analysis unit economics stay complete.
+ */
 export async function recordMeterEvent(e: MeterEvent): Promise<number> {
   const db = await getDb();
   const llm = llmCostUsd(e.llmTokensIn ?? 0, e.llmTokensOut ?? 0);
