@@ -89,7 +89,7 @@ export default function Dashboard() {
     demand?: Demand | null;
     benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
     emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number } | null;
-    currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number } } | null;
+    currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null } } | null;
     tariffComparisons?: Array<{
       tariffName: string;
       utilityName: string;
@@ -336,6 +336,10 @@ export default function Dashboard() {
                   <span>energy {fmtUsd(costInsight.breakdown.energy)}</span>
                   <span>demand {fmtUsd(costInsight.breakdown.demand)}</span>
                   <span>fixed {fmtUsd(costInsight.breakdown.fixed)}</span>
+                  {/* Batch-23 (pass 772): CP proxy charges are tracked separately from
+                      windowed demand in the engine breakdown — omitting this line made
+                      energy+demand+fixed visibly fall short of total for CP tariffs. */}
+                  {(costInsight.breakdown.cp ?? 0) > 0 && <span>coincident-peak {fmtUsd(costInsight.breakdown.cp)}</span>}
                   <span className="text-foreground">total {fmtUsd(costInsight.breakdown.total)}</span>
                 </div>
                 <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">

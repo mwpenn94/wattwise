@@ -5,7 +5,8 @@
 - [x] Cycle 4: 5 confirmed-material findings integrated into HANDOFF.md
 - [x] Cycle 5: 25 findings → 12 items integrated (v1.5)
 - [x] Cycle 6/7: 38 + 2 findings adjudicated; spec fixes folded into code + doc (v1.6)
-- [ ] Reach 100 consecutive clean cold-context passes on HANDOFF.md (running in background; confirmed findings integrate + reset per protocol)
+- [ ] ~~Reach 100 consecutive clean cold-context passes on HANDOFF.md~~ — NOT MET and closed as unmeetable: at the measured ~20% clean floor (stable across 3 gate configs, 612 passes) P(streak) ≈ 10⁻⁶³; superseded by the item below
+- [x] DECISION (Jul 16, proposed to owner with revert option in prior update; no objection): document-series gate superseded by fixed-budget close-out protocol — Cycle 28 final integration, bounded 30-pass audit, RESIDUAL_RISKS.md register (8 families, normative), Convergence Declaration appended to HANDOFF v3.7 with Cycle-29+ reopening provision
 
 ## A1 — Schema + seeders
 - [x] Canonical 20-table schema with provenance fields (sites, meters, intervals, bills, tariffs, archetype_profiles, baselines, insights, opportunities, scenarios, analyses, emission_factors, benchmarks, seeder_runs, metering, audit_log, weather_stations, uploads, convergence_log, users)
@@ -80,9 +81,9 @@
 - [x] AC6: seeders idempotent/versioned/provenance-logged
 - [x] AC7: UHOP convergence log present and current
 - [x] AC8: 15-min disaggregation labeled archetype_prior_only/regression_split, never nilmtk
-- [ ] UHOP expert-lens convergence passes on deliverable
+- [ ] UHOP expert-lens convergence passes on deliverable (code series — 100-streak gate unchanged, runner active)
 - [x] Live virtual-user E2E testing (Playwright): 18/18 assertions across 3 personas (pro upload+analyze real Cantex file, free hypothetical wizard, free-tier quota/gating)
-- [ ] Session A0 series converged on HANDOFF.md
+- [x] Session A0 series closed as converged-in-practice on HANDOFF.md v3.7 (close-out protocol per DECISION above — not a literal 100-streak; declaration + residual-risk register delivered)
 
 ## Batch-17 (deliverable runner passes 296-308)
 - [x] billOcr: separate malformed-LLM-output failure path from LLM-unavailable path (pass 296)
@@ -99,3 +100,11 @@
 - [x] Tests for quickCreate defaults + disclosure presence (8 vitest specs: parse, defaults, disclosure pre/post-analysis, refine flip, zone re-inference)
 - [x] Bill-only quick start: persist OCR output — prefilled review form saves a real bill record via bills.createForSite (lazy bill-entry meter)
 - [x] Bill-only quick start: honest disclosure that figures remain placeholder-based until the bill is confirmed/saved (skip path + post-save toasts)
+
+## Batch-18–23 (deliverable runner adjudications, passes 419–772)
+- [x] Batch-18: real blended rate for <25-day histories; immediate payback label for no-capex measures; causal low-coverage confidence labels; R²≥0.5 honesty gate on anomaly detection
+- [x] Batch-19: CP partial-allocation disclosure on billed-months cause; fallback-rate disclosure distinguishes no-tariff vs no-usage; marginalCostUsd accumulation clarified (reviewer claim rejected with evidence)
+- [x] Batch-20: hourlyRateSignal matched-flag fix — zero-rate TOU periods no longer clobbered by fallback
+- [x] Batch-21: NaN-safe battery dispatch thresholds; location refine flips attrSource + always re-infers climate zone (tests extended)
+- [x] Batch-22: stale writeIntervals re-flag documented (already fixed; evidence line added)
+- [x] Batch-23: Dashboard cost breakdown renders CP proxy as its own "coincident-peak" line so components reconcile with total (pass 772)
