@@ -229,8 +229,18 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     }
     const basisTariffId = basis?.id ?? null;
 
+    // Batch-26 (pass 899): the comparison table must always contain the tariff
+    // the current-cost figure was computed on. Two ways the basis could vanish:
+    // (a) an assigned `current` tariff outside utilityTariffs/eligibleAnywhere
+    // was never in sweepSet; (b) the 24-row slice cut it off. Insert the basis
+    // into the sweep and hoist it to the front so neither can hide it.
+    let sweepRows = sweep;
+    if (basis) {
+      sweepRows = [basis, ...sweep.filter((t) => t.id !== basis.id)];
+    }
+
     const currentTotal = currentCost?.breakdown.total ?? 0;
-    for (const t of sweep.slice(0, 24)) {
+    for (const t of sweepRows.slice(0, 24)) {
       const elig = tariffEligible(
         { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax },
         { sectorClass },

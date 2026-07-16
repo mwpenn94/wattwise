@@ -79,7 +79,8 @@ export function dispatchBattery(
   const maxRate = Math.min(spec.kw, spec.kwh * BATTERY_DEFAULTS.cRate);
   const rte = BATTERY_DEFAULTS.roundTripEfficiency;
   const residual = [...load];
-  let soc = usable * 0.5;
+  // Batch-26 (pass 913): declared default, not a hardcoded literal.
+  let soc = usable * BATTERY_DEFAULTS.initialSoC;
   let cycled = 0;
 
   // Rate thresholds: charge below 30th percentile, discharge above 80th.
@@ -328,7 +329,12 @@ export function runScenario(
     disclosures.push("Payback shown as a range reflecting modeling uncertainty — the band spans 75% to 150% of the point estimate; excludes incentives, financing, degradation, and rate escalation.");
   }
 
-  const confidence = extrapolated ? "low" : baselineConfidence === "high" ? "medium" : "low";
+  // Batch-26 (passes 903/913): a scenario inherits its baseline's confidence,
+  // capped at "medium" (a modeled counterfactual is never "high" even on a
+  // high-confidence baseline); extrapolation always forces "low". The previous
+  // ternary collapsed medium baselines to low with no cause, understating
+  // reliability.
+  const confidence = extrapolated ? "low" : baselineConfidence === "low" ? "low" : "medium";
   return {
     perCommodity: {
       electric: { deltaUsage, deltaDemandKw: scenPeak - basePeak, deltaCost, deltaCo2eLb },

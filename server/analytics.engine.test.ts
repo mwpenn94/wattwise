@@ -166,6 +166,19 @@ describe("Exact-rules tariff engine", () => {
     };
     const resEve = costOnTariff(pts, eveningOnly, { tz: "UTC" });
     expect(res.breakdown.demand).toBeGreaterThanOrEqual(resEve.breakdown.demand);
+
+    // Batch-26 (pass 900a): the >= assertion above cannot falsify an
+    // implementation that bills the WRONG window's peak. Use a deterministic
+    // morning-peaking load (8 kW at 6:00, 2 kW at 18:00, single month) and
+    // assert the grouped determinant is EXACTLY the morning peak — an
+    // evening-window pick would bill 2×10 instead of 8×10.
+    const janDays = Array.from({ length: 28 }, (_, d) => d + 1);
+    const morningPts = janDays.flatMap((day) => [
+      { ts: Date.UTC(2025, 0, day, 6, 0, 0), usage: 8, durationMin: 60 }, // 8 kWh in 1h → 8 kW, am window
+      { ts: Date.UTC(2025, 0, day, 18, 0, 0), usage: 2, durationMin: 60 }, // 2 kW, pm window
+    ]);
+    const resMorning = costOnTariff(morningPts, grouped, { tz: "UTC" });
+    expect(resMorning.breakdown.demand).toBeCloseTo(8 * 10, 5); // morning peak × $10/kW, one month
   });
 
   it("ratchet floors billed demand at percent of trailing peak", () => {
@@ -209,6 +222,19 @@ describe("Exact-rules tariff engine", () => {
     );
     expect(d2[0].billedDemandKw).toBe(100);
     expect(d2[0].ratchetApplied).toBe(false);
+    // Batch-26 (pass 900b): the current month's peak must also feed the
+    // LOOKBACK for subsequent months at pct < 1 — a regression that excluded
+    // it would bill month 2 at its own 50 kW instead of 0.8×100 = 80 kW.
+    const d3 = applyRatchet(
+      [
+        { month: "2025-06", peakKw: 100, peakTs: 1 },
+        { month: "2025-07", peakKw: 50, peakTs: 2 },
+      ],
+      { lookbackMonths: 11, ratchetPct: 0.8, applicablePeriod: "all" },
+    );
+    const jul3 = d3.find((b) => b.month === "2025-07")!;
+    expect(jul3.billedDemandKw).toBeCloseTo(0.8 * 100, 5);
+    expect(jul3.ratchetApplied).toBe(true);
   });
 
   it("eligibility filter blocks ineligible rates with a reason", () => {
@@ -259,9 +285,17 @@ describe("Scenario engine", () => {
     expect(res.dispatchMethod).toBe("sequential");
   });
 
-  it("solar scenario carries assumption disclosures and low confidence when defaulted", () => {
+  it("solar scenario carries assumption disclosures; confidence inherits baseline (Batch-26)", () => {
     const res = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, TOU_DEMAND, "2B", 850, "medium", false);
-    expect(res.confidence).toBe("low");
+    // Batch-26 (passes 903/913): a medium-confidence baseline without
+    // extrapolation no longer collapses to "low" — it stays "medium".
+    expect(res.confidence).toBe("medium");
+    // Extrapolation still forces low regardless of baseline confidence:
+    const resExtrap = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, TOU_DEMAND, "2B", 850, "medium", true);
+    expect(resExtrap.confidence).toBe("low");
+    // And a low baseline stays low:
+    const resLow = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, TOU_DEMAND, "2B", 850, "low", false);
+    expect(resLow.confidence).toBe("low");
     expect(res.disclosures.join(" ").length).toBeGreaterThan(10);
     expect(Object.keys(res.assumptions).length).toBeGreaterThan(0);
   });

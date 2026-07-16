@@ -247,6 +247,12 @@ export const BATTERY_DEFAULTS = {
   roundTripEfficiency: 0.9,
   maxDepthOfDischarge: 0.9,
   cRate: 0.5,
+  // Batch-26 (pass 913): the simulation's starting state of charge is now a
+  // declared default rather than a hardcoded literal inside dispatchBattery.
+  // 0.5 (mid-charge) is the neutral steady-state assumption for a daily-cycling
+  // dispatch simulation — starting empty (0.2) would understate day-1 dispatch
+  // and starting full would overstate it; mid-charge minimizes warm-up bias.
+  initialSoC: 0.5,
   degradationModeled: false,
 } as const;
 
