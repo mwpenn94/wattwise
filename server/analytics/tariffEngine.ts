@@ -384,7 +384,19 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       disclosures.push(
         `CP/4CP charge uses your top-${topN} seasonal customer peaks as proxy coincident peaks (${LABEL_CP_ESTIMATED}), billed as a $/kW-month determinant over ${cpMonths} months. Actual ISO/utility CP timing may differ materially.`,
       );
+    } else {
+      // Batch-32 (pass 1192): the tariff DOES carry a CP charge but no proxy
+      // events could be computed (no peaks in season / insufficient interval
+      // data) — disclose the omission instead of silently understating cost.
+      disclosures.push(
+        "This tariff includes a coincident-peak (CP) charge, but it could not be estimated from your data (no qualifying seasonal peaks in the interval history) — the cost shown EXCLUDES the CP component and understates the true bill on this rate.",
+      );
     }
+  } else if (structure.cp) {
+    // Batch-32 (pass 1192): CP-bearing tariff with NO interval points at all.
+    disclosures.push(
+      "This tariff includes a coincident-peak (CP) charge, but no interval data is available to estimate it — the cost shown EXCLUDES the CP component and understates the true bill on this rate.",
+    );
   }
 
   if (touFallback.used) {

@@ -267,6 +267,7 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
   let uom = "72"; // Wh default
   let sawReadingType = false; // Batch-30 (pass 1074)
   let scalingResetOccurred = false; // Batch-30 (pass 1074)
+  let scalingAssumedAtDefaults = false; // Batch-32 (pass 1204)
   const points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }> = [];
 
   for (const e of entries as Array<Record<string, unknown>>) {
@@ -296,6 +297,14 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
       powerOfTen = 0;
       uom = "72";
       scalingResetOccurred = true;
+    }
+    // Batch-32 (pass 1204): the FIRST usage point can also lack a ReadingType —
+    // sawReadingType is false there, so the reset branch above cannot fire and
+    // the initial defaults (10^0, Wh) silently apply. That's the same "scaling
+    // was assumed, not declared" condition and deserves the same disclosure
+    // (values are already at defaults, so no reset is needed — only honesty).
+    if (up && !rt && blocks.length > 0 && !sawReadingType) {
+      scalingAssumedAtDefaults = true;
     }
     if (rt) sawReadingType = true;
     for (const block of blocks) {
@@ -359,6 +368,10 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
           // Batch-30 (pass 1074): disclose the defensive scaling reset.
           ...(scalingResetOccurred
             ? ["A usage point in this feed declared no ReadingType; its readings were scaled with safe defaults (10^0, Wh) instead of inheriting the previous stream's scaling — verify totals against your utility portal."]
+            : []),
+          // Batch-32 (pass 1204): first usage point lacked ReadingType too.
+          ...(scalingAssumedAtDefaults
+            ? ["This feed's first usage point declared no ReadingType; default scaling (10^0, Wh) was assumed for its readings — verify totals against your utility portal."]
             : []),
         ],
       },

@@ -237,7 +237,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     // a rate the customer may not qualify for — disclose it, never silently.
     if (basis && !current && !isElig(basis) && currentCost) {
       currentCost.disclosures.push(
-        "No rate in the seeded tariff snapshot is eligible for this site's sector/size — baseline costs use the nearest available rate as a reference only. Assign your actual tariff for accurate figures.",
+        // Batch-32 (pass 1179): scope the limitation to the CURRENT-COST baseline
+        // explicitly — rows marked eligible in the comparison table remain valid
+        // options; only the baseline (and thus the savings deltas) is reference-only.
+        "No rate in the seeded tariff snapshot is eligible for this site's sector/size — the CURRENT-COST baseline uses the nearest available rate as a reference only, so savings-vs-current figures are also reference-only. Rates marked eligible in the comparison table are still rates this site may qualify for. Assign your actual tariff for accurate figures.",
       );
     }
     const basisTariffId = basis?.id ?? null;
