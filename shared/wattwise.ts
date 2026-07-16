@@ -206,7 +206,10 @@ export interface TariffComparison {
   eligible: boolean;
   ineligibleReason?: string;
   annualCost: CostBreakdown;
-  savingsVsCurrent: number;
+  /** Annual savings vs the current-cost baseline. NULL when no current-cost
+   * basis exists (Batch-38, pass 1559) — the previous 0 sentinel was
+   * indistinguishable from a genuine $0 delta for raw API/export consumers. */
+  savingsVsCurrent: number | null;
   /** Cycle 6: discloses which eligibility predicates were checked vs unverifiable */
   eligibilityNote?: string;
 }

@@ -295,7 +295,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         eligible: elig.eligible,
         ineligibleReason: elig.reason,
         annualCost: cost?.breakdown ?? { energy: 0, demand: 0, fixed: 0, cp: null, cpMethodology: "cp_omitted_no_interval_data", total: 0 },
-        savingsVsCurrent: cost && hasCostBasis ? currentTotal - cost.breakdown.total : 0,
+        // Batch-38 (pass 1559): NULL — not 0 — when no current-cost basis
+        // exists. The UI already renders "— (no current-cost baseline)", but raw
+        // API/export consumers received a literal 0 indistinguishable from a
+        // genuine break-even delta. Null is the machine-readable equivalent.
+        savingsVsCurrent: cost && hasCostBasis ? currentTotal - cost.breakdown.total : null,
         // Batch-34 (pass 1279): when the platform already KNOWS the rate is
         // ineligible, telling the user to "confirm final eligibility" was
         // contradictory — the specific reason replaces the generic caveat.
@@ -314,7 +318,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       if (!a.eligible !== !b.eligible) return a.eligible ? -1 : 1;
       const freshRank = (f: string) => (f === "verified" || f === "urdb_refreshed_150" || f === "manual" ? 0 : 1);
       if (freshRank(a.freshness) !== freshRank(b.freshness)) return freshRank(a.freshness) - freshRank(b.freshness);
-      return b.savingsVsCurrent - a.savingsVsCurrent;
+      return (b.savingsVsCurrent ?? 0) - (a.savingsVsCurrent ?? 0);
     });
   }
 
@@ -639,7 +643,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       });
     }
   }
-  const bestSwitch = comparisons.find((c) => c.eligible && c.savingsVsCurrent > 50);
+  // Batch-38 (pass 1559): savingsVsCurrent is null when no cost basis exists —
+  // the `> 50` predicate already excludes null rows (null > 50 is false), but
+  // the explicit check documents it and satisfies the narrowed type.
+  const bestSwitch = comparisons.find((c) => c.eligible && c.savingsVsCurrent != null && c.savingsVsCurrent > 50);
   if (bestSwitch) {
     oppCands.push({
       key: "rate_switch",
@@ -649,8 +656,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       // measured load — the old 0.6 haircut on the lower bound misrepresented a
       // computed figure as uncertain. Both bounds now equal the repriced savings;
       // the residual (future load drift) is disclosed in the rationale instead.
-      annualSavingsUsdLo: bestSwitch.savingsVsCurrent,
-      annualSavingsUsdHi: bestSwitch.savingsVsCurrent,
+      annualSavingsUsdLo: bestSwitch.savingsVsCurrent!,
+      annualSavingsUsdHi: bestSwitch.savingsVsCurrent!,
       capexBand: "none",
       confidence: bestSwitch.freshness === "urdb_stale" ? "low" : "medium",
       rationale:

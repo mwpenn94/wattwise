@@ -97,7 +97,7 @@ export default function Dashboard() {
       eligible: boolean;
       ineligibleReason?: string | null;
       annualCost: { total: number };
-      savingsVsCurrent: number;
+      savingsVsCurrent: number | null;
       eligibilityNote?: string;
     }> | null;
     baseline?: { method?: string; rSquared?: number | null; cvrmse?: number | null; confidenceLabel?: string } | null;
@@ -469,7 +469,8 @@ type TariffRow = {
   eligible: boolean;
   ineligibleReason?: string | null;
   annualCost: { total: number };
-  savingsVsCurrent: number;
+  /** Null when no current-cost basis exists (Batch-38, pass 1559). */
+  savingsVsCurrent: number | null;
   eligibilityNote?: string;
 };
 
@@ -510,11 +511,11 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCos
               {fmtUsd(r.annualCost.total)}
               {!r.eligible && <span className="ml-1 text-[10px]">(ref)</span>}
             </TableCell>
-            <TableCell className={`text-right font-mono text-xs ${r.eligible && r.savingsVsCurrent > 0 ? "text-emerald-400" : !r.eligible ? "text-muted-foreground/70" : ""}`}>
+            <TableCell className={`text-right font-mono text-xs ${r.eligible && (r.savingsVsCurrent ?? 0) > 0 ? "text-emerald-400" : !r.eligible ? "text-muted-foreground/70" : ""}`}>
               {r.isCurrentBasis
                 ? "—"
-                : !hasCostBasis
-                  ? "— (no current-cost baseline)" /* Batch-37 (pass 1518): zeroed sentinel, not a real delta */
+                : !hasCostBasis || r.savingsVsCurrent == null
+                  ? "— (no current-cost baseline)" /* Batch-37/38 (passes 1518/1559): null — not a zeroed sentinel */
                   : r.savingsVsCurrent >= 0
                     ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr${r.eligible ? "" : " (ref)"}` /* Batch-30 (pass 1078): verified both branches carry (ref) */
                     : `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr${r.eligible ? "" : " (ref)"}`}
