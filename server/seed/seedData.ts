@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.3";
+export const SEED_VERSION = "2026.07.4"; // E-36 winter dual demand windows (demandGroup)
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -220,6 +220,9 @@ export const WEATHER_STATIONS_FULL: Array<{
  *  diurnal range (sinusoidal day cycle, min at 5am, max at 4pm).
  *  Provenance label: "synthesized-from-normals" — used for degree-hour math,
  *  clearly below true TMY fidelity and labeled as such. */
+// NOTE: always generates an 8760-hour (365-day) series on the "normal-year basis"
+// convention — leap days are intentionally not modeled; annual figures are
+// normal-year totals, matching the LABEL_NORMAL_YEAR disclosure downstream.
 export function synthesizeTmyHourly(normals: MonthNormal[]): number[] {
   const daysInMonth = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   const out: number[] = [];
@@ -451,7 +454,11 @@ export const SEED_TARIFFS: SeedTariff[] = [
       ],
       demand: [
         { label: "Summer on-peak demand", months: SUMMER, hourStart: 14, hourEnd: 20, daysOfWeek: WEEKDAYS, ratePerKw: 21.86 },
-        { label: "Winter on-peak demand", months: WINTER, hourStart: 17, hourEnd: 21, daysOfWeek: WEEKDAYS, ratePerKw: 14.33 },
+        // SRP E-36 winter has TWO on-peak windows (5-9am and 5-9pm weekdays); the billed
+        // winter demand is the max kW across BOTH windows at a single rate. Both windows
+        // are enumerated so the window scan captures morning-peaking loads.
+        { label: "Winter on-peak demand 5-9am", months: WINTER, hourStart: 5, hourEnd: 9, daysOfWeek: WEEKDAYS, ratePerKw: 14.33, demandGroup: "e36-winter" },
+        { label: "Winter on-peak demand 5-9pm", months: WINTER, hourStart: 17, hourEnd: 21, daysOfWeek: WEEKDAYS, ratePerKw: 14.33, demandGroup: "e36-winter" },
       ],
       exportRate: { type: "net_billing_avoided_cost", ratePerKwh: 0.0281 },
     },

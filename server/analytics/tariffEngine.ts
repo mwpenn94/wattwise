@@ -171,6 +171,9 @@ function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFla
   // Cycle 5, pass 182: coverage comparison must be strictly hierarchical —
   // months dominate, then days-of-week, then hour span. (A weighted sum let a
   // 1-month/24-hour period outrank a 12-month/1-hour one.)
+  // Batch-12 pass 12: ties on the full coverage key resolve to the LOWEST rate,
+  // so the fallback is deterministic (array order can never change the answer)
+  // and errs in the customer's favor.
   let widest: { rate: number; key: [number, number, number] } | null = null;
   for (const p of structure.energy) {
     const key: [number, number, number] = [p.months.length, p.daysOfWeek.length, hourSpan(p.hourStart, p.hourEnd)];
@@ -178,7 +181,8 @@ function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFla
       !widest ||
       key[0] > widest.key[0] ||
       (key[0] === widest.key[0] && key[1] > widest.key[1]) ||
-      (key[0] === widest.key[0] && key[1] === widest.key[1] && key[2] > widest.key[2]);
+      (key[0] === widest.key[0] && key[1] === widest.key[1] && key[2] > widest.key[2]) ||
+      (key[0] === widest.key[0] && key[1] === widest.key[1] && key[2] === widest.key[2] && p.ratePerUnit < widest.rate);
     if (wins) widest = { rate: p.ratePerUnit, key };
   }
   return widest ? widest.rate : 0;
@@ -270,8 +274,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
         }
       }
     }
-    // demand charges: use windowed peak within each charge's window, with ratchet on the anytime peak
+    // Demand charges: each charge computes its OWN windowed peak (windowPeak is
+    // local per-charge, so anytime and windowed charges never clobber each other).
+    // Charges sharing a demandGroup are alternative windows of ONE billed
+    // determinant: bill max(peak across the group's windows) × ratePerKw ONCE.
     let mDemand = 0;
+    const groupPeaks = new Map<string, { peak: number; ratePerKw: number }>();
     for (const dc of structure.demand) {
       const monthNum = parseInt(mk.split("-")[1], 10);
       if (!dc.months.includes(monthNum)) continue;
@@ -289,8 +297,16 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
         const det = detailByMonth.get(mk);
         windowPeak = det ? det.billedDemandKw : 0;
       }
+      if (dc.demandGroup) {
+        const g = groupPeaks.get(dc.demandGroup);
+        if (!g || windowPeak > g.peak) {
+          groupPeaks.set(dc.demandGroup, { peak: windowPeak, ratePerKw: dc.ratePerKw });
+        }
+        continue;
+      }
       mDemand += windowPeak * dc.ratePerKw;
     }
+    groupPeaks.forEach((g) => { mDemand += g.peak * g.ratePerKw; });
     const mFixed = structure.fixedMonthly;
     // Minimum bill applies to charges BEFORE export credits (cycle 1, pass 12):
     // export credits reduce the bill after the minimum floor is established,

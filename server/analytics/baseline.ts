@@ -367,8 +367,14 @@ export function detectResidualAnomalies(
     actual: Math.round(r.actual * 100) / 100,
     predicted: Math.round(r.predicted * 100) / 100,
     residualPct: Math.round(r.residualPct * 1000) / 1000,
+    // A month is part of the sustained shift only if it is at/after the change
+    // point AND shares the shift's direction (by construction tail.every()
+    // guarantees this for rows, but the sign check makes the invariant local
+    // and structurally safe against future edits — batch-12 pass 21).
     kind:
-      changePointMonth != null && r.month >= changePointMonth
+      changePointMonth != null &&
+      r.month >= changePointMonth &&
+      Math.sign(r.residualPct) === Math.sign(rows.find((x) => x.month === changePointMonth)?.residualPct ?? 0)
         ? "sustained_shift"
         : r.residualPct > 0
           ? "single_month_spike"

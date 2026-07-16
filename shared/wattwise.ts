@@ -137,6 +137,12 @@ export interface DemandCharge {
   hourEnd?: number;
   daysOfWeek?: number[];
   ratePerKw: number;
+  /**
+   * Charges sharing a demandGroup are alternative windows of ONE billed demand
+   * determinant (e.g., SRP E-36 winter 5-9am + 5-9pm): the engine bills
+   * max(kW across the group's windows) x ratePerKw ONCE, not once per window.
+   */
+  demandGroup?: string;
 }
 
 export interface RatchetClause {

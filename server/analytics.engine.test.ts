@@ -140,6 +140,34 @@ describe("Exact-rules tariff engine", () => {
     expect(res.breakdown.demand).toBeGreaterThan(0);
   });
 
+  it("demandGroup bills max across alternative windows once, not per window", () => {
+    // Two windows of one determinant (SRP E-36 winter pattern): morning 5-9, evening 17-21.
+    const grouped: TariffStructure = {
+      fixedMonthly: 0,
+      energy: [{ label: "all", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.05 }],
+      demand: [
+        { label: "am", months: ALL_MONTHS, hourStart: 5, hourEnd: 9, daysOfWeek: ALL_DAYS, ratePerKw: 10, demandGroup: "g" },
+        { label: "pm", months: ALL_MONTHS, hourStart: 17, hourEnd: 21, daysOfWeek: ALL_DAYS, ratePerKw: 10, demandGroup: "g" },
+      ] as TariffStructure["demand"],
+    };
+    const ungroupedSum: TariffStructure = {
+      ...grouped,
+      demand: grouped.demand.map((d) => ({ ...d, demandGroup: undefined })) as TariffStructure["demand"],
+    };
+    const res = costOnTariff(pts, grouped, { tz: "UTC" });
+    const resSum = costOnTariff(pts, ungroupedSum, { tz: "UTC" });
+    // Grouped bills ONE determinant (max of windows); ungrouped double-bills both windows.
+    expect(res.breakdown.demand).toBeGreaterThan(0);
+    expect(res.breakdown.demand).toBeLessThan(resSum.breakdown.demand);
+    // Morning-peaking load must be captured by the group (max >= evening-only peak):
+    const eveningOnly: TariffStructure = {
+      ...grouped,
+      demand: [{ label: "pm", months: ALL_MONTHS, hourStart: 17, hourEnd: 21, daysOfWeek: ALL_DAYS, ratePerKw: 10 }] as TariffStructure["demand"],
+    };
+    const resEve = costOnTariff(pts, eveningOnly, { tz: "UTC" });
+    expect(res.breakdown.demand).toBeGreaterThanOrEqual(resEve.breakdown.demand);
+  });
+
   it("ratchet floors billed demand at percent of trailing peak", () => {
     const details = applyRatchet(
       [

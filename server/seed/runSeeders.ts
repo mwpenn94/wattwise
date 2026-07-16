@@ -160,6 +160,24 @@ export async function seedTariffs(db: Db) {
         source: "urdb_snapshot_modeled",
         sourceVersion: SEED_VERSION,
       });
+    } else {
+      // Version bump = corrected seed data: refresh structure/eligibility on the
+      // existing row (id-stable, so meter tariff assignments are preserved).
+      await db
+        .update(tariffs)
+        .set({
+          urdbId: t.urdbId,
+          sector: t.sector,
+          commodity: t.commodity,
+          state: t.state,
+          peakKwMin: t.peakKwMin,
+          peakKwMax: t.peakKwMax,
+          structure: t.structure,
+          freshness: t.freshness,
+          effectiveDate: new Date(t.effectiveDate),
+          sourceVersion: SEED_VERSION,
+        })
+        .where(eq(tariffs.id, existing[0].id));
     }
     n++;
   }
