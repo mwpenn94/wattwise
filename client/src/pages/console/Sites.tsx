@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Building2, Plus, Zap } from "lucide-react";
+import { Building2, FolderKanban, Plus, Trash2, Zap } from "lucide-react";
 import { useLocation } from "wouter";
 import { ProvChip } from "@/components/Honesty";
 import QuickStart from "@/components/QuickStart";
@@ -133,6 +133,8 @@ export default function Sites() {
         <QuickStart compact />
       </div>
 
+      <EntityManager />
+
       <div className="mt-6 grid gap-4 md:grid-cols-2">
         {sites.isLoading && (
           <>
@@ -156,6 +158,7 @@ export default function Sites() {
                 {s.climateZone && <span>CZ {s.climateZone}</span>}
               </div>
               <SiteMeters siteId={s.id} />
+              <SiteEntityPicker siteId={s.id} entityId={(s as { entityId?: number | null }).entityId ?? null} />
             </CardContent>
           </Card>
         ))}
@@ -171,6 +174,122 @@ export default function Sites() {
           </Card>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Gap-9: optional organizational layer — group sites under a household/company/
+ *  property owner. Nothing is required: sites work fine unattached, and deleting
+ *  a group detaches its sites without deleting any data. */
+function EntityManager() {
+  const utils = trpc.useUtils();
+  const entities = trpc.entities.list.useQuery();
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState<"household" | "company" | "property_owner" | "other">("household");
+  const create = trpc.entities.create.useMutation({
+    onSuccess: async () => {
+      toast.success("Group created");
+      setName("");
+      await utils.entities.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const del = trpc.entities.delete.useMutation({
+    onSuccess: async () => {
+      toast.success("Group deleted — its sites were detached, not deleted");
+      await Promise.all([utils.entities.list.invalidate(), utils.sites.list.invalidate()]);
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  return (
+    <Card className="mt-6 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <FolderKanban className="h-4 w-4 text-primary" /> Owners & organizations
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-xs text-muted-foreground">
+          Optional: group sites under a household, company, or property owner — one owner can hold many sites, each with
+          many meters. Combined figures live on the{" "}
+          <a href="/app/portfolio" className="text-primary underline">
+            Portfolio
+          </a>{" "}
+          page.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {(entities.data ?? []).map((en) => (
+            <span key={en.id} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/60 px-2.5 py-1 text-xs">
+              <FolderKanban className="h-3 w-3 text-primary" /> {en.name}
+              <Badge variant="secondary" className="text-[9px]">{en.kind.replace(/_/g, " ")}</Badge>
+              <button
+                type="button"
+                className="text-muted-foreground transition-colors hover:text-destructive"
+                title="Delete group (its sites are detached, never deleted)"
+                onClick={() => del.mutate({ entityId: en.id })}
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+          {!entities.isLoading && (entities.data ?? []).length === 0 && (
+            <span className="text-xs text-muted-foreground">No groups yet.</span>
+          )}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Input placeholder="e.g. Acme Properties LLC" className="w-56" value={name} onChange={(e) => setName(e.target.value)} />
+          <Select value={kind} onValueChange={(v) => setKind(v as typeof kind)}>
+            <SelectTrigger className="w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="household">Household</SelectItem>
+              <SelectItem value="company">Company</SelectItem>
+              <SelectItem value="property_owner">Property owner</SelectItem>
+              <SelectItem value="other">Other</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button size="sm" disabled={!name.trim() || create.isPending} onClick={() => create.mutate({ name: name.trim(), kind })}>
+            <Plus className="mr-1 h-3.5 w-3.5" /> Add group
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Per-site owner-group assignment (stops propagation so the card click
+ *  doesn't navigate while picking). Hidden until at least one group exists. */
+function SiteEntityPicker({ siteId, entityId }: { siteId: number; entityId: number | null }) {
+  const utils = trpc.useUtils();
+  const entities = trpc.entities.list.useQuery();
+  const assign = trpc.entities.assignSite.useMutation({
+    onSuccess: async () => {
+      toast.success("Owner group updated");
+      await utils.sites.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  if ((entities.data ?? []).length === 0) return null;
+  return (
+    <div className="mt-3" onClick={(e) => e.stopPropagation()}>
+      <Select
+        value={entityId != null ? String(entityId) : "none"}
+        onValueChange={(v) => assign.mutate({ siteId, entityId: v === "none" ? null : Number(v) })}
+      >
+        <SelectTrigger className="h-7 w-52 text-xs">
+          <SelectValue placeholder="Owner / group…" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">No owner group</SelectItem>
+          {(entities.data ?? []).map((en) => (
+            <SelectItem key={en.id} value={String(en.id)}>
+              {en.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }

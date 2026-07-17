@@ -11,9 +11,26 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Download, Gauge, ShieldCheck } from "lucide-react";
 
+const TIERS: Array<{ id: "free" | "plus" | "pro"; name: string; blurb: string }> = [
+  { id: "free", name: "Free", blurb: "2 sites · 12 uploads/mo · 3 scenario runs/mo · template-first bill parsing" },
+  { id: "plus", name: "Plus", blurb: "Solar/battery modeling · more sites & runs · LLM bill parsing" },
+  { id: "pro", name: "Pro", blurb: "Everything in Plus · priority parsing · portfolio at scale" },
+];
+
 export default function Account() {
   const { user } = useAuth();
   const usage = trpc.account.usage.useQuery();
+  const utils = trpc.useUtils();
+  // Gap-6: self-serve tier switching during beta — the pricing page used to
+  // say "Coming soon" while requireTier gates were already live server-side,
+  // leaving Plus/Pro features unreachable by anyone.
+  const setTier = trpc.account.setTier.useMutation({
+    onSuccess: async (r) => {
+      toast.success(`Plan changed to ${r.tier} (beta — no billing)`);
+      await utils.account.usage.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
   const exportData = trpc.account.exportData.useMutation({
     onSuccess: (data) => {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -46,12 +63,33 @@ export default function Account() {
             ) : (
               <>
                 <Badge className="font-mono uppercase">{usage.data?.tier ?? "free"}</Badge>
-                <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                  Free: 1 site, 3 uploads/mo, 3 scenario runs/mo, template-first bill parsing.
-                  <br />
-                  Plus: solar/battery modeling, more sites & runs.
-                  <br />
-                  Pro: everything, priority parsing.
+                <div className="mt-3 space-y-2">
+                  {TIERS.map((t) => {
+                    const current = (usage.data?.tier ?? "free") === t.id;
+                    return (
+                      <div
+                        key={t.id}
+                        className={`flex items-center justify-between gap-2 rounded-md border p-2 ${current ? "border-primary/60 bg-primary/5" : "border-border/70"}`}
+                      >
+                        <div>
+                          <p className="text-xs font-medium">{t.name}</p>
+                          <p className="text-[10px] leading-relaxed text-muted-foreground">{t.blurb}</p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant={current ? "secondary" : "outline"}
+                          disabled={current || setTier.isPending}
+                          onClick={() => setTier.mutate({ tier: t.id })}
+                        >
+                          {current ? "Current" : "Switch"}
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
+                  Beta period: switching plans is free and collects no payment. Tier limits are enforced immediately and
+                  every change is recorded in your audit trail. Pricing applies when billing launches, with notice.
                 </p>
               </>
             )}

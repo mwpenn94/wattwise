@@ -26,6 +26,8 @@ import {
   uploads,
   weatherNormals,
   zipSubregions,
+  entities,
+  users,
 } from "../drizzle/schema";
 
 export class TenancyError extends Error {
@@ -81,6 +83,50 @@ export async function assertMeterOwner(meterId: number, userId: number) {
     .where(and(eq(meters.id, meterId), eq(sites.userId, userId)))
     .limit(1);
   if (rows.length === 0) throw new TenancyError();
+}
+
+/* ---------------- entities (Gap-9 organizational layer) ---------------- */
+export async function listEntities(userId: number) {
+  const db = await requireDb();
+  return db.select().from(entities).where(eq(entities.userId, userId)).orderBy(asc(entities.name));
+}
+
+export async function createEntity(data: typeof entities.$inferInsert) {
+  const db = await requireDb();
+  const res = await db.insert(entities).values(data);
+  return Number((res as unknown as [{ insertId: number }])[0].insertId);
+}
+
+export async function assertEntityOwner(entityId: number, userId: number) {
+  const db = await requireDb();
+  const rows = await db.select({ id: entities.id }).from(entities).where(and(eq(entities.id, entityId), eq(entities.userId, userId))).limit(1);
+  if (rows.length === 0) throw new TenancyError();
+}
+
+export async function updateEntity(
+  entityId: number,
+  userId: number,
+  patch: Partial<Pick<typeof entities.$inferInsert, "name" | "kind" | "notes">>,
+) {
+  await assertEntityOwner(entityId, userId);
+  const db = await requireDb();
+  await db.update(entities).set(patch).where(eq(entities.id, entityId));
+}
+
+/** Delete an entity. Sites keep their rows — entityId is nulled, never cascaded:
+ *  deleting an organizational grouping must not delete analytic data. */
+export async function deleteEntity(entityId: number, userId: number) {
+  await assertEntityOwner(entityId, userId);
+  const db = await requireDb();
+  await db.update(sites).set({ entityId: null }).where(and(eq(sites.entityId, entityId), eq(sites.userId, userId)));
+  await db.delete(entities).where(eq(entities.id, entityId));
+}
+
+export async function assignSiteEntity(siteId: number, entityId: number | null, userId: number) {
+  await assertSiteOwner(siteId, userId);
+  if (entityId != null) await assertEntityOwner(entityId, userId);
+  const db = await requireDb();
+  await db.update(sites).set({ entityId }).where(eq(sites.id, siteId));
 }
 
 /* ---------------- sites ---------------- */
@@ -479,6 +525,14 @@ export async function listBills(siteId: number, userId: number) {
     .where(and(eq(meters.siteId, siteId), eq(sites.userId, userId)))
     .orderBy(desc(bills.periodStart))
     .then((rows) => rows.map((r) => r.bill));
+}
+
+/* ---------------- account tier ---------------- */
+/** Gap-6 (Jul 2026): self-serve beta tier switching — users update their own
+ *  row only; admin role is unaffected (tierOf gives admins pro regardless). */
+export async function setUserTier(userId: number, tier: "free" | "plus" | "pro") {
+  const db = await requireDb();
+  await db.update(users).set({ tier }).where(eq(users.id, userId));
 }
 
 /* ---------------- audit + export ---------------- */

@@ -40,12 +40,32 @@ export type InsertUser = typeof users.$inferInsert;
  * sourceVersion, method, confidence) per handoff §2.
  * ============================================================ */
 
+/** 0. entities — the organizational owner layer (Gap-9, Jul 2026):
+ *  one household/company/owner → many sites → many meters. Optional — sites
+ *  with entityId NULL simply belong directly to the user (no forced setup). */
+export const entities = mysqlTable(
+  "entities",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    kind: mysqlEnum("kind", ["household", "company", "property_owner", "other"]).default("other").notNull(),
+    notes: text("notes"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [index("entities_user_idx").on(t.userId)],
+);
+export type Entity = typeof entities.$inferSelect;
+
 /** 1. sites — a physical premise (building/campus/well site). */
 export const sites = mysqlTable(
   "sites",
   {
     id: int("id").autoincrement().primaryKey(),
     userId: int("userId").notNull(),
+    /** Gap-9: optional owning entity (household/company). NULL = directly owned. */
+    entityId: int("entityId"),
     name: varchar("name", { length: 255 }).notNull(),
     address: text("address"),
     city: varchar("city", { length: 128 }),
@@ -64,7 +84,7 @@ export const sites = mysqlTable(
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
-  (t) => [index("sites_user_idx").on(t.userId)],
+  (t) => [index("sites_user_idx").on(t.userId), index("sites_entity_idx").on(t.entityId)],
 );
 
 /** 2. meters — one service point / channel; commodity-agnostic. */

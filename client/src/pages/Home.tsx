@@ -222,14 +222,14 @@ export default function Home() {
                 name: "Plus",
                 price: "$9–19/mo",
                 items: ["Full tariff sweep", "End-use disaggregation", "Solar + battery modeling", "Unlimited scenarios", "Narrative reports", "PDF export"],
-                cta: "Coming soon",
+                cta: "Start Plus (beta)",
                 highlight: true,
               },
               {
                 name: "Pro",
                 price: "$29–99/site/mo",
                 items: ["Continuous monitoring", "Anomaly + demand-spike alerts", "Demand-charge management", "Portfolio dashboard", "M&V-grade reporting"],
-                cta: "Coming soon",
+                cta: "Start Pro (beta)",
                 highlight: false,
               },
             ].map((t) => (
@@ -247,14 +247,26 @@ export default function Home() {
                       </li>
                     ))}
                   </ul>
+                  {/* Gap-6: Plus/Pro were dead "Coming soon" buttons while the
+                      server-side tier gates were already live — now every tier
+                      is self-serve during the beta via Account & usage. */}
                   {t.name === "Free" ? (
                     <Button className="mt-6 w-full" onClick={() => (isAuthenticated ? (window.location.href = "/app") : startLogin())}>
                       {t.cta}
                     </Button>
                   ) : (
-                    <Button className="mt-6 w-full" variant="outline" disabled>
+                    <Button
+                      className="mt-6 w-full"
+                      variant="outline"
+                      onClick={() => (isAuthenticated ? (window.location.href = "/app/account") : startLogin())}
+                    >
                       {t.cta}
                     </Button>
+                  )}
+                  {t.name !== "Free" && (
+                    <p className="mt-2 text-center text-[10px] text-muted-foreground">
+                      Beta: no billing yet — switch plans free on the Account page.
+                    </p>
                   )}
                 </CardContent>
               </Card>

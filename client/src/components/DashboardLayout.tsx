@@ -27,6 +27,7 @@ import {
   GitBranch,
   LayoutDashboard,
   LogOut,
+  FolderKanban,
   PanelLeft,
   Receipt,
   Settings,
@@ -42,6 +43,7 @@ import { Button } from "./ui/button";
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/app" },
   { icon: Building2, label: "Sites", path: "/app/sites" },
+  { icon: FolderKanban, label: "Portfolio", path: "/app/portfolio" },
   { icon: FileUp, label: "Upload data", path: "/app/upload" },
   { icon: Sparkles, label: "Hypothetical building", path: "/app/wizard" },
   { icon: Sun, label: "Scenarios", path: "/app/scenarios" },

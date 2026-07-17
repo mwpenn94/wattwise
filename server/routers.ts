@@ -377,6 +377,111 @@ export const appRouter = router({
       }),
   }),
 
+  /* ================= entities (Gap-9 organizational layer) =================
+   * One household/owner/company → many sites → many meters. Entirely optional:
+   * sites with entityId NULL belong directly to the account and nothing forces
+   * a user to create entities (progressive-participation principle applies to
+   * the org layer too). Deleting an entity NEVER deletes sites — they are
+   * detached (entityId nulled) so analytic data survives org re-shuffles. */
+  entities: router({
+    list: protectedProcedure.query(async ({ ctx }) => h.listEntities(ctx.user.id)),
+    create: protectedProcedure
+      .input(
+        z.object({
+          name: z.string().min(1).max(255),
+          kind: z.enum(["household", "company", "property_owner", "other"]).default("other"),
+          notes: z.string().max(2000).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const id = await h.createEntity({ userId: ctx.user.id, name: input.name, kind: input.kind, notes: input.notes ?? null });
+        return { id };
+      }),
+    update: protectedProcedure
+      .input(
+        z.object({
+          entityId: z.number(),
+          name: z.string().min(1).max(255).optional(),
+          kind: z.enum(["household", "company", "property_owner", "other"]).optional(),
+          notes: z.string().max(2000).nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { entityId, ...patch } = input;
+        await h.updateEntity(entityId, ctx.user.id, patch);
+        return { ok: true };
+      }),
+    delete: protectedProcedure.input(z.object({ entityId: z.number() })).mutation(async ({ ctx, input }) => {
+      await h.deleteEntity(input.entityId, ctx.user.id);
+      return { ok: true, note: "Sites formerly under this entity were detached, not deleted." };
+    }),
+    /** Attach/detach a site to an entity (entityId null = detach). */
+    assignSite: protectedProcedure
+      .input(z.object({ siteId: z.number(), entityId: z.number().nullable() }))
+      .mutation(async ({ ctx, input }) => {
+        await h.assignSiteEntity(input.siteId, input.entityId, ctx.user.id);
+        return { ok: true };
+      }),
+    /** Portfolio rollup — per-site latest-analysis KPIs + entity totals.
+     * Reads each site's persisted machine-readable summary insight; sites
+     * never analyzed roll up with null KPIs (disclosed via analyzed flag)
+     * rather than fabricated zeros. */
+    portfolio: protectedProcedure
+      .input(z.object({ entityId: z.number().nullable().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const [allSites, allEntities] = await Promise.all([h.listSites(ctx.user.id), h.listEntities(ctx.user.id)]);
+        const filterEntity = input?.entityId;
+        const rows = filterEntity === undefined ? allSites : allSites.filter((s) => (s.entityId ?? null) === filterEntity);
+        const siteRollups = await Promise.all(
+          rows.map(async (s) => {
+            const ins = await h.listInsights(s.id, ctx.user.id);
+            const summary = ins.find((i) => i.kind === "summary");
+            const m = (summary?.metrics ?? null) as {
+              demand?: { peakKw?: number; loadFactor?: number } | null;
+              currentCost?: { breakdown?: { total?: number; demand?: number; cp?: number | null } } | null;
+              emissions?: { annualCo2eLb?: number } | null;
+              baseline?: { normalizedAnnualUsage?: number | null; confidenceLabel?: string } | null;
+            } | null;
+            const meterRows = await h.listMeters(s.id, ctx.user.id);
+            return {
+              siteId: s.id,
+              name: s.name,
+              entityId: s.entityId ?? null,
+              state: s.state,
+              buildingType: s.buildingType,
+              meterCount: meterRows.length,
+              analyzed: m != null,
+              annualCostUsd: m?.currentCost?.breakdown?.total ?? null,
+              demandCostUsd: m?.currentCost?.breakdown ? (m.currentCost.breakdown.demand ?? 0) + (m.currentCost.breakdown.cp ?? 0) : null,
+              peakKw: m?.demand?.peakKw ?? null,
+              loadFactor: m?.demand?.loadFactor ?? null,
+              annualUsageKwh: m?.baseline?.normalizedAnnualUsage ?? null,
+              annualCo2eLb: m?.emissions?.annualCo2eLb ?? null,
+            };
+          }),
+        );
+        const sum = (k: "annualCostUsd" | "peakKw" | "annualUsageKwh" | "annualCo2eLb" | "demandCostUsd") => {
+          const vals = siteRollups.map((r) => r[k]).filter((v): v is number => v != null);
+          return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) : null;
+        };
+        return {
+          entities: allEntities,
+          sites: siteRollups,
+          totals: {
+            siteCount: siteRollups.length,
+            analyzedCount: siteRollups.filter((r) => r.analyzed).length,
+            annualCostUsd: sum("annualCostUsd"),
+            demandCostUsd: sum("demandCostUsd"),
+            annualUsageKwh: sum("annualUsageKwh"),
+            annualCo2eLb: sum("annualCo2eLb"),
+            // NOTE: site peaks are non-coincident — summing them overstates any
+            // true coincident portfolio peak; label is explicit about this.
+            sumOfSitePeaksKw: sum("peakKw"),
+          },
+        };
+      }),
+  }),
+
   /* ================= uploads / ingestion ================= */
   uploads: router({
     list: protectedProcedure.query(async ({ ctx }) => h.listUploads(ctx.user.id)),
@@ -895,6 +1000,24 @@ export const appRouter = router({
       const llmSpend = await monthToDateLlmSpend(ctx.user.id);
       return { tier: tierOf(ctx.user), monthToDateLlmUsd: llmSpend };
     }),
+    /** Gap-6 (Jul 2026): self-serve tier switching during the beta — the
+     *  pricing page previously showed dead "Coming soon" buttons for tiers
+     *  that were already fully enforced server-side (requireTier gates).
+     *  During the beta there is NO billing integration, so switching is free
+     *  and honestly labeled as such in the UI; the audit trail records every
+     *  change. When billing lands, this becomes the checkout entry point. */
+    setTier: protectedProcedure
+      .input(z.object({ tier: z.enum(["free", "plus", "pro"]) }))
+      .mutation(async ({ ctx, input }) => {
+        const prev = tierOf(ctx.user);
+        await h.setUserTier(ctx.user.id, input.tier);
+        await h.audit(ctx.user.id, "tier_change", "user", String(ctx.user.id), {
+          from: prev,
+          to: input.tier,
+          billing: "none — beta period, no payment collected",
+        });
+        return { tier: input.tier, previous: prev };
+      }),
     exportData: protectedProcedure.mutation(async ({ ctx }) => {
       const data = await h.exportUserData(ctx.user.id);
       await h.audit(ctx.user.id, "data_export", "user", String(ctx.user.id), { tables: Object.keys(data) });

@@ -7,6 +7,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { Route, Switch } from "wouter";
 import Dashboard from "./console/Dashboard";
 import Sites from "./console/Sites";
+import Portfolio from "./console/Portfolio";
 import Upload from "./console/Upload";
 import Wizard from "./console/Wizard";
 import Scenarios from "./console/Scenarios";
@@ -20,6 +21,7 @@ export default function AppShell() {
       <Switch>
         <Route path="/app" component={Dashboard} />
         <Route path="/app/sites" component={Sites} />
+        <Route path="/app/portfolio" component={Portfolio} />
         <Route path="/app/upload" component={Upload} />
         <Route path="/app/wizard" component={Wizard} />
         <Route path="/app/scenarios" component={Scenarios} />

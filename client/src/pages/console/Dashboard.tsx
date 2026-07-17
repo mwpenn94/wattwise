@@ -61,11 +61,15 @@ export default function Dashboard() {
     onError: (e) => toast.error(e.message),
   });
 
-  // Interval chart window: latest 30 days of data
+  // Interval chart window — Gap-3 (Jul 2026): user-selectable range presets
+  // replace the old hardcoded 30-day slice. "all" spans minTs→maxTs so long
+  // histories are fully visible (peak-preserving decimation keeps it fast).
+  const [rangeDays, setRangeDays] = useState<30 | 90 | 365 | "all">(30);
   const windowRange = useMemo(() => {
     if (!stats.data?.maxTs) return null;
-    return { fromTs: stats.data.maxTs - 30 * 86_400_000, toTs: stats.data.maxTs };
-  }, [stats.data?.maxTs]);
+    const from = rangeDays === "all" ? (stats.data.minTs ?? 0) : stats.data.maxTs - rangeDays * 86_400_000;
+    return { fromTs: from, toTs: stats.data.maxTs };
+  }, [stats.data?.maxTs, stats.data?.minTs, rangeDays]);
   const win = trpc.intervalsApi.window.useQuery(
     { meterId: meter?.id ?? 0, fromTs: windowRange?.fromTs ?? 0, toTs: windowRange?.toTs ?? 0 },
     { enabled: !!meter && !!windowRange },
@@ -253,8 +257,24 @@ export default function Dashboard() {
       {/* Interval chart */}
       <Card className="mt-4 border-border/70">
         <CardHeader className="flex flex-row items-center justify-between pb-2">
-          <CardTitle className="font-display text-base">Interval demand — last 30 days of data</CardTitle>
-          <div className="flex gap-1.5">
+          <CardTitle className="font-display text-base">
+            Interval demand — {rangeDays === "all" ? "full history" : `last ${rangeDays} days of data`}
+          </CardTitle>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {([30, 90, 365, "all"] as const).map((d) => (
+              <button
+                key={String(d)}
+                type="button"
+                onClick={() => setRangeDays(d)}
+                className={`rounded border px-2 py-0.5 font-mono text-[10px] transition-colors ${
+                  rangeDays === d
+                    ? "border-primary bg-primary/15 text-primary"
+                    : "border-border text-muted-foreground hover:border-primary/50"
+                }`}
+              >
+                {d === "all" ? "All" : `${d}d`}
+              </button>
+            ))}
             <ProvChip>measured</ProvChip>
             <ProvChip>peak-preserving decimation</ProvChip>
           </div>
@@ -298,6 +318,92 @@ export default function Dashboard() {
           )}
         </CardContent>
       </Card>
+
+      {/* Demand & peak charges — Gap-4 (Jul 2026): first-class visibility for
+          the demand side of the bill. Only renders once analysis produced a
+          measured demand block (archetype-only sites have none to show). */}
+      {demand && (
+        <Card className="mt-4 border-border/70">
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="flex items-center gap-2 font-display text-base">
+              <Gauge className="h-4 w-4 text-primary" /> Demand & peak charges
+            </CardTitle>
+            <ProvChip>measured intervals</ProvChip>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="lg:col-span-2">
+                <p className="font-mono text-[10px] uppercase text-muted-foreground">Monthly peak demand</p>
+                {demand.monthlyPeaks && demand.monthlyPeaks.length > 0 ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-xs">Month</TableHead>
+                        <TableHead className="text-right text-xs">Peak kW</TableHead>
+                        <TableHead className="text-right text-xs">When</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {demand.monthlyPeaks.slice(-6).map((mp) => (
+                        <TableRow key={mp.month}>
+                          <TableCell className="py-1.5 font-mono text-xs">{mp.month}</TableCell>
+                          <TableCell className="py-1.5 text-right font-mono text-xs">{fmtNum(mp.peakKw)}</TableCell>
+                          <TableCell className="py-1.5 text-right font-mono text-[11px] text-muted-foreground">
+                            {new Date(mp.peakTs).toLocaleString([], { month: "short", day: "numeric", hour: "numeric" })}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <p className="py-4 text-sm text-muted-foreground">No monthly peak series in the latest analysis.</p>
+                )}
+                {demand.monthlyPeaks && demand.monthlyPeaks.length > 6 && (
+                  <p className="mt-1 text-[10px] text-muted-foreground">Showing the 6 most recent of {demand.monthlyPeaks.length} months.</p>
+                )}
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <p className="font-mono text-[10px] uppercase text-muted-foreground">Demand share of modeled bill</p>
+                  {costInsight?.breakdown ? (
+                    (() => {
+                      const dPlusCp = (costInsight.breakdown.demand ?? 0) + (costInsight.breakdown.cp ?? 0);
+                      const share = costInsight.breakdown.total > 0 ? dPlusCp / costInsight.breakdown.total : 0;
+                      return (
+                        <>
+                          <p className="mt-1 font-display text-xl font-bold">
+                            {fmtUsd(dPlusCp)} <span className="text-sm font-normal text-muted-foreground">({(share * 100).toFixed(0)}%)</span>
+                          </p>
+                          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                            {dPlusCp > 0
+                              ? "demand + coincident-peak charges on your current rate — shaving peaks reduces this portion"
+                              : "your current rate has no demand or CP charges — peaks affect eligibility for other rates, not this bill"}
+                          </p>
+                        </>
+                      );
+                    })()
+                  ) : (
+                    <p className="mt-1 text-sm text-muted-foreground">unknown — current rate could not be priced</p>
+                  )}
+                </div>
+                {demand.cpProxy && demand.cpProxy.events.length > 0 && (
+                  <div>
+                    <p className="font-mono text-[10px] uppercase text-muted-foreground">{demand.cpProxy.label}</p>
+                    <ul className="mt-1 space-y-1">
+                      {demand.cpProxy.events.slice(0, 5).map((ev) => (
+                        <li key={ev.ts} className="flex justify-between font-mono text-[11px] text-muted-foreground">
+                          <span>{new Date(ev.ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric" })}</span>
+                          <span>{fmtNum(ev.kw)} kW</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         {/* Demand heatmap */}

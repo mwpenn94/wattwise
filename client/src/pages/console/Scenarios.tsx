@@ -154,7 +154,12 @@ export default function Scenarios() {
               {run.isPending ? "Simulating…" : "Run scenario"}
             </Button>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Free tier: 3 runs/month, efficiency & EV only. Solar/battery modeling requires Plus.
+              Free tier: 3 runs/month, efficiency & EV only. Solar/battery modeling requires Plus — during the beta you
+              can switch plans free on the{" "}
+              <a href="/app/account" className="text-primary underline">
+                Account page
+              </a>
+              .
             </p>
           </CardContent>
         </Card>
