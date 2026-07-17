@@ -186,7 +186,14 @@ export interface CostBreakdown {
   /** Batch-41 (pass 1769): `no_cp_charges` — the tariff has no CP component;
    * nothing was "omitted". Placeholder breakdowns for uncosted (ineligible)
    * rows must not claim a CP omission the structure never had. */
-  cpMethodology: "cp_proxy_top_n_customer_peaks" | "cp_omitted_no_interval_data" | "no_cp_charges";
+  /** Batch-49 (passes 2472/2492): the machine-readable label distinguishes the
+   * two omission causes the human disclosures already name — no interval data
+   * at all vs interval data present but demand/peaks not computable from it. */
+  cpMethodology:
+    | "cp_proxy_top_n_customer_peaks"
+    | "cp_omitted_no_interval_data"
+    | "cp_omitted_demand_not_computable"
+    | "no_cp_charges";
   cpTopNApplied?: number;
   /** Batch-40 (pass 1742): uplift added by a tariff minimum-bill floor, kept
    * separate so energy/demand/fixed reflect actual metered charges and

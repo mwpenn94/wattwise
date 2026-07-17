@@ -92,7 +92,7 @@ export default function Dashboard() {
   const summary = (summaryRow?.metrics ?? null) as {
     demand?: Demand | null;
     benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
-    emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number } | null;
+    emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number; mapped?: boolean } | null;
     currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
     basisStructureHasDemandCharges?: boolean | null;
     tariffComparisons?: Array<{
@@ -269,8 +269,17 @@ export default function Dashboard() {
           icon={<Leaf className="h-4 w-4" />}
           label="Emissions"
           value={emissionsInsight ? `${fmtNum(emissionsInsight.annualCo2eLb ?? null)} lb CO₂e/yr` : "—"}
-          /* Batch-16 (pass 268): eGRID provenance label is unconditional whenever a figure is shown */
-          sub={emissionsInsight ? `${emissionsInsight.subregion ? `${emissionsInsight.subregion} · ` : ""}eGRID annual avg` : ""}
+          /* Batch-16 (pass 268): eGRID provenance label is unconditional whenever a figure is shown.
+             Batch-49 (pass 2466b): when neither the ZIP3 crosswalk nor the state resolved an eGRID
+             subregion (mapped === false, e.g. territories like PR/GU), citing "AZNM · eGRID annual avg"
+             misattributes the region — name the fallback explicitly instead. */
+          sub={
+            emissionsInsight
+              ? emissionsInsight.mapped === false
+                ? `region unresolved — ${emissionsInsight.subregion ?? "default"} factor used as a fallback`
+                : `${emissionsInsight.subregion ? `${emissionsInsight.subregion} · ` : ""}eGRID annual avg`
+              : ""
+          }
         />
       </div>
 

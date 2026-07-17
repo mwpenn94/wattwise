@@ -112,6 +112,12 @@ export function airDetectHeaderRow(rows: Row[]): number {
   let bestScore = -Infinity;
   for (let i = 0; i <= limit; i++) {
     if (airIsBlankRow(rows[i])) continue;
+    // Batch-49 (pass 2514a): summary rows ("Total = 1234") are data-class rows
+    // (D2), never header candidates. Without this skip, a PREAMBLE summary row
+    // sitting above the true header could outscore it (numeric-next-row bonus
+    // plus few numeric cells of its own) and silently shift parsing off the
+    // real columns — the D2 exclusion previously applied only BELOW the header.
+    if (airIsSummaryRow(rows[i])) continue;
     const s = airHeaderScore(rows[i], rows[i + 1]);
     if (s > bestScore) {
       bestScore = s;

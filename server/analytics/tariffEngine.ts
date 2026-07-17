@@ -478,6 +478,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
         da == null
           ? "interval data exists but demand could not be computed from it (too few points with usable demand — e.g. a vacancy or net-export period)"
           : "no qualifying seasonal peaks in the interval history";
+      // Batch-49 (passes 2472/2492): the machine-readable label previously kept
+      // its init value "cp_omitted_no_interval_data" on this branch even though
+      // interval data EXISTS (points.length > 0) — an API consumer reading the
+      // label without the disclosure text would infer the wrong cause. The
+      // label now names the same cause the disclosure does.
+      cpMethodology = "cp_omitted_demand_not_computable";
       disclosures.push(
         `This tariff includes a coincident-peak (CP) charge, but it could not be estimated from your data (${cpOmissionCause}) — the cost shown EXCLUDES the CP component and understates the true bill on this rate.`,
       );
