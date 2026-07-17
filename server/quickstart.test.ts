@@ -214,4 +214,42 @@ describe("sites.quickCreate + refine (progressive participation)", () => {
       expect(fields2).not.toContain("vintage");
     }
   }, 120_000);
+
+  it("grounded intake: a confirmed home gets residential priors, never the office default", async () => {
+    const caller = appRouter.createCaller(ctxFor({ id: qsUserId, openId: OPEN_ID, role: "admin" }));
+    // No placeId here (unit tests stay offline) — buildingType confirmation
+    // alone must be enough to kill the office assumption.
+    const res = await caller.sites.quickCreate({
+      address: "1234 W Missouri Ave, Phoenix, AZ 85013",
+      buildingType: "single_family",
+    });
+    const site = await caller.sites.get({ siteId: res.id });
+    expect(site.buildingType).toBe("single_family");
+    // type-matched residential priors — NOT 15,000 sqft office
+    expect(site.sqft).toBe(BUILDING_PRIORS.single_family.sqft);
+    expect(site.vintage).toBe(BUILDING_PRIORS.single_family.vintage);
+    // user confirmation counts as refinement from the start
+    expect(site.attrSource).toBe("user_entered");
+    expect(site.refinedFields).toEqual(["buildingType"]);
+    // residential site name, not "building"
+    expect(site.name.toLowerCase()).toContain("home");
+    // the intake insight says the type was confirmed, and the assumption list
+    // no longer treats buildingType as a placeholder for the pipeline re-emit
+    const rows = await caller.insights.list({ siteId: res.id });
+    const intake = rows.find((r) => r.kind === "intake_assumptions");
+    expect(intake).toBeTruthy();
+    expect(intake!.body).toContain("confirmed by you");
+    const prov = intake!.provenance as { buildingTypeConfirmed?: boolean };
+    expect(prov.buildingTypeConfirmed).toBe(true);
+    // utility override is persisted verbatim when supplied
+    const res2 = await caller.sites.quickCreate({
+      address: "77 Elm St, Hartford, CT 06106",
+      buildingType: "multifamily",
+      utilityName: "Hartford Municipal Electric",
+    });
+    const site2 = await caller.sites.get({ siteId: res2.id });
+    expect(site2.utilityName).toBe("Hartford Municipal Electric");
+    expect(site2.sqft).toBe(BUILDING_PRIORS.multifamily.sqft);
+    expect(site2.name.toLowerCase()).toContain("apartment");
+  }, 60_000);
 });

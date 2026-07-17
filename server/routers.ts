@@ -37,6 +37,7 @@ import { costOnTariff } from "./analytics/tariffEngine";
 import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend } from "./analytics/costModel";
 import { storagePut } from "./storage";
 import { deriveFromAddress, cascadeProvenance } from "./cascade";
+import { placeAutocomplete, resolvePlace } from "./places";
 import { createHash } from "crypto";
 import { intervals as intervalsTable } from "../drizzle/schema";
 import { and, asc, eq, gte, lte } from "drizzle-orm";
@@ -86,6 +87,33 @@ export const appRouter = router({
     }),
   }),
 
+  /* ================= places (grounded address intake, Jul 17) ================= */
+  places: router({
+    /** Debounced address autocomplete — US-biased, address-scoped, top 5. */
+    autocomplete: protectedProcedure
+      .input(z.object({ query: z.string().min(3).max(200) }))
+      .query(({ input }) => placeAutocomplete(input.query)),
+    /** Resolve a selected suggestion to verified components so the intake UI
+     *  can preview state/ZIP (and the suggested utility) BEFORE creating. */
+    resolve: protectedProcedure
+      .input(z.object({ placeId: z.string().min(1).max(512) }))
+      .query(async ({ input }) => {
+        const place = await resolvePlace(input.placeId);
+        // Editable suggestion only — never silently persisted without display.
+        const cascade = deriveFromAddress(place.formattedAddress, {
+          state: place.state,
+          zip: place.zip,
+          city: place.city,
+          placeVerified: place.state != null,
+        });
+        return {
+          place,
+          suggestedUtility: cascade.utilityName.value,
+          utilityNote: cascade.utilityName.note,
+          climateZone: cascade.climateZone.value,
+        };
+      }),
+  }),
   /* ================= sites ================= */
   sites: router({
     list: protectedProcedure.query(async ({ ctx }) => {
@@ -253,16 +281,52 @@ export const appRouter = router({
      *  assumption and what refining it unlocks — forms are optional refinements,
      *  never a gate. */
     quickCreate: protectedProcedure
-      .input(z.object({ address: z.string().min(3).max(1000), name: z.string().max(255).optional() }))
+      .input(
+        z.object({
+          address: z.string().min(3).max(1000),
+          name: z.string().max(255).optional(),
+          // Grounded intake (Jul 17): a Google Places selection grounds the
+          // location in a VERIFIED address instead of free-text regex parsing.
+          placeId: z.string().max(512).optional(),
+          // Building type CONFIRMED by the user in the intake flow (one-tap
+          // chips) — no more silent 15k-sqft office assumption for a house.
+          buildingType: z.enum(["single_family", "multifamily", "office", "retail", "warehouse", "restaurant", "school", "hospital", "hotel", "grocery", "manufacturing", "municipal"]).optional(),
+          // Utility confirmed/overridden by the user (the state-largest is
+          // only ever shown as an editable suggestion).
+          utilityName: z.string().max(128).optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         await seeded();
         const tier = tierOf(ctx.user);
-        const parse = parseQuickAddress(input.address);
+        // Grounded location: resolve the verified Place server-side when one
+        // was selected; degrade to free-text parsing (disclosed) otherwise —
+        // a Places outage must never block intake.
+        let verified: Awaited<ReturnType<typeof resolvePlace>> | null = null;
+        if (input.placeId) {
+          try {
+            verified = await resolvePlace(input.placeId);
+          } catch (e) {
+            console.error("[quickCreate] place resolution failed — falling back to text parse:", e);
+          }
+        }
+        const effectiveAddress = verified?.formattedAddress || input.address;
+        const parse = verified?.state
+          ? { state: verified.state, zip: verified.zip, city: verified.city, raw: effectiveAddress }
+          : parseQuickAddress(input.address);
         // Gap-8 cascade (Jul 2026): everything derivable from the address is
         // derived — candidate utility, ZIP3-aware climate zone, timezone,
-        // eGRID subregion, and building-stock priors — each with provenance,
-        // instead of one flat 10k-sqft office default.
-        const cascade = deriveFromAddress(input.address);
+        // eGRID subregion, and building-stock priors — each with provenance.
+        // Grounded intake feeds VERIFIED location facts and the user-confirmed
+        // building type in as explicit values.
+        const cascade = deriveFromAddress(effectiveAddress, {
+          state: verified?.state ?? undefined,
+          zip: verified?.zip ?? undefined,
+          city: verified?.city ?? undefined,
+          buildingType: input.buildingType ?? undefined,
+          utilityName: input.utilityName?.trim() || undefined,
+          placeVerified: verified?.state != null,
+        });
         const assumptions = quickStartAssumptions(parse, {
           buildingType: cascade.buildingType.value,
           sqft: cascade.sqft.value,
@@ -277,7 +341,11 @@ export const appRouter = router({
           }
           return h.createSite({
             userId: ctx.user.id,
-            name: input.name?.trim() || (parse.city ? `${parse.city} building` : parse.raw.slice(0, 60) || "My building"),
+            name:
+              input.name?.trim() ||
+              (parse.city
+                ? `${parse.city} ${input.buildingType === "single_family" ? "home" : input.buildingType === "multifamily" ? "apartment" : "building"}`
+                : parse.raw.slice(0, 60) || "My building"),
             address: parse.raw,
             city: parse.city,
             state: parse.state,
@@ -288,10 +356,11 @@ export const appRouter = router({
             climateZone: cascade.climateZone.value,
             utilityName: cascade.utilityName.value ?? undefined,
             isHypothetical: false,
-            attrSource: "quick_start_defaults",
-            // Batch-45 (pass 1959): per-field refinement record — starts empty;
-            // sites.refine appends each core field the user actually provides.
-            refinedFields: [],
+            attrSource: input.buildingType ? "user_entered" : "quick_start_defaults",
+            // Batch-45 (pass 1959): per-field refinement record — grounded
+            // intake counts a user-confirmed building type as refined from
+            // the start; sqft/vintage remain priors until provided.
+            refinedFields: input.buildingType ? ["buildingType"] : [],
           });
         });
         // Disclosure exists from the moment the site does — before any analysis.
@@ -302,9 +371,13 @@ export const appRouter = router({
         await h.addInsight({
           siteId: id,
           kind: "intake_assumptions",
-          title: "Quick-start analysis — placeholder assumptions in effect",
+          title: verified
+            ? "Quick-start analysis — verified address, remaining assumptions disclosed"
+            : "Quick-start analysis — placeholder assumptions in effect",
           body:
-            `This site was created from just an address. Everything derivable from the address was derived automatically — ` +
+            (verified
+              ? `This site was created from a verified address (${verified.formattedAddress}). Everything derivable from it was derived automatically — `
+              : `This site was created from just an address. Everything derivable from the address was derived automatically — `) +
             [
               `climate zone ${cascade.climateZone.value} (${cascade.climateZone.source.replace(/_/g, " ")})`,
               `timezone ${cascade.timezone.value} (${cascade.timezone.source.replace(/_/g, " ")})`,
@@ -316,7 +389,9 @@ export const appRouter = router({
               cascade.utilityName.value
                 ? `likely utility ${cascade.utilityName.value} (${cascade.utilityName.source.replace(/_/g, " ")})`
                 : `utility unknown — ${cascade.utilityName.note}`,
-              `building prior: ${cascade.buildingType.value}, ${cascade.sqft.value.toLocaleString()} sqft, vintage ${cascade.vintage.value} (${cascade.sqft.source.replace(/_/g, " ")})`,
+              input.buildingType
+                ? `building type ${cascade.buildingType.value} (confirmed by you) with ${cascade.sqft.value.toLocaleString()} sqft / vintage ${cascade.vintage.value} type-median priors`
+                : `building prior: ${cascade.buildingType.value}, ${cascade.sqft.value.toLocaleString()} sqft, vintage ${cascade.vintage.value} (${cascade.sqft.source.replace(/_/g, " ")}) — UNCONFIRMED: tap the building-type chip to correct it`,
             ].join("; ") +
             `. These are starting points, not facts — every field is overridable, and each "add detail" chip on the dashboard shows exactly what refining a field unlocks.` +
             (tzNote ? ` ${tzNote.body}` : "") +
@@ -325,7 +400,14 @@ export const appRouter = router({
           // severity when it is graver than the default info.
           severity: tzNote?.severity === "warning" ? "warning" : "info",
           confidence: "low",
-          provenance: { method: "quick_start_intake_v2", parsedState: parse.state, parsedZip: parse.zip, tzAmbiguous: tzNote != null },
+          provenance: {
+            method: verified ? "quick_start_intake_v3_grounded" : "quick_start_intake_v2",
+            parsedState: parse.state,
+            parsedZip: parse.zip,
+            tzAmbiguous: tzNote != null,
+            placeId: verified?.placeId,
+            buildingTypeConfirmed: input.buildingType != null,
+          },
           metrics: { assumptions, cascade: cascadeProvenance(cascade) },
         });
         await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name ?? parse.raw.slice(0, 60), quickStart: true });

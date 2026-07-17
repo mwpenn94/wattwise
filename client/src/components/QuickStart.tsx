@@ -7,14 +7,14 @@
  * Until the bill is saved, figures are honestly disclosed as placeholder-based.
  * Multi-step forms (wizard / full site dialog) remain strictly optional.
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import { MapPin, Receipt, Sparkles } from "lucide-react";
+import { Building2, Check, Factory, Home as HomeIcon, Hotel, MapPin, Receipt, ShoppingCart, Sparkles, Store, Warehouse } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { fileToBase64 } from "@/lib/wattwiseUi";
 
@@ -29,6 +29,24 @@ interface BillDraft {
   billedDemandKw: string;
 }
 
+/** One-tap building-type confirmation (grounded intake, Jul 17): the intake
+ *  never silently assumes "office" — the user confirms what the address is. */
+const BUILDING_CHIPS: Array<{ value: string; label: string; icon: typeof HomeIcon }> = [
+  { value: "single_family", label: "Home", icon: HomeIcon },
+  { value: "multifamily", label: "Apartment / condo", icon: Building2 },
+  { value: "office", label: "Office", icon: Building2 },
+  { value: "retail", label: "Retail", icon: Store },
+  { value: "restaurant", label: "Restaurant", icon: Store },
+  { value: "warehouse", label: "Warehouse", icon: Warehouse },
+  { value: "grocery", label: "Grocery", icon: ShoppingCart },
+  { value: "hotel", label: "Hotel", icon: Hotel },
+  { value: "school", label: "School", icon: Building2 },
+  { value: "hospital", label: "Hospital", icon: Building2 },
+  { value: "manufacturing", label: "Manufacturing", icon: Factory },
+  { value: "municipal", label: "Municipal", icon: Building2 },
+];
+const PRIMARY_CHIPS = 6; // first row shown by default; "more…" reveals the rest
+
 export default function QuickStart({ compact = false }: { compact?: boolean }) {
   const [, navigate] = useLocation();
   const utils = trpc.useUtils();
@@ -36,6 +54,37 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
   const [phase, setPhase] = useState<"idle" | "creating" | "analyzing" | "saving">("idle");
   const [billDraft, setBillDraft] = useState<BillDraft | null>(null);
   const billRef = useRef<HTMLInputElement>(null);
+  // Grounded intake state
+  const [debounced, setDebounced] = useState("");
+  const [selectedPlace, setSelectedPlace] = useState<{ placeId: string; description: string } | null>(null);
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [buildingType, setBuildingType] = useState<string | null>(null);
+  const [showAllChips, setShowAllChips] = useState(false);
+  const [utilityOverride, setUtilityOverride] = useState<string | null>(null);
+  const suggestBoxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(address.trim()), 250);
+    return () => clearTimeout(t);
+  }, [address]);
+
+  const suggestions = trpc.places.autocomplete.useQuery(
+    { query: debounced },
+    { enabled: debounced.length >= 3 && selectedPlace == null, staleTime: 60_000, retry: false },
+  );
+  const resolved = trpc.places.resolve.useQuery(
+    { placeId: selectedPlace?.placeId ?? "" },
+    { enabled: selectedPlace != null, staleTime: 300_000, retry: false },
+  );
+
+  // Close the suggestion popover on outside click
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (suggestBoxRef.current && !suggestBoxRef.current.contains(e.target as Node)) setSuggestOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
 
   const quickCreate = trpc.sites.quickCreate.useMutation();
   const analyze = trpc.analysis.run.useMutation();
@@ -55,18 +104,27 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
       toast.error("Enter at least a city/state or ZIP — e.g. “Phoenix, AZ 85004”.");
       return;
     }
+    if (!buildingType) {
+      toast.error("Tap what this address is — home, office, retail… — so the analysis isn't built on a guess.");
+      return;
+    }
     setPhase("creating");
     try {
-      const res = await quickCreate.mutateAsync({ address: address.trim() });
+      const res = await quickCreate.mutateAsync({
+        address: address.trim(),
+        placeId: selectedPlace?.placeId,
+        buildingType: buildingType as never,
+        utilityName: utilityOverride?.trim() || undefined,
+      });
       await utils.sites.list.invalidate();
       setPhase("analyzing");
       toast.success(
         res.parse.state
-          ? `Site created for ${res.parse.city ? `${res.parse.city}, ` : ""}${res.parse.state}${res.parse.zip ? ` ${res.parse.zip}` : ""} — running quick analysis…`
+          ? `Site created for ${res.parse.city ? `${res.parse.city}, ` : ""}${res.parse.state}${res.parse.zip ? ` ${res.parse.zip}` : ""}${selectedPlace ? " (verified address)" : ""} — running quick analysis…`
           : "Site created (location not recognized — US-median assumptions disclosed) — running quick analysis…",
       );
       await finishToDashboard(res.id);
-      toast.success("Quick-win analysis ready — placeholders are disclosed; refine anything, anytime.");
+      toast.success("Quick-win analysis ready — remaining assumptions are disclosed; refine anything, anytime.");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Quick start failed");
     } finally {
@@ -83,6 +141,9 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
       // placeholder name + US-median assumptions, all disclosed).
       const res = await quickCreate.mutateAsync({
         address: address.trim().length >= 3 ? address.trim() : "Bill upload (address not provided)",
+        placeId: selectedPlace?.placeId,
+        buildingType: (buildingType as never) ?? undefined,
+        utilityName: utilityOverride?.trim() || undefined,
       });
       await utils.sites.list.invalidate();
       const mime = f.type === "application/pdf" ? "application/pdf" : f.type === "image/png" ? "image/png" : "image/jpeg";
@@ -181,26 +242,126 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
           <p className="font-display text-sm font-semibold">Quick start — one input, instant analysis</p>
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          Just an address (or even a ZIP) is enough. We run a first-pass archetype analysis immediately and disclose
-          every placeholder assumption — refine details later only if you want to.
+          Type an address and pick it from the suggestions — we verify the location, you confirm what the building is,
+          and the first-pass analysis runs on grounded facts with every remaining assumption disclosed.
         </p>
         <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-          <div className="relative flex-1">
+          <div className="relative flex-1" ref={suggestBoxRef}>
             <MapPin className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               className="pl-8"
-              placeholder="500 N Central Ave, Phoenix, AZ 85004"
+              placeholder="Start typing an address…"
               value={address}
-              onChange={(e) => setAddress(e.target.value)}
+              onChange={(e) => {
+                setAddress(e.target.value);
+                setSelectedPlace(null);
+                setSuggestOpen(true);
+              }}
+              onFocus={() => setSuggestOpen(true)}
               onKeyDown={(e) => e.key === "Enter" && !busy && !billDraft && startFromAddress()}
               disabled={busy}
               aria-label="Building address"
+              autoComplete="off"
             />
+            {suggestOpen && selectedPlace == null && debounced.length >= 3 && (suggestions.data?.length ?? 0) > 0 && (
+              <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
+                {suggestions.data!.map((s) => (
+                  <button
+                    key={s.placeId}
+                    type="button"
+                    className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground"
+                    onClick={() => {
+                      setSelectedPlace({ placeId: s.placeId, description: s.description });
+                      setAddress(s.description);
+                      setSuggestOpen(false);
+                    }}
+                  >
+                    <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span>
+                      <span className="font-medium">{s.mainText}</span>
+                      {s.secondaryText && <span className="text-muted-foreground"> — {s.secondaryText}</span>}
+                    </span>
+                  </button>
+                ))}
+                <p className="border-t px-3 py-1.5 text-[10px] text-muted-foreground">
+                  Pick a suggestion to ground the analysis in a verified address — or keep typing free-text.
+                </p>
+              </div>
+            )}
           </div>
-          <Button onClick={startFromAddress} disabled={busy || billDraft != null}>
+          <Button onClick={startFromAddress} disabled={busy || billDraft != null || address.trim().length < 3 || !buildingType}>
             {phase === "creating" ? "Creating…" : phase === "analyzing" ? "Analyzing…" : "Analyze"}
           </Button>
         </div>
+        {selectedPlace && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-600 dark:text-emerald-400">
+              <Check className="h-3 w-3" /> Verified address
+            </span>
+            {resolved.data && (
+              <span className="text-muted-foreground">
+                {[resolved.data.place.city, resolved.data.place.state, resolved.data.place.zip].filter(Boolean).join(", ")}
+                {resolved.data.climateZone ? ` · climate zone ${resolved.data.climateZone}` : ""}
+              </span>
+            )}
+          </div>
+        )}
+        {address.trim().length >= 3 && !billDraft && (
+          <div className="mt-3">
+            <p className="text-[11px] font-medium text-muted-foreground">
+              What is this address? <span className="font-normal">(required — the archetype, size prior, and rate eligibility all depend on it)</span>
+            </p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {(showAllChips ? BUILDING_CHIPS : BUILDING_CHIPS.slice(0, PRIMARY_CHIPS)).map((c) => {
+                const Icon = c.icon;
+                const active = buildingType === c.value;
+                return (
+                  <button
+                    key={c.value}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setBuildingType(active ? null : c.value)}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                      active
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-transparent text-foreground hover:border-primary/50 hover:bg-primary/5"
+                    }`}
+                    aria-pressed={active}
+                  >
+                    <Icon className="h-3 w-3" /> {c.label}
+                  </button>
+                );
+              })}
+              {!showAllChips && (
+                <button
+                  type="button"
+                  className="rounded-full border border-dashed px-2.5 py-1 text-xs text-muted-foreground hover:border-primary/50"
+                  onClick={() => setShowAllChips(true)}
+                >
+                  more types…
+                </button>
+              )}
+            </div>
+            {resolved.data?.suggestedUtility && buildingType && (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                <span>
+                  Likely utility: <span className="font-medium text-foreground">{utilityOverride ?? resolved.data.suggestedUtility}</span>{" "}
+                  <span className="text-muted-foreground">(largest in {resolved.data.place.state} — a suggestion, not verified for this address)</span>
+                </span>
+                <button
+                  type="button"
+                  className="text-primary underline-offset-2 hover:underline"
+                  onClick={() => {
+                    const v = window.prompt("Your electric utility (as shown on your bill):", utilityOverride ?? resolved.data!.suggestedUtility ?? "");
+                    if (v != null) setUtilityOverride(v.trim() || null);
+                  }}
+                >
+                  change
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <button
             type="button"

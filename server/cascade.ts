@@ -29,7 +29,7 @@ import { STATE_SUBREGION, STATE_UTILITY } from "./seed/nationalData";
 export interface DerivedField<T> {
   value: T;
   /** where the value came from — never silently defaulted */
-  source: "user_entered" | "zip_inferred" | "state_inferred" | "prior_median" | "us_median_fallback" | "unknown";
+  source: "user_entered" | "place_verified" | "zip_inferred" | "state_inferred" | "prior_median" | "us_median_fallback" | "unknown";
   /** human sentence for disclosures / UI hints */
   note: string;
 }
@@ -83,6 +83,11 @@ export function deriveFromAddress(
     vintage?: number | null;
     climateZone?: string | null;
     utilityName?: string | null;
+    /** Grounded intake (Jul 17): location facts came from a Google-verified
+     *  Place selection (geocoded address components), not free-text parsing.
+     *  Location fields are then tagged 'place_verified' instead of
+     *  'user_entered' so disclosures can say "verified address" honestly. */
+    placeVerified?: boolean;
   },
 ): AddressCascade {
   const parse = rawAddress ? parseQuickAddress(rawAddress) : { state: null, zip: null, city: null, raw: rawAddress ?? "" };
@@ -93,13 +98,17 @@ export function deriveFromAddress(
   const stateUp = state?.toUpperCase() ?? null;
 
   const stateField: DerivedField<string | null> = explicit?.state
-    ? { value: stateUp, source: "user_entered", note: "State as entered." }
+    ? explicit.placeVerified
+      ? { value: stateUp, source: "place_verified", note: "State from the verified address you selected." }
+      : { value: stateUp, source: "user_entered", note: "State as entered." }
     : parse.state
       ? { value: stateUp, source: "zip_inferred", note: "State parsed from the address text." }
       : { value: null, source: "unknown", note: "No state could be determined — add one to unlock location-specific rates, weather, and emissions." };
 
   const zipField: DerivedField<string | null> = explicit?.zip
-    ? { value: zip, source: "user_entered", note: "ZIP as entered." }
+    ? explicit.placeVerified
+      ? { value: zip, source: "place_verified", note: "ZIP from the verified address you selected." }
+      : { value: zip, source: "user_entered", note: "ZIP as entered." }
     : parse.zip
       ? { value: zip, source: "zip_inferred", note: "ZIP parsed from the address text." }
       : { value: null, source: "unknown", note: "No ZIP found in the address." };
@@ -143,8 +152,8 @@ export function deriveFromAddress(
 
   const bType = explicit?.buildingType ?? QUICK_START_DEFAULTS.buildingType;
   const bTypeField: DerivedField<string> = explicit?.buildingType
-    ? { value: bType, source: "user_entered", note: "Building type as entered." }
-    : { value: bType, source: "prior_median", note: `Building type assumed '${bType}' (most common commercial type) — pick yours for a matched archetype.` };
+    ? { value: bType, source: "user_entered", note: "Building type as you confirmed it." }
+    : { value: bType, source: "prior_median", note: `Building type assumed '${bType}' — an UNCONFIRMED guess, not a fact about this address. Confirm whether it's a home, apartment, office, or other type: the archetype load shape, floor-area prior, and rate eligibility all rest on it.` };
 
   const prior = BUILDING_PRIORS[bType] ?? BUILDING_PRIORS.office;
   const sqftField: DerivedField<number> = explicit?.sqft
@@ -158,7 +167,11 @@ export function deriveFromAddress(
   return {
     state: stateField,
     zip: zipField,
-    city: { value: city, source: city ? (explicit?.city ? "user_entered" : "zip_inferred") : "unknown", note: city ? "City parsed from address." : "No city found." },
+    city: {
+      value: city,
+      source: city ? (explicit?.city ? (explicit.placeVerified ? "place_verified" : "user_entered") : "zip_inferred") : "unknown",
+      note: city ? (explicit?.city && explicit.placeVerified ? "City from the verified address you selected." : "City parsed from address.") : "No city found.",
+    },
     climateZone: { value: zone, source: zoneSource, note: zoneNote },
     timezone: tzField,
     utilityName: utilField,
