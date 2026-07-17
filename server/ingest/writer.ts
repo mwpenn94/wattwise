@@ -131,6 +131,14 @@ export async function writeIntervals(
           demand: sql`CASE WHEN VALUES(\`precedence\`) >= \`precedence\` AND VALUES(\`demand\`) IS NOT NULL THEN VALUES(\`demand\`) ELSE \`demand\` END`,
           uploadId: sql`CASE WHEN VALUES(\`precedence\`) >= \`precedence\` THEN VALUES(\`uploadId\`) ELSE \`uploadId\` END`,
           precedence: sql`GREATEST(\`precedence\`, VALUES(\`precedence\`))`,
+          // Batch-61 (pass 3134): when the incoming point wins (>= precedence),
+          // clear any stale qcFlags — mirroring the exact-match pre-scan path's
+          // `qcFlags: null` on replace. Without this, a row flagged
+          // 'superseded_overlap' (e.g. by a concurrent upload between the
+          // pre-scan and this insert) would keep the flag after being updated
+          // with authoritative data, and analytics reads — which exclude
+          // superseded rows — would silently drop the winning point.
+          qcFlags: sql`CASE WHEN VALUES(\`precedence\`) >= \`precedence\` THEN NULL ELSE \`qcFlags\` END`,
         },
       });
     // Cycle 10 (pass 554): honest WriteResult accounting. MySQL reports

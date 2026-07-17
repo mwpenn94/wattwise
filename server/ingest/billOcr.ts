@@ -88,10 +88,16 @@ export async function extractBill(
   const estPreflightCostUsd = llmCostUsd(estimateBillOcrPromptTokens(imageDataUrl), EST_BILL_OCR_COMPLETION_TOKENS);
   const allowed = await llmBudgetAllows(userId, tier, estPreflightCostUsd);
   if (!allowed) {
+    // Batch-61 (pass 3127): tier-aware wording. Telling a plus/pro user who
+    // exhausted their (10×) budget to "upgrade to Plus" was wrong on both
+    // counts — they may already be on Plus/Pro, and upgrading RAISES the cap,
+    // it does not remove it (bounded self-serve-beta budget, Batch-47 design).
     return {
       status: "manual_entry_required",
       reason:
-        "Free-tier AI parsing budget for this month is exhausted — enter the bill fields manually below (upgrading to Plus removes this cap).",
+        tier === "free"
+          ? "Free-tier AI parsing budget for this month is exhausted — enter the bill fields manually below (upgrading to Plus raises this cap)."
+          : `This month's AI parsing budget for your ${tier} plan is exhausted — enter the bill fields manually below; the budget resets next month.`,
     };
   }
 
