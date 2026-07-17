@@ -174,4 +174,40 @@ describe("sites.quickCreate + refine (progressive participation)", () => {
     site = await caller.sites.get({ siteId: created.id });
     expect(site.climateZone).toBe("2B"); // Phoenix — re-inferred post-flip
   }, 30_000);
+
+  it("Batch-45 (pass 1959): refinedFields is per-field — refining one core attr keeps the others' placeholder lines", async () => {
+    const caller = appRouter.createCaller(ctxFor({ id: qsUserId, openId: OPEN_ID, role: "admin" }));
+    const created = await caller.sites.quickCreate({ address: "600 W Broadway, San Diego, CA 92101" });
+    let site = await caller.sites.get({ siteId: created.id });
+    // quick-start origin starts with an empty (non-null) refinement record
+    expect(site.refinedFields).toEqual([]);
+    // refine ONLY buildingType — site-level attrSource flips, but the
+    // per-field record shows sqft/vintage are still placeholders
+    await caller.sites.refine({ siteId: created.id, buildingType: "warehouse" });
+    site = await caller.sites.get({ siteId: created.id });
+    expect(site.attrSource).toBe("user_entered");
+    expect(site.refinedFields).toEqual(["buildingType"]);
+    // pipeline re-emit must still disclose sqft + vintage but NOT buildingType
+    await caller.analysis.run({ siteId: created.id });
+    const rows = await caller.insights.list({ siteId: created.id });
+    const intake = rows.find((r) => r.kind === "intake_assumptions" && r.title.includes("placeholder"));
+    expect(intake).toBeTruthy();
+    const fields = ((intake!.metrics as { assumptions: Array<{ field: string }> }).assumptions ?? []).map((a) => a.field);
+    expect(fields).toContain("sqft");
+    expect(fields).toContain("vintage");
+    expect(fields).not.toContain("buildingType");
+    // refining the remaining core fields clears their lines too
+    await caller.sites.refine({ siteId: created.id, sqft: 42_000, vintage: 1998 });
+    site = await caller.sites.get({ siteId: created.id });
+    expect(([...(site.refinedFields as string[])]).sort()).toEqual(["buildingType", "sqft", "vintage"]);
+    await caller.analysis.run({ siteId: created.id });
+    const rows2 = await caller.insights.list({ siteId: created.id });
+    const intake2 = rows2.find((r) => r.kind === "intake_assumptions" && r.title.includes("placeholder"));
+    if (intake2) {
+      const fields2 = ((intake2.metrics as { assumptions: Array<{ field: string }> }).assumptions ?? []).map((a) => a.field);
+      expect(fields2).not.toContain("buildingType");
+      expect(fields2).not.toContain("sqft");
+      expect(fields2).not.toContain("vintage");
+    }
+  }, 120_000);
 });

@@ -179,12 +179,21 @@ export const appRouter = router({
         // used. If the user supplied a climate zone, it is NOT a fallback — only
         // the timezone is; if a ZIP inferred a specific zone, name that; only
         // when neither exists is the US-median 4A wording true.
-        const usedZone = input.climateZone ?? inferClimateZone(input.zip, input.state);
-        const zoneClause = input.climateZone
-          ? `the climate zone uses your entered value (${input.climateZone})`
-          : input.zip
-            ? `the climate zone was inferred from your ZIP (${usedZone})`
-            : `the climate zone defaults to the US-median (${usedZone})`;
+        // Batch-45 (pass 1926a): the zone SOURCE now comes from
+        // inferClimateZoneWithSource, not from "was a ZIP present" — a ZIP
+        // whose prefix is unmapped falls through to the US-median, and the old
+        // presence-based branching would have mislabeled that fallback as
+        // "inferred from your ZIP". Provenance and body text share one source.
+        const zoneUsed = input.climateZone
+          ? { zone: input.climateZone, source: "user_entered" as const }
+          : inferClimateZoneWithSource(input.zip, input.state);
+        const usedZone = zoneUsed.zone;
+        const zoneClause =
+          zoneUsed.source === "user_entered"
+            ? `the climate zone uses your entered value (${usedZone})`
+            : zoneUsed.source === "zip_inferred"
+              ? `the climate zone was inferred from your ZIP (${usedZone})`
+              : `the climate zone defaults to the US-median (${usedZone})`;
         await h.addInsight({
           siteId: id,
           kind: "intake_assumptions",
@@ -192,7 +201,7 @@ export const appRouter = router({
           body: `No state was provided for this site, so the meter timezone defaults to America/Phoenix, and ${zoneClause}. Time-of-use periods, demand windows, and coincident-peak seasons may be wrong for your actual location — add a state to correct the timezone.`,
           severity: "warning",
           confidence: "low",
-          provenance: { method: "site_create_tz_disclosure_v1", state: null, tzFallback: "America/Phoenix", climateZoneUsed: usedZone, climateZoneSource: input.climateZone ? "user_entered" : input.zip ? "zip_inferred" : "us_median_fallback" },
+          provenance: { method: "site_create_tz_disclosure_v2", state: null, tzFallback: "America/Phoenix", climateZoneUsed: usedZone, climateZoneSource: zoneUsed.source },
           metrics: null,
         });
       }
@@ -243,6 +252,9 @@ export const appRouter = router({
             utilityName: cascade.utilityName.value ?? undefined,
             isHypothetical: false,
             attrSource: "quick_start_defaults",
+            // Batch-45 (pass 1959): per-field refinement record — starts empty;
+            // sites.refine appends each core field the user actually provides.
+            refinedFields: [],
           });
         });
         // Disclosure exists from the moment the site does — before any analysis.
@@ -308,6 +320,14 @@ export const appRouter = router({
         // archetype/EUI/savings figure — to the pre-move location once any
         // earlier refinement had flipped attrSource).
         const coreProvided = ["buildingType", "sqft", "vintage", "state", "zip"].some((k) => k in provided);
+        // Batch-45 (pass 1959): track WHICH core placeholders the user replaced.
+        // Site-level attrSource flips on the FIRST core refinement, which alone
+        // cannot say which of buildingType/sqft/vintage remain placeholders —
+        // the per-field list can. Only maintained for quick-start-origin sites
+        // (refinedFields non-null); regular sites stay null.
+        const priorRefined = Array.isArray(site.refinedFields) ? (site.refinedFields as string[]) : null;
+        const newlyRefined = ["buildingType", "sqft", "vintage"].filter((k) => k in provided && !priorRefined?.includes(k));
+        const nextRefined = priorRefined != null && newlyRefined.length > 0 ? [...priorRefined, ...newlyRefined] : undefined;
         const nextState = (provided.state as string | undefined) ?? site.state ?? undefined;
         const nextZip = (provided.zip as string | undefined) ?? site.zip ?? undefined;
         // Gap-8 cascade (Jul 2026): a location change re-runs the full cascade,
@@ -331,6 +351,7 @@ export const appRouter = router({
             ? { utilityName: refineCascade.utilityName.value }
             : {}),
           ...(coreProvided && site.attrSource === "quick_start_defaults" ? { attrSource: "user_entered" } : {}),
+          ...(nextRefined !== undefined ? { refinedFields: nextRefined } : {}),
         });
         // Disclose the re-derivation so the location-driven update is never silent.
         if (refineCascade && !userOwnsUtility && refineCascade.utilityName.value && refineCascade.utilityName.value !== site.utilityName) {

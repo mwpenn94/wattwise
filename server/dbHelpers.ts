@@ -154,7 +154,7 @@ export async function createSite(data: typeof sites.$inferInsert) {
 export async function updateSite(
   siteId: number,
   userId: number,
-  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource">>,
+  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields">>,
 ) {
   await assertSiteOwner(siteId, userId);
   const db = await requireDb();
@@ -560,7 +560,12 @@ export async function exportUserData(userId: number) {
   // explicit truncation note so completeness is never silently lost.
   const INTERVAL_EXPORT_CAP = 100_000;
   const intervalSummaries = [];
-  const intervalPoints: Array<{ meterId: number; truncatedAtRows: number | null; points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }> }> = [];
+  // Batch-45 (pass 1926b): the DSAR export intentionally queries the intervals
+  // table DIRECTLY (no qcFlags filter) so superseded_overlap rows — real meter
+  // readings displaced by a later higher-precedence import — are never omitted
+  // from a data-subject export. qcFlags is included on every exported point so
+  // the subject can distinguish active rows from superseded ones.
+  const intervalPoints: Array<{ meterId: number; truncatedAtRows: number | null; points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null; qcFlags: string | null }> }> = [];
   for (const mid of meterIds) {
     const st = await db
       .select({ n: sql<number>`COUNT(*)`, minTs: sql<number>`MIN(${intervals.ts})`, maxTs: sql<number>`MAX(${intervals.ts})`, total: sql<number>`SUM(${intervals.usage})` })
@@ -572,7 +577,7 @@ export async function exportUserData(userId: number) {
     // say so accurately in the note. Query newest-first, then reverse so the
     // export artifact itself stays chronological (oldest→newest).
     const rows = await db
-      .select({ ts: intervals.ts, durationMin: intervals.durationMin, usage: intervals.usage, demand: intervals.demand })
+      .select({ ts: intervals.ts, durationMin: intervals.durationMin, usage: intervals.usage, demand: intervals.demand, qcFlags: intervals.qcFlags })
       .from(intervals)
       .where(eq(intervals.meterId, mid))
       .orderBy(desc(intervals.ts))
@@ -587,6 +592,7 @@ export async function exportUserData(userId: number) {
         durationMin: r.durationMin,
         usage: Number(r.usage),
         demand: r.demand == null ? null : Number(r.demand),
+        qcFlags: r.qcFlags ?? null,
       })),
     });
   }
@@ -597,7 +603,7 @@ export async function exportUserData(userId: number) {
     intervalSummaries,
     intervalPoints,
     intervalExportNote:
-      "Raw interval readings included per meter in chronological order. Meters with more than 100,000 stored rows are capped to the MOST RECENT 100,000 (older rows omitted) and flagged via truncatedAtRows; intervalSummaries reflect the full stored range.",
+      "Raw interval readings included per meter in chronological order, INCLUDING rows superseded by later higher-precedence imports (qcFlags='superseded_overlap' — these are excluded from analysis but remain part of your data record). Meters with more than 100,000 stored rows are capped to the MOST RECENT 100,000 (older rows omitted) and flagged via truncatedAtRows; intervalSummaries reflect the full stored range.",
     bills: userBills,
     baselines: userBaselines,
     scenarios: userScenarios,

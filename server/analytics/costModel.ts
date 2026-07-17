@@ -85,11 +85,19 @@ export async function recordMeterEvent(e: MeterEvent): Promise<number> {
     });
   } else {
     // Cycle 1 pass 7: a silently dropped metering row would undermine the
-    // free-tier budget enforcement invariant. Fail loudly — the caller's
-    // pipeline error handling surfaces this rather than mis-metering.
+    // free-tier budget enforcement invariant.
+    // Batch-45 (pass 1927): "fail loudly" now actually THROWS — returning
+    // `total` after only console.error was a silent success signal (callers
+    // received a cost as if the event were recorded), letting free-tier work
+    // go unmetered whenever the DB was flaky. This matches the fail-closed
+    // posture of monthToDateLlmSpend (Infinity) and analysisTotalCost (throw).
+    // The pipeline's failure path already wraps this call in try/catch with a
+    // deterministic computeCostUsd estimate, so an original analysis error is
+    // never masked by the metering failure.
     console.error(
       `[METERING-DROPPED] CRITICAL: metering event not recorded (db unavailable) — user=${e.userId} kind=${e.kind} estCost=$${total.toFixed(4)}`,
     );
+    throw new Error(`Metering unavailable: ${e.kind} event (est $${total.toFixed(4)}) could not be recorded — refusing to proceed unmetered`);
   }
   return total;
 }

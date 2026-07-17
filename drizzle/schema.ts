@@ -81,6 +81,12 @@ export const sites = mysqlTable(
     isHypothetical: boolean("isHypothetical").default(false).notNull(),
     /** provenance for attribute values: user_entered | assessor | archetype_default */
     attrSource: varchar("attrSource", { length: 32 }).default("user_entered"),
+    /** Batch-45 (pass 1959): per-field refinement record for quick-start sites —
+     * JSON array of core field names (buildingType/sqft/vintage) the user has
+     * explicitly provided. Site-level attrSource flips on the FIRST refinement,
+     * which alone cannot say WHICH core placeholders remain; this can. Null for
+     * regular (non-quick-start) sites and legacy rows. */
+    refinedFields: json("refinedFields"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },

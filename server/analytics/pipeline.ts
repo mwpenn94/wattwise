@@ -224,6 +224,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   /* ---------- stage 3: tariff check (current + sweep) ---------- */
   const costPoints = hasIntervals ? points : archetypeHourly ? hourlyPoints(archetypeHourly) : [];
   let currentCost: CostResult | null = null;
+  // Batch-45 (pass 1928): whether the current-cost basis rate's STRUCTURE
+  // carries demand/CP charges — null when no basis was established. A computed
+  // $0 demand+cp breakdown does NOT imply the tariff has no demand charges
+  // (archetype-only or unpriced sites), so the UI must branch on the structure,
+  // not the priced dollars.
+  let basisStructureHasDemandCharges: boolean | null = null;
   const comparisons: TariffComparison[] = [];
   if (costPoints.length > 0) {
     // Commodity-aware sweep: a water/gas meter must never be costed on electric
@@ -266,6 +272,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       currentCost = null;
     } else if (basis) {
       currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz });
+    }
+    if (basis) {
+      const bs = basis.structure as TariffStructure;
+      basisStructureHasDemandCharges = (bs.demand?.length ?? 0) > 0 || bs.cp != null;
     }
     // Batch-13 (pass 60): when the LAST-RESORT basis (first same-utility rate,
     // possibly ineligible) is used, every downstream dollar figure is priced on
@@ -401,15 +411,42 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // location lines are gated on the fields actually still missing; the
   // interval-data line on hasIntervals. The insight is emitted while ANY
   // placeholder line remains.
+  // Batch-45 (pass 1949): the interval-data line is gated on !hasIntervals
+  // ALONE — interval data is a property of the meter, not a core attribute, so
+  // refining buildingType (which flips attrSource) must not silence the
+  // "no interval data yet" placeholder while the analysis still runs on an
+  // archetype shape. The `annualizeBlocked` data_coverage insight does NOT
+  // cover this case (it only fires when intervals EXIST but span <25 days).
+  // Batch-45 (pass 1959): core lines are now PER-FIELD when the site carries a
+  // refinedFields record (quick-start sites created after this change) —
+  // refining ONLY buildingType keeps the sqft and vintage placeholder lines
+  // visible. Legacy rows (refinedFields null) keep the site-level attrSource
+  // gate: all-or-nothing, matching their pre-1959 behavior.
   {
     const qsParse = { raw: site.address ?? "", state: site.state, zip: site.zip, city: site.city };
     const coreStillPlaceholder = site.attrSource === "quick_start_defaults";
     const CORE_FIELDS = new Set(["buildingType", "sqft", "vintage"]);
-    const qsAssumptions = quickStartAssumptions(qsParse).filter((a) => {
-      if (CORE_FIELDS.has(a.field)) return coreStillPlaceholder;
-      // Interval-data line only accompanies the quick-start core placeholders —
-      // a regular site without uploads gets data-coverage insights elsewhere.
-      if (a.field === "intervalData") return coreStillPlaceholder && !hasIntervals;
+    const refinedFields = Array.isArray(site.refinedFields) ? (site.refinedFields as string[]) : null;
+    // Gap-2 cascade parity: the re-emitted disclosure must describe the values
+    // ACTUALLY stored on the site (cascade-derived priors), not the flat
+    // national defaults — otherwise the insight text contradicts the dashboard.
+    const sitePriors =
+      site.buildingType && site.sqft && site.vintage
+        ? { buildingType: site.buildingType, sqft: site.sqft, vintage: site.vintage }
+        : undefined;
+    const qsAssumptions = quickStartAssumptions(qsParse, sitePriors).filter((a) => {
+      if (CORE_FIELDS.has(a.field)) {
+        // Per-field gate when the refinement record exists; otherwise the
+        // legacy site-level gate. A quick-start site is identifiable by either
+        // attrSource=quick_start_defaults (never refined) or a non-null
+        // refinedFields array (quick-start origin, possibly refined).
+        if (refinedFields != null) return !refinedFields.includes(a.field);
+        return coreStillPlaceholder;
+      }
+      // Batch-45 (pass 1949): gate on the DATA, not attrSource — a refined
+      // quick-start site without uploads still runs on an archetype shape and
+      // must keep this placeholder line visible.
+      if (a.field === "intervalData") return !hasIntervals;
       // Location lines (state/zip): still-missing location keeps its climate/
       // timezone/tariff-sweep placeholder line regardless of attrSource — this
       // applies equally to a refined quick-start site and a sites.create site
@@ -609,6 +646,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       benchmark,
       emissions,
       currentCost,
+      // Batch-45 (pass 1928): structure-level flag so the dashboard can say
+      // "your rate has no demand charges" ONLY when the structure truly has
+      // none — never inferred from a $0 priced breakdown.
+      basisStructureHasDemandCharges,
       tariffComparisons: comparisons,
       baseline: baseline
         ? {

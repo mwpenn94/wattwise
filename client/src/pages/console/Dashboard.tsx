@@ -94,6 +94,7 @@ export default function Dashboard() {
     benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
     emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number } | null;
     currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
+    basisStructureHasDemandCharges?: boolean | null;
     tariffComparisons?: Array<{
       tariffName: string;
       utilityName: string;
@@ -217,17 +218,24 @@ export default function Dashboard() {
              its measured-interval provenance to keep that basis visible. */
           /* Batch-40 (pass 1748): when the current rate could not be priced at
              all (no cost basis → breakdown null/undefined), we cannot claim the
-             rate "has no demand charges" — say the cost impact is unknown. The
-             "(yours has none)" claim only renders when a priced breakdown
-             affirmatively shows $0 demand + $0 CP. */
+             rate "has no demand charges" — say the cost impact is unknown.
+             Batch-45 (pass 1928): the "(yours has none)" claim now requires the
+             tariff STRUCTURE to affirmatively lack demand/CP charges
+             (basisStructureHasDemandCharges === false from the pipeline) — a $0
+             priced breakdown alone no longer implies the rate has none, since
+             $0 can also mean the components were not computable. When the
+             structure flag is unavailable (older analyses), fall back to the
+             honest "not determined" wording instead of "yours has none". */
           sub={
             demand
               ? demand.loadFactor < 0.4
                 ? costInsight?.breakdown == null
                   ? "peaky measured profile — cost impact unknown (current rate could not be priced)"
-                  : (costInsight.breakdown.demand ?? 0) + (costInsight.breakdown.cp ?? 0) > 0
-                    ? "peaky measured profile — costly on your demand-charge rate"
-                    : "peaky measured profile — would matter only on a rate with demand charges (yours has none)"
+                  : summary?.basisStructureHasDemandCharges === true || (costInsight.breakdown.demand ?? 0) + (costInsight.breakdown.cp ?? 0) > 0
+                    ? "peaky measured profile — costly on a demand-charge rate like yours"
+                    : summary?.basisStructureHasDemandCharges === false
+                      ? "peaky measured profile — would matter only on a rate with demand charges (yours has none)"
+                      : "peaky measured profile — whether your rate bills demand charges could not be determined (re-run analysis)"
                 : "reasonably flat"
               : ""
           }
@@ -608,7 +616,7 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCos
     {noneEligible && (
       <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
         {currentAssignedIneligible
-          ? "Your assigned rate is shown below but sits outside this site's eligibility bracket (sector or peak-demand size), and no other seeded rate matches this site either. Cost figures are computed on your assigned rate as the modeling basis — verify the assignment against an actual bill. The seeded rate library is a snapshot; your actual utility rate may not be included."
+          ? "Your assigned rate is shown below but sits outside this site's eligibility bracket (sector or peak-demand size), and no other seeded rate is eligible for this site either. Cost figures are computed on your assigned rate as the modeling basis — verify the assignment against an actual bill. The seeded rate library is a snapshot; your actual utility rate may not be included."
           : "No seeded rate matches this site's sector and peak-demand size. The seeded rate library is a snapshot — your actual utility rate may not be included. Cost figures use the closest available rate structure as a modeling basis, for reference only — you may not be eligible for that rate."}
       </p>
     )}
