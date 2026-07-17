@@ -438,6 +438,13 @@ export const appRouter = router({
         if (provided.state) {
           const refineTzNote = tzAmbiguityNote(provided.state as string);
           if (refineTzNote) {
+            // Batch-57 (pass 2906): parity with sites.create (Batch-46 pass 2036) —
+            // an unrecognized state (warning severity) also re-runs climate-zone
+            // inference on this path (refineCascade above), so the provenance
+            // must name the zone actually applied, not just the tz ambiguity.
+            const refineStateUnrecognized =
+              refineTzNote.severity === "warning" &&
+              !((provided.state as string).toUpperCase().trim() in TZ_BY_STATE);
             await h.addInsight({
               siteId,
               kind: "intake_assumptions",
@@ -445,7 +452,14 @@ export const appRouter = router({
               body: refineTzNote.body,
               severity: refineTzNote.severity,
               confidence: refineTzNote.confidence,
-              provenance: { method: "site_refine_tz_disclosure_v1", state: provided.state, tzAmbiguous: true },
+              provenance: {
+                method: "site_refine_tz_disclosure_v1",
+                state: provided.state,
+                tzAmbiguous: true,
+                ...(refineStateUnrecognized && refineCascade
+                  ? { climateZoneUsed: refineCascade.climateZone.value, climateZoneSource: refineCascade.climateZone.source }
+                  : {}),
+              },
               metrics: null,
             });
           }
