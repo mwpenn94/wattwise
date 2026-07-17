@@ -144,6 +144,16 @@ export async function extractBill(
       });
     } catch (meterErr) {
       console.error("[billOcr] metering write failed (DB availability, NOT an LLM failure) — LLM cost was incurred but could not be recorded:", meterErr);
+      // Batch-48 (pass 2207) ADJUDICATED POLICY: a reviewer proposed returning
+      // the successful extraction anyway (cost was incurred either way) with a
+      // warning. Deliberately NOT adopted: delivering the result while the
+      // metering write failed makes the usage permanently unmetered — exactly
+      // the silent-unmetered-delivery hole the Batch-45 (pass 1927) fail-loud
+      // contract closed. Denying delivery keeps the incentive to fix metering
+      // aligned (an outage degrades UX loudly instead of quietly eroding the
+      // unit-economics ledger), and the user keeps a zero-cost path (manual
+      // entry) plus retry. The one-call LLM cost is absorbed as an operator
+      // loss, logged above for reconciliation.
       return {
         status: "manual_entry_required",
         reason: "Usage metering is temporarily unavailable, so AI parsing results cannot be delivered right now — enter the bill fields manually below, or retry shortly.",

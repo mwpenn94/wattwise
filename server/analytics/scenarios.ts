@@ -163,7 +163,14 @@ export function dispatchBattery(
     // Batch-42 (pass 1823): causal max over the PRE-solar original profile
     // when provided — the residual can be solar-suppressed and would
     // understate the site's true demand setpoint.
-    peakSoFar = Math.max(peakSoFar, originalLoad?.[h] ?? load[h], 0);
+    // Batch-48 (pass 2203): when originalLoad IS provided it is authoritative.
+    // The old `originalLoad?.[h] ?? load[h]` silently fell back to the
+    // POST-solar load[h] for any out-of-range index (length mismatch), letting
+    // solar-suppressed hours pollute the pre-solar setpoint proxy. Out-of-range
+    // now contributes 0 to the monotone max; the load[h] fallback applies only
+    // when no originalLoad was passed at all (battery-only dispatch, where
+    // load IS the original profile).
+    peakSoFar = Math.max(peakSoFar, originalLoad != null ? (originalLoad[h] ?? 0) : load[h], 0);
     // RTE model (deliverable convergence cycle 1, passes 3/9/19): full
     // round-trip losses are taken on the charge leg — energy stored in SoC is
     // input kWh × rte; discharge delivers SoC kWh 1:1. Total delivered energy
@@ -231,7 +238,12 @@ function widestCoverageRate(structure: TariffStructure): number {
       !widest ||
       key[0] > widest.key[0] ||
       (key[0] === widest.key[0] && key[1] > widest.key[1]) ||
-      (key[0] === widest.key[0] && key[1] === widest.key[1] && key[2] > widest.key[2]);
+      (key[0] === widest.key[0] && key[1] === widest.key[1] && key[2] > widest.key[2]) ||
+      // Batch-47 (passes 2133/2143): ties on the full coverage key resolve to
+      // the LOWEST rate — the same deterministic, customer-favorable policy as
+      // touRate's widest-coverage fallback (Batch-12 pass 12), so the dispatch
+      // signal can never depend on seed array order.
+      (key[0] === widest.key[0] && key[1] === widest.key[1] && key[2] === widest.key[2] && p.ratePerUnit < widest.rate);
     if (wins) widest = { rate: p.ratePerUnit, key };
   }
   return widest ? widest.rate : 0;

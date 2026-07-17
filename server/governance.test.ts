@@ -78,6 +78,28 @@ describe("multi-tenancy isolation", () => {
     ).rejects.toThrow();
   }, 30_000);
 
+  // Batch-48 (pass 2180): READ isolation was specified but WRITE isolation
+  // was not — a regression in an ownership assertion on a mutation path would
+  // have slipped past this suite. Cover the mutation surfaces explicitly.
+  it("cross-tenant site WRITES are rejected (refine + entity assignment)", async () => {
+    const alice = appRouter.createCaller(ctxFor({ id: aliceId, openId: "vitest-alice" }));
+    const bob = appRouter.createCaller(ctxFor({ id: bobId, openId: "vitest-bob" }));
+    const aliceSites = await alice.sites.list();
+    expect(aliceSites.length).toBeGreaterThan(0);
+    const siteId = aliceSites[0]!.id;
+    const sqftBefore = aliceSites[0]!.sqft;
+    // Bob cannot refine Alice's site attributes
+    await expect(bob.sites.refine({ siteId, sqft: 99_999 })).rejects.toThrow();
+    // Bob cannot re-parent Alice's site onto one of HIS entities
+    const bobEntities = await bob.entities.list();
+    const bobEntityId = bobEntities.length > 0 ? bobEntities[0]!.id : (await bob.entities.create({ name: "Bob Holdings vitest", kind: "company" })).id;
+    await expect(bob.entities.assignSite({ siteId, entityId: bobEntityId })).rejects.toThrow();
+    // And the writes really did NOT land — Alice's row is unchanged
+    const after = await alice.sites.get({ siteId });
+    expect(after.sqft).toBe(sqftBefore);
+    expect(after.entityId ?? null).not.toBe(bobEntityId);
+  }, 30_000);
+
   it("data export returns only the calling user's data", async () => {
     const alice = appRouter.createCaller(ctxFor({ id: aliceId, openId: "vitest-alice" }));
     const exportData = await alice.account.exportData();
@@ -145,9 +167,23 @@ describe("cost model — free tier ≤ $0.20 and kill-switch", () => {
     expect(spent).toBeGreaterThan(FREE_TIER_MONTHLY_LLM_BUDGET_USD);
     const allowed = await llmBudgetAllows(probeUser, "free");
     expect(allowed).toBe(false);
-    // pro tier is not subject to the free kill-switch: same spend still allowed
+    // Batch-47 (pass 2137): pro is NOT an unmetered bypass while tiers are
+    // self-serve beta — it gets a raised but BOUNDED budget (10× free).
+    // Bob's meter accumulates across test runs (this month's spend may already
+    // exceed even the pro ceiling), so assert BOTH sides of the bounded-budget
+    // contract relative to the measured month-to-date spend rather than with
+    // absolute booleans:
+    const { monthToDateLlmSpend } = await import("./analytics/costModel");
+    const mtd = await monthToDateLlmSpend(probeUser);
+    const proCeiling = FREE_TIER_MONTHLY_LLM_BUDGET_USD * 10;
     const proAllowed = await llmBudgetAllows(probeUser, "pro");
-    expect(proAllowed).toBe(true);
+    // pro allowance must equal the bounded-budget predicate exactly — neither
+    // an unmetered always-true bypass nor a free-budget clamp:
+    expect(proAllowed).toBe(mtd + 0.02 <= proCeiling);
+    // …and a call that would land beyond the 10× ceiling is denied even for
+    // pro: flipping the beta tier switch must never unlock unmetered LLM spend.
+    const proBeyondCeiling = await llmBudgetAllows(probeUser, "pro", proCeiling + 0.01);
+    expect(proBeyondCeiling).toBe(false);
   }, 30_000);
 });
 

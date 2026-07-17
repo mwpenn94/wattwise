@@ -288,6 +288,45 @@ describe("Exact-rules tariff engine", () => {
     expect(nov.ratchetApplied).toBe(false);
   });
 
+  it("summer ratchet with NO summer peaks in the window: empty determinant degrades gracefully to actual billing (Batch-47 pass 2120)", () => {
+    // A winter-only history under a summer-scoped ratchet leaves the
+    // determinant window empty — lookPeak stays 0 (never -Infinity/NaN), the
+    // floor is 0, and every month bills at its own actual peak.
+    const details = applyRatchet(
+      [
+        { month: "2025-11", peakKw: 120, peakTs: 1 },
+        { month: "2025-12", peakKw: 90, peakTs: 2 },
+        { month: "2026-01", peakKw: 150, peakTs: 3 },
+      ],
+      { lookbackMonths: 11, ratchetPct: 0.8, applicablePeriod: "summer" },
+    );
+    for (const d of details) {
+      expect(Number.isFinite(d.billedDemandKw)).toBe(true);
+      expect(d.billedDemandKw).toBeGreaterThanOrEqual(0);
+      expect(d.ratchetApplied).toBe(false);
+    }
+    expect(details.find((b) => b.month === "2025-11")!.billedDemandKw).toBe(120);
+    expect(details.find((b) => b.month === "2025-12")!.billedDemandKw).toBe(90);
+    expect(details.find((b) => b.month === "2026-01")!.billedDemandKw).toBe(150);
+  });
+
+  it("summer ratchet: winter month with actual BETWEEN own peak and floor bills at the floor (Batch-47 pass 2150)", () => {
+    // December actual 200 kW < floor 0.8 × 400 = 320 kW → billed = 320 (floor),
+    // exercising max(actual, floor) where the floor WINS in a non-summer month
+    // whose own peak is substantial (not a degenerate near-zero month).
+    const details = applyRatchet(
+      [
+        { month: "2025-07", peakKw: 400, peakTs: 1 }, // summer determinant
+        { month: "2025-12", peakKw: 200, peakTs: 2 }, // below floor, above zero
+      ],
+      { lookbackMonths: 11, ratchetPct: 0.8, applicablePeriod: "summer" },
+    );
+    const dec = details.find((b) => b.month === "2025-12")!;
+    expect(dec.billedDemandKw).toBeCloseTo(320, 5);
+    expect(dec.actualPeakKw).toBe(200);
+    expect(dec.ratchetApplied).toBe(true);
+  });
+
   it("eligibility filter blocks ineligible rates with a reason", () => {
     const verdict = tariffEligible(
       { sector: "residential", commodity: "electric", peakKwMin: null, peakKwMax: 20 },

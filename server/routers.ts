@@ -123,6 +123,14 @@ export const appRouter = router({
         return h.createSite({
           ...input,
           userId: ctx.user.id,
+          // Batch-48 (pass 2155): location fields parsed out of a free-text
+          // address are persisted AND disclosed below — previously state/zip/
+          // city derived by the cascade were used for zone/utility derivation
+          // but silently dropped from the row, leaving downstream paths
+          // (upload timezone, tariff sweep, refine cascade) to re-fallback.
+          state: input.state ?? createCascade.state.value ?? undefined,
+          zip: input.zip ?? createCascade.zip.value ?? undefined,
+          city: input.city ?? createCascade.city.value ?? undefined,
           climateZone: input.climateZone ?? createCascade.climateZone.value,
           utilityName: input.utilityName ?? createCascade.utilityName.value ?? undefined,
           attrSource: "user_entered",
@@ -130,9 +138,12 @@ export const appRouter = router({
       });
       // Disclose any derived (non-user-entered) suggestions so the cascade is
       // never silent on this path either.
+      // Batch-48 (pass 2155): city/state/zip parsed from the address are part
+      // of the disclosure — the cascade can derive them from free text, and
+      // silently consuming them violated the never-silent cascade contract.
       const derivedOnCreate = Object.entries(cascadeProvenance(createCascade)).filter(
         ([k, v]) =>
-          ["climateZone", "utilityName"].includes(k) &&
+          ["climateZone", "utilityName", "state", "zip", "city"].includes(k) &&
           v.value != null &&
           v.source !== "user_entered" &&
           v.source !== "unknown",
@@ -1263,13 +1274,19 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
       const zoneNote = `Baseline uses a ${site.buildingType} archetype from a different climate zone (no ${climateZone} profile is seeded) — heating/cooling shape may differ materially from your climate.`;
       archetypeZoneDisclosure = archetypeZoneDisclosure ? `${archetypeZoneDisclosure} ${zoneNote}` : zoneNote;
     }
-    // Batch-36 (pass 1385): archetype baselines are climate-zone-driven — if the
-    // zone is only the US-median fallback, say so explicitly instead of letting
-    // the customer assume it was derived from their location.
-    if (zoneIsUsMedianFallback) {
-      const fallbackNote = `Climate zone ${climateZone} is the US-median assumption (it could not be resolved from this site's location fields) — the archetype load shape and yields may not match your actual climate; add or correct the state/ZIP to fix this.`;
-      archetypeZoneDisclosure = archetypeZoneDisclosure ? `${archetypeZoneDisclosure} ${fallbackNote}` : fallbackNote;
-    }
+  }
+  // Batch-36 (pass 1385) + Batch-47 (pass 2116): the US-median-zone disclosure
+  // applies on EVERY load basis, not just the archetype branch — solar yields
+  // (SOLAR_YIELD_BY_ZONE) key off climateZone even when the baseline is built
+  // from measured intervals, so a fallback 4A silently prices a Phoenix
+  // rooftop at mixed-humid yields. Say so regardless of how the load was built.
+  if (zoneIsUsMedianFallback) {
+    const fallbackNote = `Climate zone ${climateZone} is the US-median assumption (it could not be resolved from this site's location fields) — ${
+      hourly && loadBasis === "measured_intervals"
+        ? "solar yield estimates use this generic zone and"
+        : "the archetype load shape and yields"
+    } may not match your actual climate; add or correct the state/ZIP to fix this.`;
+    archetypeZoneDisclosure = archetypeZoneDisclosure ? `${archetypeZoneDisclosure} ${fallbackNote}` : fallbackNote;
   }
 
   const tariffRows = await h.listTariffs("electric", site.state ?? undefined);

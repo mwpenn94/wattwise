@@ -603,7 +603,7 @@ export async function exportUserData(userId: number) {
     intervalSummaries,
     intervalPoints,
     intervalExportNote:
-      "Raw interval readings included per meter in chronological order, INCLUDING rows superseded by later higher-precedence imports (qcFlags='superseded_overlap' — these are excluded from analysis but remain part of your data record). Meters with more than 100,000 stored rows are capped to the MOST RECENT 100,000 (older rows omitted) and flagged via truncatedAtRows; intervalSummaries reflect the full stored range.",
+      "Raw interval readings included per meter in chronological order, INCLUDING rows superseded by later higher-precedence imports (qcFlags='superseded_overlap' — these are excluded from analysis but remain part of your data record). Meters with more than 100,000 stored rows are capped to the MOST RECENT 100,000 (older rows omitted) and flagged via truncatedAtRows; intervalSummaries reflect the full stored range and, like the raw points, INCLUDE superseded rows — so totals here may exceed analysis views, which exclude superseded rows.",
     bills: userBills,
     baselines: userBaselines,
     scenarios: userScenarios,

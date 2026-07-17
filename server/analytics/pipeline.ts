@@ -242,6 +242,15 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     );
     const peakKw = demand?.peakKw ?? null;
     const sectorClass = site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? "residential" : "commercial";
+    // Batch-47 (pass 2139): sector eligibility keys off buildingType — when that
+    // is still a quick-start placeholder (per-field aware via refinedFields,
+    // legacy rows via attrSource), the entire eligible/ineligible partition of
+    // the rate sweep rests on an assumed building type. Disclose it.
+    const sectorFromPlaceholder = (() => {
+      const rf = Array.isArray(site.refinedFields) ? (site.refinedFields as string[]) : null;
+      if (rf != null) return !rf.includes("buildingType");
+      return site.attrSource === "quick_start_defaults";
+    })();
     const isElig = (t: (typeof allTariffs)[number]) =>
       tariffEligible({ sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax }, { sectorClass }, peakKw).eligible;
     // Sweep = same-utility rates plus any eligible rates statewide (a large site
@@ -344,9 +353,13 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         // Batch-34 (pass 1279): when the platform already KNOWS the rate is
         // ineligible, telling the user to "confirm final eligibility" was
         // contradictory — the specific reason replaces the generic caveat.
-        eligibilityNote: elig.reason
-          ? `Ineligible: ${elig.reason}`
-          : "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.",
+        eligibilityNote:
+          (elig.reason
+            ? `Ineligible: ${elig.reason}`
+            : "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.") +
+          (sectorFromPlaceholder
+            ? ` Note: the site's sector (${sectorClass}) is derived from a PLACEHOLDER building type — confirm the building type to make this eligibility call reliable.`
+            : ""),
       });
     }
     // Cycle 5: stale demotion — fresh/verified rank above stale at equal savings.

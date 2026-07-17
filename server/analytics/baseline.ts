@@ -126,8 +126,14 @@ export function fitCaltrackMonthly(
       });
       const fit = ols3(rows);
       if (!fit) continue;
-      // physical plausibility: slopes non-negative
-      if (fit.b1 < 0 || fit.b2 < 0 || fit.b0 < 0) continue;
+      // physical plausibility: slopes non-negative. Batch-47 (pass 2151): the
+      // b0 (intercept/baseload) non-negativity check is REMOVED — a negative
+      // intercept is physically meaningful for net-metered sites whose
+      // shoulder-month net usage goes negative (solar export exceeds load),
+      // and rejecting those fits forced solar sites onto the flat-mean
+      // fallback. Only the temperature-response slopes carry a hard physical
+      // sign constraint.
+      if (fit.b1 < 0 || fit.b2 < 0) continue;
       if (!best || fit.r2 > best.fit.r2) best = { fit, cb, hb };
     }
   }
@@ -358,27 +364,36 @@ export function detectResidualAnomalies(
   monthDailyTemps: Map<string, number[]>,
   fit: BaselineFit,
 ): AnomalyResult {
-  const disclosures = [
-    "Anomalies are flagged where actual monthly usage deviates >10% from the weather-model prediction — weather-driven variation is already accounted for by the model; remaining deviations reflect operational/equipment change, model error, or data issues.",
-  ];
-  const empty: AnomalyResult = { anomalies: [], changePointMonth: null, method: "caltrack_residual_10pct_v1", disclosures };
+  // Batch-48 (pass 2181): the methodology preamble ("anomalies are flagged
+  // where…") is only accurate when detection actually RUNS. Early exits carry
+  // ONLY the skip reason — shipping the how-we-flag explanation alongside
+  // "skipped" implied a detection pass that never happened.
+  const disclosures: string[] = [];
+  const skipped = (reason: string): AnomalyResult => ({
+    anomalies: [],
+    changePointMonth: null,
+    method: "caltrack_residual_10pct_v1",
+    disclosures: [reason],
+  });
   if (fit.method !== "caltrack_monthly" || fit.rSquared == null) {
-    disclosures.push("Anomaly detection skipped — no statistically valid weather fit to compute residuals against.");
-    return empty;
+    return skipped("Anomaly detection skipped — no statistically valid weather fit to compute residuals against.");
   }
   // Batch-18 (pass 471): residuals from a weak fit are mostly model error, not
   // operational change — an R²=0.1 model leaves ~90% of variance unexplained, so
   // >10% "anomalies" against it would be flagged noise presented as fact. Gate on
   // the same R²≥0.5 threshold that defines medium fit confidence, and say why.
   if (fit.rSquared < 0.5) {
-    disclosures.push(`Anomaly detection skipped — the weather model explains too little of your usage variance (R²=${fit.rSquared.toFixed(2)}, needs ≥0.50) for residual deviations to be attributed to operational change rather than model error.`);
-    return empty;
+    return skipped(`Anomaly detection skipped — the weather model explains too little of your usage variance (R²=${fit.rSquared.toFixed(2)}, needs ≥0.50) for residual deviations to be attributed to operational change rather than model error.`);
   }
   const usable = monthly.filter((m) => monthDailyTemps.has(m.month) && m.days > 20);
   if (usable.length < 6) {
-    disclosures.push("Anomaly detection skipped — fewer than 6 usable months of coverage.");
-    return empty;
+    return skipped("Anomaly detection skipped — fewer than 6 usable months of coverage.");
   }
+  // Detection actually runs from here on — the methodology explanation is
+  // accurate for every result produced below this line.
+  disclosures.push(
+    "Anomalies are flagged where actual monthly usage deviates >10% from the weather-model prediction — weather-driven variation is already accounted for by the model; remaining deviations reflect operational/equipment change, model error, or data issues.",
+  );
   const c = fit.coefficients;
   const rows = usable.map((m) => {
     const temps = monthDailyTemps.get(m.month)!;

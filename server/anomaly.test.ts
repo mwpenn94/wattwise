@@ -101,6 +101,11 @@ describe("A4 residual anomaly detection", () => {
     const fit = fitCaltrackMonthly(monthly, temps, NORMALS, { weatherIsNormalsProxy: true });
     const res = detectResidualAnomalies(monthly, temps, fit);
     expect(res.anomalies.length).toBe(0);
-    expect(res.disclosures.length).toBeGreaterThan(1);
+    // Batch-48 (pass 2181): early exits carry ONLY the skip reason — the
+    // methodology preamble ("anomalies are flagged where…") would imply a
+    // detection pass that never ran.
+    expect(res.disclosures.length).toBe(1);
+    expect(res.disclosures[0]).toContain("skipped");
+    expect(res.disclosures.some((d) => d.includes("Anomalies are flagged"))).toBe(false);
   });
 });

@@ -146,9 +146,18 @@ export async function llmBudgetAllows(userId: number, tier: string, estimatedCal
   // `tier !== "free"` — a malformed or unrecognized tier string must fail
   // CLOSED into the free-tier budget check rather than silently bypassing all
   // LLM cost enforcement. Keep in sync with the Tier union in server/routers.ts.
-  if (tier === "plus" || tier === "pro") return true;
+  //
+  // Batch-47 (pass 2137): while tiers are SELF-SERVE BETA (account.setTier,
+  // explicitly no billing), plus/pro must NOT bypass metering entirely — that
+  // would let anyone flip a switch and incur unmetered LLM spend on a
+  // non-revenue tier. They get a raised, still-bounded monthly budget (10×
+  // free). When billing ships, the paid-tier check can become a true bypass.
+  const budget =
+    tier === "plus" || tier === "pro"
+      ? FREE_TIER_MONTHLY_LLM_BUDGET_USD * 10
+      : FREE_TIER_MONTHLY_LLM_BUDGET_USD;
   const mtd = await monthToDateLlmSpend(userId);
-  return mtd + estimatedCallCostUsd <= FREE_TIER_MONTHLY_LLM_BUDGET_USD;
+  return mtd + estimatedCallCostUsd <= budget;
 }
 
 /** Per-analysis total; used by AC5 test and the dashboard unit-economics card.

@@ -408,7 +408,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
 
   // CP proxy charge
   let cp: number | null = null;
-  let cpMethodology: CostBreakdown["cpMethodology"] = "cp_omitted_no_interval_data";
+  // Batch-47 (passes 2123/2132): a tariff with NO CP component must report
+  // "no_cp_charges" — the omitted-for-data-reasons label is reserved for
+  // tariffs that DO define structure.cp but had no interval points to price it.
+  let cpMethodology: CostBreakdown["cpMethodology"] = structure.cp
+    ? "cp_omitted_no_interval_data"
+    : "no_cp_charges";
   let cpTopNApplied: number | undefined;
   if (structure.cp && points.length > 0) {
     const topN = opts?.cpTopNOverride ?? structure.cp.topN;
@@ -484,7 +489,10 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     );
   }
 
-  if (touFallback.used) {
+  // Batch-47 (pass 2142): an energy-less structure (fixed/demand-only tariff,
+  // energy legitimately []) always "falls back" to $0/kWh — that is the tariff
+  // working as defined, not a period-coverage gap, so no disclosure is emitted.
+  if (touFallback.used && structure.energy.length > 0) {
     disclosures.push(
       "Some intervals fell outside every defined TOU period on this tariff — they were priced at the tariff's widest-coverage (default) rate. Verify the tariff's period definitions cover all hours.",
     );
