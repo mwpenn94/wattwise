@@ -351,7 +351,21 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
       }
     }
   }
-  if (points.length === 0) return [];
+  // Batch-54 (pass 2774): when readings EXISTED but every one was skipped as
+  // malformed, a bare `return []` silently discarded the skip count — the user
+  // saw the generic "No interval data recognized in this file" with no hint
+  // that the file DID contain readings. Throw with the diagnosis instead: the
+  // ingest route persists parser error messages verbatim on the upload row and
+  // surfaces them as `Parse failed: …`. A feed with zero readings altogether
+  // still returns [] and keeps the generic no-data message.
+  if (points.length === 0) {
+    if (skippedReadings > 0) {
+      throw new Error(
+        `ESPI feed contained ${skippedReadings} interval reading${skippedReadings === 1 ? "" : "s"}, but every one was malformed (unparseable start time, non-numeric value, or invalid duration) — nothing could be ingested. Re-export the Green Button file from your utility portal and try again.`,
+      );
+    }
+    return [];
+  }
   points.sort((a, b) => a.ts - b.ts);
   const usageUnit = commodity === "electric" ? "kWh" : commodity === "gas" ? "therms" : "gal";
   const ingestedUsageSum = points.reduce((a, p) => a + p.usage, 0);

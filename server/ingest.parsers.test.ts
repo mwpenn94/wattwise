@@ -212,6 +212,36 @@ describe("ESPI Green Button XML parser", () => {
     expect(series[0]!.points.every((p) => Number.isFinite(p.usage) && p.durationMin > 0)).toBe(true);
   });
 
+  // Batch-54 (pass 2774): a feed whose EVERY reading is malformed must not
+  // collapse into the generic "no interval data" message — the thrown error
+  // names the skip count and cause (persisted verbatim on the upload row).
+  it("throws a diagnostic error when every reading is malformed (not a silent empty result)", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:espi="http://naesb.org/espi">
+  <entry><content>
+    <espi:IntervalBlock>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>3600</espi:duration><espi:start>not-a-number</espi:start></espi:timePeriod>
+        <espi:value>1500</espi:value>
+      </espi:IntervalReading>
+      <espi:IntervalReading>
+        <espi:timePeriod><espi:duration>abc</espi:duration><espi:start>1717203600</espi:start></espi:timePeriod>
+        <espi:value>2500</espi:value>
+      </espi:IntervalReading>
+    </espi:IntervalBlock>
+  </content></entry>
+</feed>`;
+    expect(() => parseEspiXml(xml)).toThrow(/2 interval readings.*malformed/);
+  });
+
+  it("returns empty (no throw) for a feed with zero readings altogether", () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:espi="http://naesb.org/espi">
+  <entry><content><espi:UsagePoint><espi:ServiceCategory><espi:kind>0</espi:kind></espi:ServiceCategory></espi:UsagePoint></content></entry>
+</feed>`;
+    expect(parseEspiXml(xml)).toEqual([]);
+  });
+
   it("reports rowsSkipped 0 and no skip note for a clean feed", () => {
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:espi="http://naesb.org/espi">
