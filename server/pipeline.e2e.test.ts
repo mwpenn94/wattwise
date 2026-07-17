@@ -90,10 +90,12 @@ describe.skipIf(!hasFixture)("real-file pipeline E2E (Cantex)", () => {
     expect(result.demand).not.toBeNull();
     expect(result.demand!.peakKw).toBeGreaterThan(10);
     expect(result.demand!.loadFactor).toBeGreaterThan(0);
-    // CP proxy labeled verbatim
-    if (result.demand!.cpProxy) {
-      expect(result.demand!.cpProxy.label).toBe(LABEL_CP_ESTIMATED);
-    }
+    // CP proxy labeled verbatim. Batch-56 (pass 2860): assert cpProxy EXISTS
+    // rather than guarding on it — the Cantex fixture spans a full year of
+    // 15-min data including the Jun–Sep CP season, so a null cpProxy here is a
+    // pipeline regression the old conditional would have silently skipped.
+    expect(result.demand!.cpProxy).not.toBeNull();
+    expect(result.demand!.cpProxy!.label).toBe(LABEL_CP_ESTIMATED);
     // Baseline fit or honest null; disclosures must mention weather basis when fit
     expect(result.baseline).toBeTruthy();
     // Tariff comparison ran across seeded tariffs
