@@ -7,6 +7,7 @@
 import {
   ANALYSIS_TIMEOUT_MS,
   COMMODITY_UNITS,
+  CostBreakdown,
   DEFAULT_TZ,
   DISAGG_LANGUAGE,
   IntervalPoint,
@@ -294,7 +295,21 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         isCurrentBasis: t.id === basisTariffId,
         eligible: elig.eligible,
         ineligibleReason: elig.reason,
-        annualCost: cost?.breakdown ?? { energy: 0, demand: 0, fixed: 0, cp: null, cpMethodology: "cp_omitted_no_interval_data", total: 0 },
+        // Batch-41 (pass 1769): the placeholder breakdown for uncosted
+        // (ineligible) rows must not claim a CP component was "omitted due to
+        // no interval data" when the tariff simply has no CP charge — that
+        // conflated the no-cost-basis condition with a CP-data gap and misled
+        // facility managers about what was left out.
+        annualCost:
+          cost?.breakdown ??
+          ({
+            energy: 0,
+            demand: 0,
+            fixed: 0,
+            cp: null,
+            cpMethodology: (t.structure as TariffStructure).cp ? "cp_omitted_no_interval_data" : "no_cp_charges",
+            total: 0,
+          } as CostBreakdown),
         // Batch-38 (pass 1559): NULL — not 0 — when no current-cost basis
         // exists. The UI already renders "— (no current-cost baseline)", but raw
         // API/export consumers received a literal 0 indistinguishable from a
@@ -565,15 +580,20 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // Batch-18 (pass 419): pass the raw window total so short-history sites (<25
   // days, annualUsage null) still get their real blended rate instead of the
   // $0.12 fallback — the rate is window-invariant even when annualization isn't.
-  const { rate: kWhRate, isFallback: rateIsFallback, fallbackReason } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null);
+  const { rate: kWhRate, isFallback: rateIsFallback, fallbackReason } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null, hasIntervals && points.length > 0);
   // Batch-19 (pass 539): the disclosure names the actual cause — a customer
   // with usage data but no identified tariff was being told their "cost basis
   // could not be established", which misdirects them toward re-uploading data
   // instead of selecting a tariff.
+  // Batch-41 (pass 1769): a third cause — valid interval data that is export-
+  // dominated (no positive net-import kWh) — must not be blamed on "usage data"
+  // the customer did in fact upload; the blended-rate math is import-only.
   const fallbackRateDisclosure =
     fallbackReason === "no_tariff_cost_basis"
       ? "Savings priced at a $0.12/kWh national-average assumption because no tariff could be identified to compute your real rate — select or verify your tariff to price savings at your actual rate."
-      : "Savings priced at a $0.12/kWh national-average assumption because your annual cost basis could not be established — actual savings scale with your real rate.";
+      : fallbackReason === "no_net_import"
+        ? "Savings priced at a $0.12/kWh national-average assumption: your interval data is valid but shows no positive net-import energy (export-dominated profile), and the blended-rate calculation is based on imported kWh only."
+        : "Savings priced at a $0.12/kWh national-average assumption because your annual cost basis could not be established — actual savings scale with your real rate.";
   if (demand && currentCost) {
     const anyRatchet = currentCost.monthlyDetails.some((m) => m.ratchetApplied);
     const demandRate = currentCost.breakdown.demand > 0 && demand.peakKw > 0 ? currentCost.breakdown.demand / 12 / demand.peakKw : 0;
@@ -757,7 +777,8 @@ function estimateBlendedRate(
   cost: CostResult | null,
   annualUsage: number | null,
   rawUsageKwh?: number | null,
-): { rate: number; isFallback: boolean; fallbackReason?: "no_tariff_cost_basis" | "no_usage_data" } {
+  hasAnyPoints?: boolean,
+): { rate: number; isFallback: boolean; fallbackReason?: "no_tariff_cost_basis" | "no_usage_data" | "no_net_import" } {
   // All-in blended rate: total annual cost (energy + demand + fixed + CP − export)
   // per kWh (cycle 1, passes 9/19). Energy-only understates ¢/kWh on
   // demand-heavy tariffs and inflates opportunity paybacks.
@@ -784,10 +805,15 @@ function estimateBlendedRate(
   // computed, e.g. no tariff identified) is a different customer situation
   // from "no usage data at all", and the generic wording blamed the wrong
   // cause in the former case.
+  // Batch-41 (pass 1769): an export-dominated site CAN have interval data yet
+  // zero net-import kWh — telling that customer "no usage data" misdirects
+  // them toward re-uploading valid data. The blended rate is import-only by
+  // design; name that condition specifically.
+  const hasPositiveUsage = (annualUsage && annualUsage > 0) || (rawUsageKwh && rawUsageKwh > 0);
   return {
     rate: 0.12,
     isFallback: true,
-    fallbackReason: (annualUsage && annualUsage > 0) || (rawUsageKwh && rawUsageKwh > 0) ? "no_tariff_cost_basis" : "no_usage_data",
+    fallbackReason: hasPositiveUsage ? "no_tariff_cost_basis" : hasAnyPoints ? "no_net_import" : "no_usage_data",
   };
 }
 

@@ -128,14 +128,24 @@ export const appRouter = router({
           metrics: null,
         });
       } else if (!input.state) {
+        // Batch-41 (pass 1776): the disclosure must describe the values ACTUALLY
+        // used. If the user supplied a climate zone, it is NOT a fallback — only
+        // the timezone is; if a ZIP inferred a specific zone, name that; only
+        // when neither exists is the US-median 4A wording true.
+        const usedZone = input.climateZone ?? inferClimateZone(input.zip, input.state);
+        const zoneClause = input.climateZone
+          ? `the climate zone uses your entered value (${input.climateZone})`
+          : input.zip
+            ? `the climate zone was inferred from your ZIP (${usedZone})`
+            : `the climate zone defaults to the US-median (${usedZone})`;
         await h.addInsight({
           siteId: id,
           kind: "intake_assumptions",
-          title: "No state provided — timezone and climate zone are fallback assumptions",
-          body: `No state was provided for this site, so the meter timezone defaults to America/Phoenix and the climate zone defaults to the US-median (${input.climateZone ?? inferClimateZone(input.zip, input.state)}). Time-of-use periods, demand windows, coincident-peak seasons, and archetype baselines may be wrong for your actual location — add a state or ZIP to correct them.`,
+          title: "No state provided — timezone is a fallback assumption",
+          body: `No state was provided for this site, so the meter timezone defaults to America/Phoenix, and ${zoneClause}. Time-of-use periods, demand windows, and coincident-peak seasons may be wrong for your actual location — add a state to correct the timezone.`,
           severity: "warning",
           confidence: "low",
-          provenance: { method: "site_create_tz_disclosure_v1", state: null, tzFallback: "America/Phoenix" },
+          provenance: { method: "site_create_tz_disclosure_v1", state: null, tzFallback: "America/Phoenix", climateZoneUsed: usedZone, climateZoneSource: input.climateZone ? "user_entered" : input.zip ? "zip_inferred" : "us_median_fallback" },
           metrics: null,
         });
       }
@@ -817,13 +827,23 @@ const SPLIT_TZ_STATES: Record<string, string> = {
 function tzAmbiguityNote(state: string | null | undefined): string | null {
   const st = (state ?? "").toUpperCase().trim();
   const region = SPLIT_TZ_STATES[st];
-  if (!region) return null;
-  return `Timezone assumed ${tzForState(st)} (dominant zone for ${st}); the ${region} region uses a different clock zone. If this site is in that region, time-of-use periods, demand windows, and coincident-peak seasons may be shifted by one hour — verify the meter timezone.`;
+  if (region) {
+    return `Timezone assumed ${tzForState(st)} (dominant zone for ${st}); the ${region} region uses a different clock zone. If this site is in that region, time-of-use periods, demand windows, and coincident-peak seasons may be shifted by one hour — verify the meter timezone.`;
+  }
+  // Batch-41 (pass 1776): a NON-EMPTY state that tzForState doesn't recognize
+  // (typo, territory like PR/GU/VI, or free-text junk) silently fell back to
+  // America/Phoenix with NO disclosure — unlike the no-state path, which warns.
+  // TOU/demand-window/CP matching could be hours off with the user unaware.
+  if (st && !(st in TZ_BY_STATE)) {
+    return `State "${st}" was not recognized, so the meter timezone defaulted to America/Phoenix. Time-of-use periods, demand windows, and coincident-peak seasons may be shifted by several hours if that is wrong — correct the state (2-letter USPS code) or verify the meter timezone.`;
+  }
+  return null;
 }
 
-function tzForState(state: string | null | undefined): string {
-  const map: Record<string, string> = {
-    AZ: "America/Phoenix",
+// Batch-41 (pass 1776): hoisted to module scope so tzAmbiguityNote can check
+// membership — an unrecognized state must produce a disclosure, not silence.
+const TZ_BY_STATE: Record<string, string> = {
+  AZ: "America/Phoenix",
     CA: "America/Los_Angeles", NV: "America/Los_Angeles", WA: "America/Los_Angeles", OR: "America/Los_Angeles",
     CO: "America/Denver", NM: "America/Denver", UT: "America/Denver", MT: "America/Denver", WY: "America/Denver", ID: "America/Denver",
     TX: "America/Chicago", IL: "America/Chicago", MN: "America/Chicago", MO: "America/Chicago", WI: "America/Chicago", IA: "America/Chicago",
@@ -838,8 +858,10 @@ function tzForState(state: string | null | undefined): string {
     DE: "America/New_York", NJ: "America/New_York", CT: "America/New_York", RI: "America/New_York", MA: "America/New_York",
     VT: "America/New_York", NH: "America/New_York", ME: "America/New_York", MI: "America/New_York", IN: "America/New_York", KY: "America/New_York", DC: "America/New_York",
     HI: "Pacific/Honolulu", AK: "America/Anchorage",
-  };
-  return map[(state ?? "").toUpperCase().trim()] ?? "America/Phoenix";
+};
+
+function tzForState(state: string | null | undefined): string {
+  return TZ_BY_STATE[(state ?? "").toUpperCase().trim()] ?? "America/Phoenix";
 }
 
 async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.getSite>>>, userId: number) {

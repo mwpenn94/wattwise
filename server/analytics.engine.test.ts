@@ -415,6 +415,45 @@ describe("Scenario engine", () => {
     expect(netDelta).toBeGreaterThanOrEqual(-1e-9); // losses mean net load never decreases
   });
 
+  it("generateShape8760 handles overnight occupancy schedules (Batch-41 pass 1782)", async () => {
+    const { generateShape8760 } = await import("./seed/seedData");
+    const mkSpec = (occupiedStart: number, occupiedEnd: number) =>
+      ({
+        schedule: { occupiedStart, occupiedEnd, weekendFactor: 1.0, baseloadFrac: 0.3, coolingSlope: 0, heatingSlope: 0 },
+      }) as Parameters<typeof generateShape8760>[0];
+    const flatTmy = new Array(8760).fill(62); // no weather term
+    const overnight = generateShape8760(mkSpec(19, 7), flatTmy); // bar: 7pm→7am
+    const daytime = generateShape8760(mkSpec(7, 19), flatTmy);
+    // Overnight shape must NOT be flat — the naive range check made `occupied`
+    // false for every hour, collapsing the shape to constant baseload.
+    const at2am = overnight[2]; // occupied for the 19→7 schedule
+    const at12pm = overnight[12]; // unoccupied
+    expect(at2am).toBeGreaterThan(at12pm);
+    // Complementary schedules occupy complementary hours (same total mass = 1).
+    expect(daytime[12]).toBeGreaterThan(daytime[2]);
+    expect(overnight.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 9);
+  });
+
+  it("export-only sites never gain a manufactured import peak from grid-charging (Batch-41 passes 1754/1763/1769)", () => {
+    // ALL hours export (negative residual), zero import history — peakSoFar
+    // stays 0. The removed Batch-40 special case charged at full inverter rate
+    // here (headroom = maxRate), which could flip residual POSITIVE (e.g.
+    // −3 kW export + 10 kW charge = +7 kW import) and create a billing peak on
+    // a site that had none. The unified rule caps charge at import-neutral.
+    const hours = 48;
+    const load: number[] = [];
+    const rate: number[] = [];
+    for (let h = 0; h < hours; h++) {
+      const hod = h % 24;
+      load.push(hod >= 8 && hod < 18 ? -8 : -3); // export every hour
+      rate.push(hod >= 15 && hod < 20 ? 0.3 : 0.05);
+    }
+    const { residual } = dispatchBattery(load, { kw: 10, kwh: 20 }, rate);
+    // No hour may become net-import: original import peak was 0.
+    const newPeak = Math.max(...residual.map((v) => Math.max(v, 0)));
+    expect(newPeak).toBeLessThanOrEqual(1e-9);
+  });
+
   it("solar yield lookup is case-insensitive (lowercase zone matches, no silent fallback)", () => {
     const upper = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, FLAT, "2B", 850, "medium", false);
     const lower = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, FLAT, "2b", 850, "medium", false);

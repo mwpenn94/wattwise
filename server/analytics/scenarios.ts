@@ -121,19 +121,23 @@ export function dispatchBattery(
     dischargeThresh = levels[levels.length - 1];
   }
 
-  // Batch-40 (pass 1743): peakSoFar tracks the POSITIVE part of the input
-  // profile. On solar-heavy sites the dispatch input (post-solar residual) is
-  // negative for most or all hours; the old raw-load max left peakSoFar at 0,
-  // clamped headroom to 0, and silently blocked ALL grid-charging even though
-  // no billing peak existed to protect. Export hours never set a demand peak
-  // (billed demand is import-side), so max(load[h], 0) is the correct causal
-  // demand-setpoint proxy — and while peakSoFar is still 0 (no import seen
-  // yet), there is no peak to protect and charging is capped only by the
-  // inverter rate and available room.
+  // Batch-40 (pass 1743) + Batch-41 (passes 1754/1763/1769): peakSoFar tracks
+  // the POSITIVE part of the input profile (billed demand is import-side, so
+  // export hours never set a peak). The update is unconditional-monotone. The
+  // Batch-40 special case (`: maxRate` when peakSoFar === 0) was itself flagged
+  // and is removed: charging at full inverter rate during export hours could
+  // flip residual positive and CREATE an import peak on a site that had none.
+  // The unified rule below — headroom = max(0, peakSoFar − residual[h]) —
+  // covers both regimes: with an established import peak, charge up to that
+  // setpoint; with peakSoFar = 0 (export-only history), residual[h] < 0 still
+  // yields positive headroom, so the battery charges up to IMPORT-NEUTRAL
+  // (absorbing surplus / net-zero at the meter) but never manufactures a new
+  // import peak. Grid-charging on such sites resumes normally once a real
+  // import peak is observed.
   let peakSoFar = 0; // running max of the POSITIVE original load (causal demand-setpoint proxy)
   for (let h = 0; h < residual.length; h++) {
     const rate = hourlyRate[h] ?? 0;
-    if (load[h] > peakSoFar) peakSoFar = Math.max(load[h], 0);
+    peakSoFar = Math.max(peakSoFar, load[h], 0);
     // RTE model (deliverable convergence cycle 1, passes 3/9/19): full
     // round-trip losses are taken on the charge leg — energy stored in SoC is
     // input kWh × rte; discharge delivers SoC kWh 1:1. Total delivered energy
@@ -155,7 +159,7 @@ export function dispatchBattery(
       // never exceeds the highest load seen so far in the ORIGINAL profile
       // (a conservative, causal proxy for the site's demand setpoint — uses
       // no future information).
-      const headroom = peakSoFar > 0 ? Math.max(0, peakSoFar - residual[h]) : maxRate;
+      const headroom = Math.max(0, peakSoFar - residual[h]);
       const room = usable - soc;
       const charge = Math.min(maxRate, room / rte, headroom);
       soc += charge * rte;

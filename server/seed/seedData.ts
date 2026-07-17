@@ -783,7 +783,17 @@ export function generateShape8760(spec: ArchetypeSpec, tmyHourly: number[]): num
     const hourOfDay = h % 24;
     const dow = (dayIndex + 0) % 7; // 0 = Sunday
     const isWeekend = dow === 0 || dow === 6;
-    const occupied = hourOfDay >= schedule.occupiedStart && hourOfDay < schedule.occupiedEnd;
+    // Batch-41 (pass 1782): overnight-safe occupancy — a schedule like 19→7
+    // (bar/nightclub) wraps midnight; the naive range check evaluated false for
+    // EVERY hour on such schedules, silently flattening the load shape. All 13
+    // currently-seeded archetypes are daytime (start < end), so no re-seed is
+    // required — identical output for existing shapes — but the function must
+    // be correct for any overnight archetype added later. Same wrap convention
+    // as hourSpan/demandWindowMatch/inHourWindow.
+    const occupied =
+      schedule.occupiedStart <= schedule.occupiedEnd
+        ? hourOfDay >= schedule.occupiedStart && hourOfDay < schedule.occupiedEnd
+        : hourOfDay >= schedule.occupiedStart || hourOfDay < schedule.occupiedEnd;
     let load = schedule.baseloadFrac;
     if (occupied) {
       load += (1 - schedule.baseloadFrac) * (isWeekend ? schedule.weekendFactor : 1.0);
