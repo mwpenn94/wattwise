@@ -4,6 +4,7 @@
  */
 import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { getDb } from "./db";
+import { STATE_SUBREGION } from "./seed/nationalData";
 import {
   analyses,
   archetypeProfiles,
@@ -238,16 +239,36 @@ export async function getTariff(id: number) {
 
 export async function getWeatherStation(climateZone: string) {
   const db = await requireDb();
-  const rows = await db.select().from(weatherNormals).where(eq(weatherNormals.climateZone, climateZone)).limit(1);
-  return rows[0];
+  const zone = climateZone.trim().toUpperCase();
+  const rows = await db.select().from(weatherNormals).where(eq(weatherNormals.climateZone, zone)).limit(1);
+  if (rows[0]) return rows[0];
+  // National coverage (Jul 2026): one station per IECC zone is seeded, so an
+  // exact match should exist for canonical zones. For user-typed zones like
+  // "4" (no moisture letter) or rare variants, fall back to the nearest
+  // numeric band rather than returning nothing.
+  const band = parseInt(zone, 10);
+  if (Number.isFinite(band)) {
+    const all = await db.select().from(weatherNormals);
+    const scored = all
+      .map((r) => {
+        const rb = parseInt(r.climateZone, 10);
+        return { r, d: Number.isFinite(rb) ? Math.abs(rb - band) : 99 };
+      })
+      .sort((a, b) => a.d - b.d);
+    return scored[0]?.r;
+  }
+  return undefined;
 }
 
-export async function getEmissionsFactor(zip3: string) {
+export async function getEmissionsFactor(zip3: string, state?: string | null) {
   const db = await requireDb();
   const zs = await db.select().from(zipSubregions).where(eq(zipSubregions.zip3, zip3)).limit(1);
-  const subregion = zs[0]?.subregion ?? "AZNM";
+  // National coverage (Jul 2026): ZIP3 crosswalk first, then the state's
+  // dominant eGRID subregion, then AZNM only as the final legacy default.
+  const stateSub = state ? STATE_SUBREGION[state.toUpperCase()] : undefined;
+  const subregion = zs[0]?.subregion ?? stateSub ?? "AZNM";
   const rows = await db.select().from(emissionsFactors).where(eq(emissionsFactors.subregion, subregion)).orderBy(desc(emissionsFactors.year)).limit(1);
-  return { factor: rows[0], subregion, mapped: zs.length > 0 };
+  return { factor: rows[0], subregion, mapped: zs.length > 0 || Boolean(stateSub) };
 }
 
 export async function getBenchmark(buildingType: string, commodity: "electric" | "gas" | "water" | "site_total") {

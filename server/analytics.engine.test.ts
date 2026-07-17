@@ -511,12 +511,15 @@ describe("Honest-labeling and cost-cap invariants", () => {
   it("climate-zone inference reports provenance — unresolvable ZIP is a disclosed fallback, not a silent 4A", () => {
     expect(inferClimateZoneWithSource("85004", undefined)).toEqual({ zone: "2B", source: "zip_inferred" });
     expect(inferClimateZoneWithSource(undefined, "WA")).toEqual({ zone: "4C", source: "state_inferred" });
-    // ZIP present but unmapped prefix, no usable state → US-median fallback
-    expect(inferClimateZoneWithSource("99999", undefined)).toEqual({ zone: "4A", source: "us_median_fallback" });
+    // National ZIP3 table (Jul 2026): 999 = southeast Alaska (zone 7/8 band) —
+    // formerly unmapped, now legitimately resolves from ZIP alone.
+    expect(inferClimateZoneWithSource("99999", undefined)).toEqual({ zone: "8", source: "zip_inferred" });
+    // ZIP present but truly unassigned USPS prefix, no usable state → US-median fallback
+    expect(inferClimateZoneWithSource("00099", undefined)).toEqual({ zone: "4A", source: "us_median_fallback" });
     expect(inferClimateZoneWithSource(undefined, "ZZ")).toEqual({ zone: "4A", source: "us_median_fallback" });
     expect(inferClimateZoneWithSource(undefined, undefined).source).toBe("us_median_fallback");
     // compatibility wrapper stays in lockstep
-    expect(inferClimateZone("99999", undefined)).toBe("4A");
+    expect(inferClimateZone("00099", undefined)).toBe("4A");
     expect(inferClimateZone("85004", undefined)).toBe("2B");
   });
 });

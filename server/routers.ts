@@ -14,6 +14,7 @@ import {
   BATTERY_DISCLOSURE,
   inferClimateZone,
   inferClimateZoneWithSource,
+  TZ_BY_STATE,
   parseQuickAddress,
   quickStartAssumptions,
   QUICK_START_DEFAULTS,
@@ -35,6 +36,7 @@ import { runScenario, hourlyToPoints, type ScenarioInput } from "./analytics/sce
 import { costOnTariff } from "./analytics/tariffEngine";
 import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend } from "./analytics/costModel";
 import { storagePut } from "./storage";
+import { deriveFromAddress, cascadeProvenance } from "./cascade";
 import { createHash } from "crypto";
 import { intervals as intervalsTable } from "../drizzle/schema";
 import { and, asc, eq, gte, lte } from "drizzle-orm";
@@ -97,6 +99,20 @@ export const appRouter = router({
       const tier = tierOf(ctx.user);
       // Batch-13 (passes 56/76/86/95): count-then-create runs under a per-user
       // named lock so concurrent requests cannot all pass the free-tier check.
+      // Gap-8 cascade (Jul 2026): the direct-create path now derives every
+      // omitted location-downstream field the same way quick-start does —
+      // explicit user values always win (tagged user_entered inside the
+      // cascade); only genuinely absent fields get derived suggestions.
+      const createCascade = deriveFromAddress(input.address ?? null, {
+        state: input.state ?? null,
+        zip: input.zip ?? null,
+        city: input.city ?? null,
+        climateZone: input.climateZone ?? null,
+        utilityName: input.utilityName ?? null,
+        buildingType: input.buildingType ?? null,
+        sqft: input.sqft ?? null,
+        vintage: input.vintage ?? null,
+      });
       const id = await h.withUserQuotaLock(ctx.user.id, async () => {
         if (tier === "free") {
           const n = await h.countSites(ctx.user.id);
@@ -107,10 +123,36 @@ export const appRouter = router({
         return h.createSite({
           ...input,
           userId: ctx.user.id,
-          climateZone: input.climateZone ?? inferClimateZone(input.zip, input.state),
+          climateZone: input.climateZone ?? createCascade.climateZone.value,
+          utilityName: input.utilityName ?? createCascade.utilityName.value ?? undefined,
           attrSource: "user_entered",
         });
       });
+      // Disclose any derived (non-user-entered) suggestions so the cascade is
+      // never silent on this path either.
+      const derivedOnCreate = Object.entries(cascadeProvenance(createCascade)).filter(
+        ([k, v]) =>
+          ["climateZone", "utilityName"].includes(k) &&
+          v.value != null &&
+          v.source !== "user_entered" &&
+          v.source !== "unknown",
+      );
+      if (derivedOnCreate.length > 0) {
+        await h.addInsight({
+          siteId: id,
+          kind: "intake_assumptions",
+          title: "Some fields were derived from your address — override anytime",
+          body:
+            derivedOnCreate
+              .map(([k]) => (createCascade as unknown as Record<string, { note: string }>)[k].note)
+              .join(" ") +
+            " Derived values are starting points, not verified facts — edit the site to correct any of them.",
+          severity: "info",
+          confidence: "medium",
+          provenance: { method: "site_create_cascade_v1", derivedFields: derivedOnCreate.map(([k]) => k) },
+          metrics: { cascade: cascadeProvenance(createCascade) },
+        });
+      }
       // Batch-39 (passes 1586/1626): the quick-start, file-upload, and bill-entry
       // paths all disclose timezone assignment risk; the direct create path was the
       // one silent exception. Two cases matter: (a) a split-timezone state where the
@@ -125,10 +167,10 @@ export const appRouter = router({
         await h.addInsight({
           siteId: id,
           kind: "intake_assumptions",
-          title: "Timezone assumption — split-timezone state",
-          body: createTzNote,
-          severity: "info",
-          confidence: "low",
+          title: "Meter timezone assumption — verify if incorrect for this site",
+          body: createTzNote.body,
+          severity: createTzNote.severity,
+          confidence: createTzNote.confidence,
           provenance: { method: "site_create_tz_disclosure_v1", state: input.state, tzAmbiguous: true },
           metrics: null,
         });
@@ -170,7 +212,16 @@ export const appRouter = router({
         await seeded();
         const tier = tierOf(ctx.user);
         const parse = parseQuickAddress(input.address);
-        const assumptions = quickStartAssumptions(parse);
+        // Gap-8 cascade (Jul 2026): everything derivable from the address is
+        // derived — candidate utility, ZIP3-aware climate zone, timezone,
+        // eGRID subregion, and building-stock priors — each with provenance,
+        // instead of one flat 10k-sqft office default.
+        const cascade = deriveFromAddress(input.address);
+        const assumptions = quickStartAssumptions(parse, {
+          buildingType: cascade.buildingType.value,
+          sqft: cascade.sqft.value,
+          vintage: cascade.vintage.value,
+        });
         const id = await h.withUserQuotaLock(ctx.user.id, async () => {
           if (tier === "free") {
             const n = await h.countSites(ctx.user.id);
@@ -185,10 +236,11 @@ export const appRouter = router({
             city: parse.city,
             state: parse.state,
             zip: parse.zip,
-            buildingType: QUICK_START_DEFAULTS.buildingType,
-            sqft: QUICK_START_DEFAULTS.sqft,
-            vintage: QUICK_START_DEFAULTS.vintage,
-            climateZone: inferClimateZone(parse.zip ?? undefined, parse.state ?? undefined),
+            buildingType: cascade.buildingType.value,
+            sqft: cascade.sqft.value,
+            vintage: cascade.vintage.value,
+            climateZone: cascade.climateZone.value,
+            utilityName: cascade.utilityName.value ?? undefined,
             isHypothetical: false,
             attrSource: "quick_start_defaults",
           });
@@ -203,15 +255,24 @@ export const appRouter = router({
           kind: "intake_assumptions",
           title: "Quick-start analysis — placeholder assumptions in effect",
           body:
-            `This site was created from just an address. The first analysis uses disclosed placeholders: ` +
-            assumptions.map((a) => `${a.field} → ${a.assumed}`).join("; ") +
-            `. Each "add detail" chip on the dashboard shows exactly what refining a field unlocks.` +
-            (tzNote ? ` ${tzNote}` : "") +
+            `This site was created from just an address. Everything derivable from the address was derived automatically — ` +
+            [
+              `climate zone ${cascade.climateZone.value} (${cascade.climateZone.source.replace(/_/g, " ")})`,
+              `timezone ${cascade.timezone.value} (${cascade.timezone.source.replace(/_/g, " ")})`,
+              cascade.utilityName.value
+                ? `likely utility ${cascade.utilityName.value} (${cascade.utilityName.source.replace(/_/g, " ")})`
+                : `utility unknown (no state parsed)`,
+              `building prior: ${cascade.buildingType.value}, ${cascade.sqft.value.toLocaleString()} sqft, vintage ${cascade.vintage.value} (${cascade.sqft.source.replace(/_/g, " ")})`,
+            ].join("; ") +
+            `. These are starting points, not facts — every field is overridable, and each "add detail" chip on the dashboard shows exactly what refining a field unlocks.` +
+            (tzNote ? ` ${tzNote.body}` : "") +
             ` ${MODELED_ESTIMATES_DISCLAIMER}`,
-          severity: "info",
+          // Batch-44 (pass 1915): the combined note inherits the tz note's
+          // severity when it is graver than the default info.
+          severity: tzNote?.severity === "warning" ? "warning" : "info",
           confidence: "low",
-          provenance: { method: "quick_start_intake_v1", parsedState: parse.state, parsedZip: parse.zip, tzAmbiguous: tzNote != null },
-          metrics: { assumptions },
+          provenance: { method: "quick_start_intake_v2", parsedState: parse.state, parsedZip: parse.zip, tzAmbiguous: tzNote != null },
+          metrics: { assumptions, cascade: cascadeProvenance(cascade) },
         });
         await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name ?? parse.raw.slice(0, 60), quickStart: true });
         return { id, parse, assumptions };
@@ -249,12 +310,41 @@ export const appRouter = router({
         const coreProvided = ["buildingType", "sqft", "vintage", "state", "zip"].some((k) => k in provided);
         const nextState = (provided.state as string | undefined) ?? site.state ?? undefined;
         const nextZip = (provided.zip as string | undefined) ?? site.zip ?? undefined;
+        // Gap-8 cascade (Jul 2026): a location change re-runs the full cascade,
+        // not just the climate zone — the candidate utility follows the move
+        // too, UNLESS the user has ever set a utility themselves (a provided
+        // utilityName in this call, or one already stored on a site whose
+        // attrSource is user_entered, is treated as user intent and never
+        // overwritten by a state-level suggestion).
+        const locationChanged = Boolean(provided.state || provided.zip);
+        const refineCascade = locationChanged
+          ? deriveFromAddress(site.address ?? null, { state: nextState ?? null, zip: nextZip ?? null })
+          : null;
+        const userOwnsUtility =
+          "utilityName" in provided || (site.utilityName != null && site.attrSource === "user_entered");
         await h.updateSite(siteId, ctx.user.id, {
           ...provided,
           // climateZone derives from location: always re-infer on location change
-          ...(provided.state || provided.zip ? { climateZone: inferClimateZone(nextZip, nextState) } : {}),
+          // (cascade path uses the ZIP3 table for sub-state precision).
+          ...(refineCascade ? { climateZone: refineCascade.climateZone.value } : {}),
+          ...(refineCascade && !userOwnsUtility && refineCascade.utilityName.value
+            ? { utilityName: refineCascade.utilityName.value }
+            : {}),
           ...(coreProvided && site.attrSource === "quick_start_defaults" ? { attrSource: "user_entered" } : {}),
         });
+        // Disclose the re-derivation so the location-driven update is never silent.
+        if (refineCascade && !userOwnsUtility && refineCascade.utilityName.value && refineCascade.utilityName.value !== site.utilityName) {
+          await h.addInsight({
+            siteId,
+            kind: "intake_assumptions",
+            title: "Location change re-derived your candidate utility — override anytime",
+            body: `${refineCascade.utilityName.note} The climate zone was also re-inferred (${refineCascade.climateZone.value}, ${refineCascade.climateZone.source.replace(/_/g, " ")}).`,
+            severity: "info",
+            confidence: "medium",
+            provenance: { method: "site_refine_cascade_v1", state: nextState ?? null, zip: nextZip ?? null },
+            metrics: { cascade: cascadeProvenance(refineCascade) },
+          });
+        }
         // Batch-39 (pass 1626): a refine that sets/changes the state must carry the
         // same split-timezone disclosure as every creation path — the new state
         // silently re-derives the meter timezone for all downstream TOU math.
@@ -264,10 +354,10 @@ export const appRouter = router({
             await h.addInsight({
               siteId,
               kind: "intake_assumptions",
-              title: "Timezone assumption — split-timezone state",
-              body: refineTzNote,
-              severity: "info",
-              confidence: "low",
+              title: "Meter timezone assumption — verify if incorrect for this site",
+              body: refineTzNote.body,
+              severity: refineTzNote.severity,
+              confidence: refineTzNote.confidence,
               provenance: { method: "site_refine_tz_disclosure_v1", state: provided.state, tzAmbiguous: true },
               metrics: null,
             });
@@ -430,9 +520,9 @@ export const appRouter = router({
                   siteId: input.siteId,
                   kind: "data_coverage",
                   title: "Meter timezone assumption — verify if incorrect for this site",
-                  body: uploadTzNote,
-                  severity: "info",
-                  confidence: "low",
+                  body: uploadTzNote.body,
+                  severity: uploadTzNote.severity,
+                  confidence: uploadTzNote.confidence,
                   provenance: { method: "tz_state_inference_v1", state: site.state, meterId: meter.id, source: "file_upload" },
                   metrics: null,
                 });
@@ -584,9 +674,9 @@ export const appRouter = router({
               siteId: input.siteId,
               kind: "data_coverage",
               title: "Meter timezone assumption — verify if incorrect for this site",
-              body: billTzNote,
-              severity: "info",
-              confidence: "low",
+              body: billTzNote.body,
+              severity: billTzNote.severity,
+              confidence: billTzNote.confidence,
               provenance: { method: "tz_state_inference_v1", state: site.state, meterId: meter.id },
               metrics: null,
             });
@@ -829,18 +919,36 @@ const SPLIT_TZ_STATES: Record<string, string> = {
   NV: "West Wendover area (Mountain)", AK: "Aleutians west of 169.5°W (Hawaii–Aleutian)",
 };
 
-function tzAmbiguityNote(state: string | null | undefined): string | null {
+// Batch-44 (pass 1915): the note now carries its own severity/confidence — the
+// three cases are NOT equally risky and lumping them all under info/low
+// understated the unrecognized-state case. A split-zone state is a known
+// ±1-hour ambiguity (info/low: the dominant zone is probably right); an
+// unrecognized or missing state means the system KNOWS it could not infer a
+// timezone and applied a default that may be off by many hours (warning, and
+// medium confidence that the concern itself is well-founded).
+type TzNote = { body: string; severity: "info" | "warning"; confidence: "low" | "medium" | "high" };
+
+function tzAmbiguityNote(state: string | null | undefined): TzNote | null {
   const st = (state ?? "").toUpperCase().trim();
   const region = SPLIT_TZ_STATES[st];
   if (region) {
-    return `Timezone assumed ${tzForState(st)} (dominant zone for ${st}); the ${region} region uses a different clock zone. If this site is in that region, time-of-use periods, demand windows, and coincident-peak seasons may be shifted by one hour — verify the meter timezone.`;
+    return {
+      body: `Timezone assumed ${tzForState(st)} (dominant zone for ${st}); the ${region} region uses a different clock zone. If this site is in that region, time-of-use periods, demand windows, and coincident-peak seasons may be shifted by one hour — verify the meter timezone.`,
+      severity: "info",
+      confidence: "low",
+    };
   }
   // Batch-41 (pass 1776): a NON-EMPTY state that tzForState doesn't recognize
   // (typo, territory like PR/GU/VI, or free-text junk) silently fell back to
   // America/Phoenix with NO disclosure — unlike the no-state path, which warns.
-  // TOU/demand-window/CP matching could be hours off with the user unaware.
+  // Batch-44 (pass 1915): elevated to warning — a wholesale state mismatch can
+  // shift clock math by many hours, not the ±1 hour of a split-zone state.
   if (st && !(st in TZ_BY_STATE)) {
-    return `State "${st}" was not recognized, so the meter timezone defaulted to America/Phoenix. Time-of-use periods, demand windows, and coincident-peak seasons may be shifted by several hours if that is wrong — correct the state (2-letter USPS code) or verify the meter timezone.`;
+    return {
+      body: `State "${st}" was not recognized, so the meter timezone defaulted to America/Phoenix. Time-of-use periods, demand windows, and coincident-peak seasons may be SIGNIFICANTLY shifted (potentially many hours) if that is wrong — correct the state (2-letter USPS code) or verify the meter timezone before relying on time-of-use cost figures.`,
+      severity: "warning",
+      confidence: "medium",
+    };
   }
   // Batch-42 (pass 1826): an EMPTY/missing state silently returned null here
   // even though tzForState defaults the meter to America/Phoenix — so the
@@ -850,30 +958,19 @@ function tzAmbiguityNote(state: string | null | undefined): string | null {
   // covers the empty case itself. sites.create checks !input.state FIRST and
   // keeps its richer combined tz+climate-zone wording.
   if (!st) {
-    return `No state is recorded for this site, so the meter timezone defaults to America/Phoenix. Time-of-use periods, demand windows, and coincident-peak seasons may be shifted by several hours if that is wrong — add a state (2-letter USPS code) to correct the timezone.`;
+    return {
+      body: `No state is recorded for this site, so the meter timezone defaults to America/Phoenix. Time-of-use periods, demand windows, and coincident-peak seasons may be SIGNIFICANTLY shifted (potentially many hours) if that is wrong — add a state (2-letter USPS code) to correct the timezone.`,
+      severity: "warning",
+      confidence: "medium",
+    };
   }
   return null;
 }
 
 // Batch-41 (pass 1776): hoisted to module scope so tzAmbiguityNote can check
 // membership — an unrecognized state must produce a disclosure, not silence.
-const TZ_BY_STATE: Record<string, string> = {
-  AZ: "America/Phoenix",
-    CA: "America/Los_Angeles", NV: "America/Los_Angeles", WA: "America/Los_Angeles", OR: "America/Los_Angeles",
-    CO: "America/Denver", NM: "America/Denver", UT: "America/Denver", MT: "America/Denver", WY: "America/Denver", ID: "America/Denver",
-    TX: "America/Chicago", IL: "America/Chicago", MN: "America/Chicago", MO: "America/Chicago", WI: "America/Chicago", IA: "America/Chicago",
-    KS: "America/Chicago", NE: "America/Chicago", OK: "America/Chicago", AR: "America/Chicago", LA: "America/Chicago", MS: "America/Chicago",
-    // Batch-30 (pass 1055): TN is DOMINANTLY Eastern (Nashville is Central but
-    // the population-weighted majority incl. Knoxville/Chattanooga plus the
-    // geographic east is Eastern per IANA guidance); western TN (Memphis) is
-    // covered by the SPLIT_TZ_STATES disclosure above.
-    AL: "America/Chicago", TN: "America/New_York", SD: "America/Chicago", ND: "America/Chicago",
-    NY: "America/New_York", FL: "America/New_York", PA: "America/New_York", OH: "America/New_York", GA: "America/New_York",
-    NC: "America/New_York", SC: "America/New_York", VA: "America/New_York", WV: "America/New_York", MD: "America/New_York",
-    DE: "America/New_York", NJ: "America/New_York", CT: "America/New_York", RI: "America/New_York", MA: "America/New_York",
-    VT: "America/New_York", NH: "America/New_York", ME: "America/New_York", MI: "America/New_York", IN: "America/New_York", KY: "America/New_York", DC: "America/New_York",
-    HI: "Pacific/Honolulu", AK: "America/Anchorage",
-};
+// Gap-8 cascade (Jul 2026): map moved to shared/wattwise.ts (TZ_BY_STATE) so
+// the address-cascade module and routers derive timezones from ONE table.
 
 function tzForState(state: string | null | undefined): string {
   return TZ_BY_STATE[(state ?? "").toUpperCase().trim()] ?? "America/Phoenix";
@@ -999,8 +1096,8 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
       ? `Cost basis: ${chosen.utilityName} ${chosen.name} matched by utility name — assign your actual rate on the meter for firmer numbers.`
       : `Cost basis: no rate is assigned to this meter and no seeded rate matched your utility, so the first available ${chosen.utilityName} ${chosen.name} rate was used. Projections may shift materially on your actual tariff.`;
 
-  const zip3 = (site.zip ?? "850").slice(0, 3);
-  const ef = await h.getEmissionsFactor(zip3);
+  const zip3 = (site.zip ?? "").slice(0, 3);
+  const ef = await h.getEmissionsFactor(zip3, site.state);
   return {
     hourly,
     loadBasis,

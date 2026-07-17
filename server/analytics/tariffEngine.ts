@@ -35,8 +35,14 @@ export interface DemandAnalytics {
 }
 
 export function computeDemandAnalytics(points: IntervalPoint[], cpTopN = 4, cpSeasonMonths: number[] = [6, 7, 8, 9], tz: string = DEFAULT_TZ): DemandAnalytics | null {
+  // Batch-44 (pass 1912): a zero/invalid-duration point with no explicit demand
+  // reading carries NO usable kW information — coercing it to a finite 0 let it
+  // through the isFinite filter, where it could seed a spurious 0-kW "peak day"
+  // in the CP proxy's byDay map (displacing legitimate high-demand days on
+  // sparse feeds) and dilute the duration-weighted average. Map it to NaN so
+  // the existing filter drops it instead.
   const withDemand = points
-    .map((p) => ({ ts: p.ts, kw: p.demand ?? (p.durationMin > 0 ? (p.usage * 60) / p.durationMin : 0), durationMin: p.durationMin }))
+    .map((p) => ({ ts: p.ts, kw: p.demand ?? (p.durationMin > 0 ? (p.usage * 60) / p.durationMin : NaN), durationMin: p.durationMin }))
     .filter((p) => Number.isFinite(p.kw));
   if (withDemand.length < 10) return null;
 

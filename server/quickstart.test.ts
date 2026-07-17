@@ -12,6 +12,7 @@ import { getDb } from "./db";
 import { users, sites, insights } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
 import { parseQuickAddress, quickStartAssumptions, QUICK_START_DEFAULTS } from "../shared/wattwise";
+import { BUILDING_PRIORS } from "./cascade";
 
 function ctxFor(user: { id: number; openId: string; role?: "user" | "admin" }): TrpcContext {
   return {
@@ -98,17 +99,27 @@ describe("sites.quickCreate + refine (progressive participation)", () => {
     for (const a of res.assumptions) expect(a.unlocks.length).toBeGreaterThan(10);
 
     const site = await caller.sites.get({ siteId: res.id });
+    // Gap-8 cascade: stored priors come from BUILDING_PRIORS (type-specific
+    // medians), not the legacy flat QUICK_START_DEFAULTS 10k office.
     expect(site.buildingType).toBe(QUICK_START_DEFAULTS.buildingType);
-    expect(site.sqft).toBe(QUICK_START_DEFAULTS.sqft);
-    expect(site.vintage).toBe(QUICK_START_DEFAULTS.vintage);
+    expect(site.sqft).toBe(BUILDING_PRIORS[QUICK_START_DEFAULTS.buildingType].sqft);
+    expect(site.vintage).toBe(BUILDING_PRIORS[QUICK_START_DEFAULTS.buildingType].vintage);
     expect(site.attrSource).toBe("quick_start_defaults");
     expect(site.climateZone).toBe("2B"); // Phoenix ZIP prefix
+    expect(site.utilityName).toBeTruthy(); // AZ candidate utility derived from state
+
+    // the assumptions text mirrors the persisted cascade priors, never the flat default
+    const sqftAssumption = res.assumptions.find((a) => a.field === "sqft");
+    expect(sqftAssumption!.assumed).toContain(BUILDING_PRIORS[QUICK_START_DEFAULTS.buildingType].sqft.toLocaleString());
 
     // disclosure insight exists BEFORE any analysis has run
     const rows = await caller.insights.list({ siteId: res.id });
     const intake = rows.find((r) => r.kind === "intake_assumptions");
     expect(intake).toBeTruthy();
-    expect(intake!.body).toContain("placeholder");
+    expect(intake!.body).toContain("derived");
+    const intakeMetrics = intake!.metrics as { cascade?: Record<string, { value: unknown; source: string }> };
+    expect(intakeMetrics.cascade).toBeTruthy();
+    expect(intakeMetrics.cascade!.climateZone.source).toBe("zip_inferred");
     const metrics = intake!.metrics as { assumptions: Array<{ field: string }> };
     expect(metrics.assumptions.map((a) => a.field)).toEqual(expect.arrayContaining(["sqft", "buildingType"]));
   }, 30_000);

@@ -296,16 +296,45 @@ export type ClimateZoneSource = "zip_inferred" | "state_inferred" | "us_median_f
  * through the state, and a ZIP with no recognizable state used to become 4A
  * with no signal). inferClimateZoneWithSource returns provenance;
  * inferClimateZone remains a thin compatibility wrapper. */
+/* National ZIP3 -> IECC zone overrides for multi-zone states (Jul 2026 national
+ * coverage). Dominant zone per ZIP3; states not listed resolve via STATE_ZONE.
+ * Includes the original AZ prefixes so there is ONE lookup path. */
+export const ZIP3_ZONE: Record<string, string> = {
+  // Arizona (dominant 2B): Phoenix metro + west/central desert 2B, high country 5B
+  "850": "2B", "851": "2B", "852": "2B", "853": "2B", "855": "2B", "856": "2B",
+  "857": "2B", "864": "2B", "865": "2B",
+  "900": "3B", "902": "3B", "920": "3B", "921": "3B", "922": "2B", "923": "3B",
+  "925": "2B", "930": "3C", "931": "3C", "934": "3C", "939": "3C", "940": "3C",
+  "941": "3C", "943": "3C", "944": "3C", "945": "3C", "946": "3C", "950": "3C",
+  "951": "3C", "952": "3B", "953": "3B", "955": "4C", "956": "3B", "957": "3B",
+  "959": "3B", "960": "5B", "961": "5B", "797": "3B", "798": "3B", "799": "3B",
+  "790": "4B", "791": "4B", "792": "3B", "793": "3B", "794": "3B", "795": "3B",
+  "796": "3B", "760": "3A", "761": "3A", "762": "3A", "750": "3A", "751": "3A",
+  "752": "3A", "753": "3A", "754": "3A", "100": "4A", "101": "4A", "102": "4A",
+  "103": "4A", "104": "4A", "105": "4A", "106": "4A", "107": "4A", "108": "4A",
+  "109": "4A", "110": "4A", "111": "4A", "112": "4A", "113": "4A", "114": "4A",
+  "115": "4A", "116": "4A", "117": "4A", "118": "4A", "119": "4A", "128": "6A",
+  "129": "6A", "330": "1A", "331": "1A", "332": "1A", "333": "1A", "334": "1A",
+  "339": "1A", "340": "1A", "341": "1A", "988": "5B", "989": "5B", "990": "5B",
+  "991": "5B", "992": "5B", "993": "5B", "994": "5B", "977": "5B", "978": "5B",
+  "979": "5B", "894": "5B", "895": "5B", "897": "5B", "898": "5B", "880": "3B",
+  "881": "3B", "882": "3B", "875": "5B", "877": "5B", "804": "6B", "812": "6B",
+  "814": "6B", "313": "2A", "314": "2A", "315": "2A", "316": "2A", "305": "4A",
+  "287": "4A", "288": "4A", "289": "4A", "242": "5A", "380": "3A", "381": "3A",
+  "859": "5B", "860": "5B", "863": "4B", "838": "6B", "847": "3B", "620": "4A",
+  "628": "4A", "629": "4A", "190": "4A", "191": "4A", "193": "4A", "194": "4A",
+  "195": "4A", "196": "4A", "215": "5A", "450": "4A", "451": "4A", "452": "4A",
+  "456": "4A", "498": "6A", "499": "6A", "530": "5A", "531": "5A", "532": "5A",
+  "534": "5A", "535": "5A", "556": "7", "566": "7", "047": "7", "997": "8",
+  "998": "8", "999": "8",
+};
+
 export function inferClimateZoneWithSource(
   zip?: string,
   state?: string,
 ): { zone: string; source: ClimateZoneSource } {
   const z3 = zip?.slice(0, 3);
-  if (z3) {
-    if (["850", "851", "852", "853", "855", "863", "864", "865"].includes(z3)) return { zone: "2B", source: "zip_inferred" }; // Phoenix/Havasu/Kingman
-    if (["856", "857"].includes(z3)) return { zone: "2B", source: "zip_inferred" }; // Tucson
-    if (["859", "860"].includes(z3)) return { zone: "5B", source: "zip_inferred" }; // Flagstaff / high country
-  }
+  if (z3 && ZIP3_ZONE[z3]) return { zone: ZIP3_ZONE[z3], source: "zip_inferred" };
   const STATE_ZONE: Record<string, string> = {
     AL: "3A", AK: "7", AZ: "2B", AR: "3A", CA: "3B", CO: "5B", CT: "5A", DE: "4A",
     DC: "4A", FL: "2A", GA: "3A", HI: "1A", ID: "5B", IL: "5A", IN: "5A", IA: "5A",
@@ -322,6 +351,24 @@ export function inferClimateZoneWithSource(
 export function inferClimateZone(zip?: string, state?: string): string {
   return inferClimateZoneWithSource(zip, state).zone;
 }
+
+/** state → dominant IANA timezone (Gap-8 cascade, Jul 2026): single source of
+ *  truth shared by routers.tzForState and the address-cascade module.
+ *  Split-timezone states are disclosed by tzAmbiguityNote in routers.ts; TN is
+ *  dominantly Eastern (Batch-30 pass 1055). */
+export const TZ_BY_STATE: Record<string, string> = {
+  AZ: "America/Phoenix",
+  CA: "America/Los_Angeles", NV: "America/Los_Angeles", WA: "America/Los_Angeles", OR: "America/Los_Angeles",
+  CO: "America/Denver", NM: "America/Denver", UT: "America/Denver", MT: "America/Denver", WY: "America/Denver", ID: "America/Denver",
+  TX: "America/Chicago", IL: "America/Chicago", MN: "America/Chicago", MO: "America/Chicago", WI: "America/Chicago", IA: "America/Chicago",
+  KS: "America/Chicago", NE: "America/Chicago", OK: "America/Chicago", AR: "America/Chicago", LA: "America/Chicago", MS: "America/Chicago",
+  AL: "America/Chicago", TN: "America/New_York", SD: "America/Chicago", ND: "America/Chicago",
+  NY: "America/New_York", FL: "America/New_York", PA: "America/New_York", OH: "America/New_York", GA: "America/New_York",
+  NC: "America/New_York", SC: "America/New_York", VA: "America/New_York", WV: "America/New_York", MD: "America/New_York",
+  DE: "America/New_York", NJ: "America/New_York", CT: "America/New_York", RI: "America/New_York", MA: "America/New_York",
+  VT: "America/New_York", NH: "America/New_York", ME: "America/New_York", MI: "America/New_York", IN: "America/New_York", KY: "America/New_York", DC: "America/New_York",
+  HI: "Pacific/Honolulu", AK: "America/Anchorage",
+};
 
 /* ---------- Progressive participation: quick-start intake (Jul 2026) ----------
  * A user may begin with NOTHING but a free-text address (or a bill photo).
@@ -402,22 +449,30 @@ export interface QuickStartAssumption {
 }
 
 /** Build the honest assumption list for a quick-start site given what the
- *  address parse actually recovered. */
-export function quickStartAssumptions(parse: QuickAddressParse): QuickStartAssumption[] {
+ *  address parse actually recovered.
+ *  Gap-8 (Jul 2026): when the caller supplies cascade-derived priors (the
+ *  values actually persisted on the site row), the assumption text mirrors
+ *  them instead of the legacy flat QUICK_START_DEFAULTS, so the intake
+ *  disclosure can never disagree with what the pipeline will actually use. */
+export function quickStartAssumptions(
+  parse: QuickAddressParse,
+  priors?: { buildingType: string; sqft: number; vintage: number },
+): QuickStartAssumption[] {
+  const p = priors ?? QUICK_START_DEFAULTS;
   const a: QuickStartAssumption[] = [
     {
       field: "buildingType",
-      assumed: `${QUICK_START_DEFAULTS.buildingType} (placeholder)`,
+      assumed: `${p.buildingType} (national-median prior)`,
       unlocks: "Correct building type re-selects the peer archetype load shape and the EUI benchmark peer group.",
     },
     {
       field: "sqft",
-      assumed: `${QUICK_START_DEFAULTS.sqft.toLocaleString()} sqft (placeholder)`,
+      assumed: `${p.sqft.toLocaleString()} sqft (median for a ${p.buildingType.replace(/_/g, " ")}, not measured)`,
       unlocks: "Real floor area scales the synthetic baseline and makes the EUI benchmark percentile meaningful.",
     },
     {
       field: "vintage",
-      assumed: `built ~${QUICK_START_DEFAULTS.vintage} (placeholder)`,
+      assumed: `built ~${p.vintage} (median for this type)`,
       unlocks: "Actual vintage picks the correct archetype efficiency band.",
     },
     {

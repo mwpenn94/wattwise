@@ -28,6 +28,12 @@ import {
   synthesizeTmyHourly,
 } from "./seedData";
 import { LABEL_PROTOTYPE_ARCHETYPE } from "../../shared/wattwise";
+import {
+  STATE_PROFILES,
+  ZONE_STATIONS,
+  generateNationalTariffs,
+  zoneStationNormals,
+} from "./nationalData";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -242,6 +248,128 @@ export async function seedArchetypes(db: Db) {
   return n;
 }
 
+/** National zone-representative weather stations (one per IECC zone not
+ * already covered by the AZ launch stations). */
+export async function seedNationalWeather(db: Db) {
+  if (await alreadySeeded(db, "weather_normals_national")) return 0;
+  let n = 0;
+  for (const st of ZONE_STATIONS) {
+    const normals = zoneStationNormals(st.months);
+    const tmy = synthesizeTmyHourly(normals);
+    await db
+      .insert(weatherNormals)
+      .values({
+        stationId: st.stationId,
+        stationName: st.stationName,
+        climateZone: st.climateZone,
+        state: st.state,
+        monthlyNormals: normals,
+        tmyHourlyTempF: tmy,
+        source: "noaa_normals_1991_2020_synthesized_hourly",
+        sourceVersion: SEED_VERSION,
+      })
+      .onDuplicateKeyUpdate({ set: { monthlyNormals: normals, tmyHourlyTempF: tmy, sourceVersion: SEED_VERSION } });
+    n++;
+  }
+  await recordRun(db, "weather_normals_national", n, "Public domain (NOAA)", "https://www.ncei.noaa.gov/products/land-based-station/us-climate-normals", "One representative NOAA-normals station per IECC zone (1A-8) so weather-normalized baselines resolve nationwide; hourly synthesized from normals (labeled)");
+  return n;
+}
+
+/** eGRID 2022 CO2e defaults for subregions not in the AZ-launch set (lb/MWh). */
+const NATIONAL_EGRID_DEFAULTS: Record<string, number> = {
+  AKGD: 1067.0,
+  FRCC: 813.9,
+  HIOA: 1548.7,
+  MROE: 1395.4,
+  MROW: 972.9,
+  NEWE: 528.0,
+  NYLI: 1200.7,
+  NYUP: 262.5,
+  RFCM: 1198.6,
+  RFCW: 998.2,
+  SRMV: 771.5,
+  SRMW: 1500.5,
+  SRTV: 941.7,
+  SRVC: 620.1,
+  SPNO: 1088.9,
+  SPSO: 987.4,
+};
+
+/** National representative tariffs: 4 per state (res flat/TOU, comm flat,
+ * comm TOU+demand) scaled from EIA-861 state average rates. Honestly labeled
+ * source=state_representative_synthesized — NOT filed tariffs. Also fills
+ * eGRID factors for subregions outside the launch set. */
+export async function seedNationalTariffs(db: Db) {
+  if (await alreadySeeded(db, "tariffs_national")) return 0;
+  // AZ keeps its hand-modeled URDB-derived rates as the authoritative set.
+  const existingStates = new Set(["AZ"]);
+  const natTariffs = generateNationalTariffs(existingStates);
+  let n = 0;
+  for (const t of natTariffs) {
+    const existing = await db
+      .select({ id: tariffs.id })
+      .from(tariffs)
+      .where(and(eq(tariffs.utilityName, t.utilityName), eq(tariffs.name, t.name)))
+      .limit(1);
+    if (existing.length === 0) {
+      await db.insert(tariffs).values({
+        urdbId: t.urdbId,
+        utilityName: t.utilityName,
+        name: t.name,
+        sector: t.sector,
+        commodity: t.commodity,
+        state: t.state,
+        peakKwMin: t.peakKwMin,
+        peakKwMax: t.peakKwMax,
+        structure: t.structure,
+        freshness: t.freshness,
+        effectiveDate: new Date(t.effectiveDate),
+        source: "state_representative_synthesized",
+        sourceVersion: SEED_VERSION,
+      });
+    } else {
+      await db
+        .update(tariffs)
+        .set({
+          urdbId: t.urdbId,
+          sector: t.sector,
+          state: t.state,
+          peakKwMin: t.peakKwMin,
+          peakKwMax: t.peakKwMax,
+          structure: t.structure,
+          effectiveDate: new Date(t.effectiveDate),
+          sourceVersion: SEED_VERSION,
+        })
+        .where(eq(tariffs.id, existing[0].id));
+    }
+    n++;
+  }
+  // Fill eGRID factors for subregions not covered by the launch seed.
+  const seenSub = new Set<string>();
+  for (const p of STATE_PROFILES) {
+    if (seenSub.has(p.subregion)) continue;
+    seenSub.add(p.subregion);
+    const egridExisting = await db
+      .select({ id: emissionsFactors.id })
+      .from(emissionsFactors)
+      .where(eq(emissionsFactors.subregion, p.subregion))
+      .limit(1);
+    if (egridExisting.length === 0) {
+      await db.insert(emissionsFactors).values({
+        subregion: p.subregion,
+        subregionName: `eGRID ${p.subregion}`,
+        co2eLbPerMwh: NATIONAL_EGRID_DEFAULTS[p.subregion] ?? 850,
+        year: 2022,
+        source: "epa_egrid",
+        sourceVersion: SEED_VERSION,
+      });
+      n++;
+    }
+  }
+  await recordRun(db, "tariffs_national", n, "Synthesized from EIA-861 2024 state average retail prices (public domain)", "https://www.eia.gov/electricity/data.php", "4 representative rates per state (50 states + DC); source=state_representative_synthesized, NOT filed tariffs; every structure carries a verify-against-your-bill note; AZ retains hand-modeled URDB rates; eGRID subregion factors extended nationwide");
+  return n;
+}
+
 export async function seedConvergenceLog(db: Db) {
   if (await alreadySeeded(db, "convergence_log")) return 0;
   const entries = [
@@ -277,6 +405,8 @@ export function ensureSeeded(): Promise<void> {
           benchmarks: await seedBenchmarks(db),
           weather: await seedWeather(db),
           tariffs: await seedTariffs(db),
+          nationalWeather: await seedNationalWeather(db),
+          nationalTariffs: await seedNationalTariffs(db),
           archetypes: await seedArchetypes(db),
           convergence: await seedConvergenceLog(db),
         };

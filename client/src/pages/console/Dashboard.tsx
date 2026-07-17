@@ -180,7 +180,7 @@ export default function Dashboard() {
       {/* Progressive participation: optional add-detail chips while quick-start
           placeholders remain in effect — each names what refining unlocks. */}
       {activeSite?.attrSource === "quick_start_defaults" && activeSiteId != null && (
-        <RefineChips siteId={activeSiteId} onRefined={() => run.mutate({ siteId: activeSiteId })} />
+        <RefineChips siteId={activeSiteId} site={activeSite} onRefined={() => run.mutate({ siteId: activeSiteId })} />
       )}
 
       {latest.data == null && !latest.isLoading && (

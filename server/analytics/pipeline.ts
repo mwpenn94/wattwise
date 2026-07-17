@@ -33,7 +33,7 @@ import {
 import { computeDemandAnalytics, costOnTariff, tariffEligible, DemandAnalytics, CostResult } from "./tariffEngine";
 import { benchmarkPercentile, rankOpportunities, OpportunityCandidate } from "./scenarios";
 import * as h from "../dbHelpers";
-import { recordMeterEvent } from "./costModel";
+import { computeCostUsd, recordMeterEvent } from "./costModel";
 import type { Site, Meter } from "../../drizzle/schema";
 
 /**
@@ -108,11 +108,21 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
     // analysis row too — the metering table already counted it toward the cap,
     // but the analysis record showed $0 for failed runs, understating displayed
     // marginal cost.
-    let failCost = 0;
+    // Batch-44 (pass 1899): the persisted failure cost must NOT depend on the
+    // metering write succeeding — if recordMeterEvent throws (metering table
+    // unavailable), falling back to $0 would understate marginal cost on the
+    // analysis row and reopen a free-tier cap-bypass vector under metering
+    // instability. Compute the deterministic estimate up front from the same
+    // model recordMeterEvent uses; the metering write is best-effort on this
+    // path (its own db-unavailable branch already fails loudly).
+    let failCost = computeCostUsd(failDurationMs);
     try {
       failCost = await recordMeterEvent({ userId, analysisId, kind: "analysis_pipeline_failed", computeMs: failDurationMs, tier });
     } catch (meterErr) {
-      console.error("[pipeline] failed to record meter event for failed analysis", analysisId, meterErr);
+      console.error(
+        `[pipeline] failed to record meter event for failed analysis ${analysisId} — persisting estimated failure cost $${failCost.toFixed(4)} on the analysis row anyway`,
+        meterErr,
+      );
     }
     // Batch-35 (pass 1319a): typed check — only the compute-budget guard's own
     // rejection classifies as 'timeout'; all other failures persist as 'failed'.
@@ -197,8 +207,14 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       method: "archetype_synthetic",
       commodity: "electric",
       params: baseline.coefficients,
-      rSquared: null,
-      cvrmse: null,
+      // Batch-44 (pass 1919a): pass the fit stats THROUGH from the baseline
+      // object rather than hardcoding null — for a pure archetype prior these
+      // are legitimately null (there is no observed data to fit against, so an
+      // R²/CVRMSE would be meaningless), but hardcoding disconnected this row
+      // from the source of truth: if archetypeBaseline ever gains a partial
+      // calibration fit, the persisted record would silently misreport it.
+      rSquared: baseline.rSquared,
+      cvrmse: baseline.cvrmse,
       weatherBasis: baseline.weatherBasis,
       confidenceLabel: baseline.confidenceLabel,
       source: arch ? `${arch.source}:${arch.sourceVersion ?? ""}` : "prototype-archetype",
@@ -359,8 +375,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // Scope-1 gas factors / water embodied energy are a disclosed MVP gap.
   let emissions: PipelineResult["emissions"] = null;
   if (annualUsage != null && (meter?.commodity ?? "electric") === "electric") {
-    const zip3 = (site.zip ?? "850").slice(0, 3);
-    const { factor, subregion, mapped } = await h.getEmissionsFactor(zip3);
+    const zip3 = (site.zip ?? "").slice(0, 3);
+    const { factor, subregion, mapped } = await h.getEmissionsFactor(zip3, site.state);
     if (factor) {
       emissions = { annualCo2eLb: (annualUsage / 1000) * factor.co2eLbPerMwh, subregion, factorYear: factor.year, mapped };
     }
@@ -373,14 +389,34 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // Progressive participation (Jul 2026): quick-start sites run on DISCLOSED
   // placeholder attributes. replaceInsights below wipes the creation-time
   // disclosure, so the pipeline re-emits it on every run while placeholders
-  // remain in effect (attrSource still quick_start_defaults) — the assumption
-  // list also powers the dashboard's "add detail" chips.
-  if (site.attrSource === "quick_start_defaults") {
+  // remain in effect — the assumption list also powers the dashboard's
+  // "add detail" chips.
+  // Batch-44 (pass 1919b): the gate is now PER-FIELD, not the site-level
+  // attrSource flag alone. sites.refine flips attrSource to user_entered as
+  // soon as ANY core attribute (buildingType/sqft/vintage) is provided, which
+  // silenced this disclosure while location placeholders (state/zip → climate
+  // zone, timezone, tariff sweep) were still in effect — misleading the user
+  // into thinking every placeholder was resolved. Core-attribute lines are
+  // gated on attrSource (refine flips it exactly when those are user-provided);
+  // location lines are gated on the fields actually still missing; the
+  // interval-data line on hasIntervals. The insight is emitted while ANY
+  // placeholder line remains.
+  {
     const qsParse = { raw: site.address ?? "", state: site.state, zip: site.zip, city: site.city };
-    const qsAssumptions = quickStartAssumptions(qsParse).filter(
-      // once real interval data exists, drop the interval-data assumption line
-      (a) => !(a.field === "intervalData" && hasIntervals),
-    );
+    const coreStillPlaceholder = site.attrSource === "quick_start_defaults";
+    const CORE_FIELDS = new Set(["buildingType", "sqft", "vintage"]);
+    const qsAssumptions = quickStartAssumptions(qsParse).filter((a) => {
+      if (CORE_FIELDS.has(a.field)) return coreStillPlaceholder;
+      // Interval-data line only accompanies the quick-start core placeholders —
+      // a regular site without uploads gets data-coverage insights elsewhere.
+      if (a.field === "intervalData") return coreStillPlaceholder && !hasIntervals;
+      // Location lines (state/zip): still-missing location keeps its climate/
+      // timezone/tariff-sweep placeholder line regardless of attrSource — this
+      // applies equally to a refined quick-start site and a sites.create site
+      // that never had location (both run on the same US-median fallbacks).
+      return true;
+    });
+    if (qsAssumptions.length > 0)
     insightRows.push({
       siteId: site.id,
       meterId: meter?.id ?? null,
@@ -394,7 +430,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       severity: "info",
       disaggregationMethod: disaggMethod,
       confidence: "low",
-      provenance: { method: "quick_start_intake_v1", parsedState: site.state, parsedZip: site.zip },
+      provenance: { method: "quick_start_intake_v1", parsedState: site.state, parsedZip: site.zip, coreStillPlaceholder },
       metrics: { assumptions: qsAssumptions },
     });
   }

@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.4"; // E-36 winter dual demand windows (demandGroup)
+export const SEED_VERSION = "2026.07.5"; // National coverage: 51-state representative tariffs + zone stations + eGRID
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -94,7 +94,7 @@ export const EUI_BENCHMARKS: Array<{
 /* ================= Weather normals (NOAA 1991–2020) =========================== */
 /** Monthly {hddBase65, cddBase65, avgTempF}; TMY hourly synthesized from
  *  monthly normals + diurnal ranges (labeled accordingly in provenance). */
-interface MonthNormal { month: number; hddBase65: number; cddBase65: number; avgTempF: number; diurnalRangeF: number }
+export interface MonthNormal { month: number; hddBase65: number; cddBase65: number; avgTempF: number; diurnalRangeF: number }
 
 function mn(vals: Array<[number, number, number, number]>): MonthNormal[] {
   return vals.map(([avgTempF, hdd, cdd, diurnal], i) => ({

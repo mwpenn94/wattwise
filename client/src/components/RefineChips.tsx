@@ -33,11 +33,22 @@ const BUILDING_TYPES = [
 
 interface Props {
   siteId: number;
+  /** Current site row — used to show what the address cascade derived so each
+   *  chip reads "derived: X — tap to change" instead of a bare label. */
+  site?: {
+    buildingType: string | null;
+    sqft: number | null;
+    vintage: number | null;
+    climateZone: string | null;
+    utilityName: string | null;
+    state: string | null;
+    zip: string | null;
+  } | null;
   /** Re-run analysis after a successful refine. */
   onRefined: () => void;
 }
 
-export default function RefineChips({ siteId, onRefined }: Props) {
+export default function RefineChips({ siteId, site, onRefined }: Props) {
   const utils = trpc.useUtils();
   const refine = trpc.sites.refine.useMutation();
   const [sqft, setSqft] = useState("");
@@ -69,8 +80,12 @@ export default function RefineChips({ siteId, onRefined }: Props) {
         </p>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        Each chip shows what providing the real value unlocks. Everything below is optional; current figures use
-        disclosed placeholder assumptions.
+        Everything derivable from your address was derived automatically
+        {site?.climateZone ? ` — climate zone ${site.climateZone}` : ""}
+        {site?.utilityName ? `, likely utility ${site.utilityName}` : ""}
+        {site?.buildingType ? `, assumed ${site.buildingType.replace(/_/g, " ")}${site.sqft ? ` ~${site.sqft.toLocaleString()} sqft` : ""}` : ""}
+        . Each value is a disclosed starting point, not a fact — tap any chip to override it, and it shows what the real
+        value unlocks. Everything below is optional.
       </p>
       <div className="mt-2.5 flex flex-wrap gap-2">
         {/* building type */}
@@ -78,7 +93,9 @@ export default function RefineChips({ siteId, onRefined }: Props) {
           <PopoverTrigger asChild>
             <button type="button" className={chipCls} title="Unlocks: correct peer archetype load shape + EUI benchmark peer group">
               <Building2 className="h-3.5 w-3.5 text-primary" /> Building type
-              <span className="text-muted-foreground">→ real archetype & benchmark peers</span>
+              <span className="text-muted-foreground">
+                {site?.buildingType ? `derived: ${site.buildingType.replace(/_/g, " ")} — tap to change` : "→ real archetype & benchmark peers"}
+              </span>
             </button>
           </PopoverTrigger>
           <PopoverContent className="w-72" align="start">
@@ -106,7 +123,9 @@ export default function RefineChips({ siteId, onRefined }: Props) {
           <PopoverTrigger asChild>
             <button type="button" className={chipCls} title="Unlocks: correctly scaled baseline + meaningful EUI percentile">
               <Ruler className="h-3.5 w-3.5 text-primary" /> Floor area
-              <span className="text-muted-foreground">→ scaled baseline & real EUI</span>
+              <span className="text-muted-foreground">
+                {site?.sqft ? `prior: ~${site.sqft.toLocaleString()} sqft — tap to change` : "→ scaled baseline & real EUI"}
+              </span>
             </button>
           </PopoverTrigger>
           <PopoverContent className="w-64" align="start">
@@ -130,7 +149,9 @@ export default function RefineChips({ siteId, onRefined }: Props) {
           <PopoverTrigger asChild>
             <button type="button" className={chipCls} title="Unlocks: correct archetype efficiency band">
               <CalendarClock className="h-3.5 w-3.5 text-primary" /> Year built
-              <span className="text-muted-foreground">→ right efficiency band</span>
+              <span className="text-muted-foreground">
+                {site?.vintage ? `prior: ~${site.vintage} — tap to change` : "→ right efficiency band"}
+              </span>
             </button>
           </PopoverTrigger>
           <PopoverContent className="w-64" align="start">
@@ -156,7 +177,11 @@ export default function RefineChips({ siteId, onRefined }: Props) {
           <PopoverTrigger asChild>
             <button type="button" className={chipCls} title="Unlocks: climate zone, timezone, tariff sweep, eGRID subregion">
               <MapPin className="h-3.5 w-3.5 text-primary" /> State / ZIP
-              <span className="text-muted-foreground">→ climate, tariffs & emissions</span>
+              <span className="text-muted-foreground">
+                {site?.state || site?.zip
+                  ? `derived: ${[site?.state, site?.zip].filter(Boolean).join(" ")}${site?.climateZone ? ` (zone ${site.climateZone})` : ""} — tap to change`
+                  : "→ climate, tariffs & emissions"}
+              </span>
             </button>
           </PopoverTrigger>
           <PopoverContent className="w-64" align="start">

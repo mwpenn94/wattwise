@@ -134,15 +134,29 @@ export function dispatchBattery(
   // the POSITIVE part of the input profile (billed demand is import-side, so
   // export hours never set a peak). The update is unconditional-monotone. The
   // Batch-40 special case (`: maxRate` when peakSoFar === 0) was itself flagged
-  // and is removed: charging at full inverter rate during export hours could
-  // flip residual positive and CREATE an import peak on a site that had none.
-  // The unified rule below — headroom = max(0, peakSoFar − residual[h]) —
-  // covers both regimes: with an established import peak, charge up to that
-  // setpoint; with peakSoFar = 0 (export-only history), residual[h] < 0 still
-  // yields positive headroom, so the battery charges up to IMPORT-NEUTRAL
-  // (absorbing surplus / net-zero at the meter) but never manufactures a new
-  // import peak. Grid-charging on such sites resumes normally once a real
-  // import peak is observed.
+  // and is removed. Batch-44 (passes 1893/1923): the Batch-41 "unified" rule
+  // headroom = max(0, peakSoFar − residual[h]) CONFLATED two regimes — with a
+  // negative residual (export hour) the subtraction inflated headroom ABOVE
+  // peakSoFar, so GRID energy (not just surplus) could be drawn until the
+  // meter reached peakSoFar even on a site whose import history was far lower,
+  // and conversely surplus absorption depended on the grid-charge branch's
+  // rate condition. The two concerns are now separate and explicit:
+  //   • SURPLUS ABSORPTION (residual < 0): always allowed, capped by the
+  //     surplus magnitude itself — import-neutral by construction (residual
+  //     can rise at most to 0, never creating an import peak).
+  //   • GRID-CHARGING (cheap-rate hours): capped by
+  //     max(0, peakSoFar − max(0, residual[h])) — the import-side load only.
+  //     Flooring residual at 0 means an export hour offers exactly peakSoFar
+  //     of grid headroom (meter swings from export to at most the causal
+  //     import peak), and a site with NO import history (peakSoFar = 0) gets
+  //     zero grid headroom — it can still absorb its own surplus via the
+  //     first branch. Grid-charging resumes once a real import peak exists.
+  // Batch-44 (pass 1913) INVARIANT: dispatchBattery is called at most ONCE per
+  // runScenario. peakSoFar is re-initialized per call from the causal prefix of
+  // originalLoad — if staged/multi-battery dispatch is ever introduced, callers
+  // MUST pass the same immutable pre-dispatch originalLoad to every stage so
+  // each stage's setpoint proxy reflects the true baseline, not a residual
+  // already modified by a previous stage.
   let peakSoFar = 0; // running max of the POSITIVE original load (causal demand-setpoint proxy)
   for (let h = 0; h < residual.length; h++) {
     const rate = hourlyRate[h] ?? 0;
@@ -171,7 +185,9 @@ export function dispatchBattery(
       // never exceeds the highest load seen so far in the ORIGINAL profile
       // (a conservative, causal proxy for the site's demand setpoint — uses
       // no future information).
-      const headroom = Math.max(0, peakSoFar - residual[h]);
+      // Import-side headroom only: floor the residual at 0 so export depth
+      // can never inflate grid-charge headroom above the causal import peak.
+      const headroom = Math.max(0, peakSoFar - Math.max(0, residual[h]));
       const room = usable - soc;
       const charge = Math.min(maxRate, room / rte, headroom);
       soc += charge * rte;
