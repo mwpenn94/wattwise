@@ -438,7 +438,11 @@ export function runScenario(
   // Cycle 6 (pass 313): the annual-average limitation applies regardless of the
   // delta's sign — increased consumption may coincide with high-marginal-intensity
   // peaker dispatch just as decreases may — so the disclosure is unconditional.
-  disclosures.push("Emissions deltas use annual-average grid intensity (eGRID subregion) — marginal/hourly intensity differs.");
+  // Batch-60 (pass 3073): do NOT name "eGRID subregion" here — the factor the
+  // caller passes may be the US-average fallback (unresolved region), and this
+  // layer cannot see which. The neutral wording is true in both cases; the
+  // Dashboard emissions KPI discloses region resolution specifically.
+  disclosures.push("Emissions deltas use an annual-average grid intensity factor — marginal/hourly intensity differs.");
 
   // Guard: Math.max(...[]) === -Infinity; empty series must yield 0 peak (pass-441).
   // Batch-50 (pass 2583): IMPORT-side peaks only. After solar subtraction the
