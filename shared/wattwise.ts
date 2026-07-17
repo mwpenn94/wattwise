@@ -288,12 +288,23 @@ export const SEQUENTIAL_DISPATCH_DISCLOSURE =
  * and scenario code all share the SAME fallback instead of a hardcoded
  * hot-arid "2B" default. Dominant-population zone per state; ZIP-prefix
  * refinements for known intra-state variation (AZ elevations). */
-export function inferClimateZone(zip?: string, state?: string): string {
+export type ClimateZoneSource = "zip_inferred" | "state_inferred" | "us_median_fallback";
+
+/* Batch-43 (pass 1845): callers must be able to distinguish a genuinely
+ * location-derived zone from the silent US-median fallback. A ZIP can be
+ * present yet unusable (only AZ prefixes are refined; all other ZIPs resolve
+ * through the state, and a ZIP with no recognizable state used to become 4A
+ * with no signal). inferClimateZoneWithSource returns provenance;
+ * inferClimateZone remains a thin compatibility wrapper. */
+export function inferClimateZoneWithSource(
+  zip?: string,
+  state?: string,
+): { zone: string; source: ClimateZoneSource } {
   const z3 = zip?.slice(0, 3);
   if (z3) {
-    if (["850", "851", "852", "853", "855", "863", "864", "865"].includes(z3)) return "2B"; // Phoenix/Havasu/Kingman
-    if (["856", "857"].includes(z3)) return "2B"; // Tucson
-    if (["859", "860"].includes(z3)) return "5B"; // Flagstaff / high country
+    if (["850", "851", "852", "853", "855", "863", "864", "865"].includes(z3)) return { zone: "2B", source: "zip_inferred" }; // Phoenix/Havasu/Kingman
+    if (["856", "857"].includes(z3)) return { zone: "2B", source: "zip_inferred" }; // Tucson
+    if (["859", "860"].includes(z3)) return { zone: "5B", source: "zip_inferred" }; // Flagstaff / high country
   }
   const STATE_ZONE: Record<string, string> = {
     AL: "3A", AK: "7", AZ: "2B", AR: "3A", CA: "3B", CO: "5B", CT: "5A", DE: "4A",
@@ -304,8 +315,12 @@ export function inferClimateZone(zip?: string, state?: string): string {
     SC: "3A", SD: "6A", TN: "4A", TX: "2A", UT: "5B", VT: "6A", VA: "4A", WA: "4C",
     WV: "5A", WI: "6A", WY: "6B",
   };
-  if (state && STATE_ZONE[state.toUpperCase()]) return STATE_ZONE[state.toUpperCase()];
-  return "4A"; // US-median fallback (mixed-humid), disclosed as inferred
+  if (state && STATE_ZONE[state.toUpperCase()]) return { zone: STATE_ZONE[state.toUpperCase()], source: "state_inferred" };
+  return { zone: "4A", source: "us_median_fallback" }; // US-median (mixed-humid) — callers must disclose
+}
+
+export function inferClimateZone(zip?: string, state?: string): string {
+  return inferClimateZoneWithSource(zip, state).zone;
 }
 
 /* ---------- Progressive participation: quick-start intake (Jul 2026) ----------

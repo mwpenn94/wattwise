@@ -13,6 +13,7 @@ import {
   SOLAR_DISCLOSURE,
   BATTERY_DISCLOSURE,
   inferClimateZone,
+  inferClimateZoneWithSource,
   parseQuickAddress,
   quickStartAssumptions,
   QUICK_START_DEFAULTS,
@@ -29,6 +30,7 @@ import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
+import { archetypeBaseline } from "./analytics/baseline";
 import { runScenario, hourlyToPoints, type ScenarioInput } from "./analytics/scenarios";
 import { costOnTariff } from "./analytics/tariffEngine";
 import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend } from "./analytics/costModel";
@@ -881,7 +883,8 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   // Cycle 9 (pass 505): never hardcode the hot-arid AZ zone as a universal
   // fallback — infer from ZIP/state so a Seattle site without an explicit
   // climateZone doesn't get a Phoenix archetype.
-  const climateZone = site.climateZone ?? inferClimateZone(site.zip ?? undefined, site.state ?? undefined);
+  const zoneInference = inferClimateZoneWithSource(site.zip ?? undefined, site.state ?? undefined);
+  const climateZone = site.climateZone ?? zoneInference.zone;
   // Batch-36 (pass 1385): when the site carries NO location signal at all
   // (no explicit zone, no zip, no state), inferClimateZone bottoms out at the
   // US-median '4A' fallback. Quick-start sites disclose this via the
@@ -889,8 +892,12 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   // provided, location omitted) or a stored zone that itself came from the
   // location-less create path would anchor archetype-based projections to a
   // zone the user never chose — with NO disclosure in the scenario results.
-  // Detect the condition here and surface it alongside the other disclosures.
-  const zoneIsUsMedianFallback = !site.zip && !site.state && (site.climateZone == null || site.climateZone === "4A");
+  // Batch-43 (pass 1845): use the inference SOURCE, not a location-field
+  // heuristic — a ZIP can be present yet unresolvable (unmapped prefix with
+  // no recognizable state), which previously fell to 4A silently because the
+  // old check required BOTH zip and state to be absent.
+  const zoneIsUsMedianFallback =
+    site.climateZone == null ? zoneInference.source === "us_median_fallback" : (!site.zip && !site.state && site.climateZone === "4A");
   const meters = await h.listMeters(site.id, userId);
   const meter = meters.find((m) => m.commodity === "electric") ?? meters[0] ?? null;
 
@@ -919,14 +926,38 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
         message: "Scenario needs either uploaded interval data or building type + size for an archetype baseline.",
       });
     }
-    const annual = arch.annualUsePerSqft * site.sqft;
-    hourly = (arch.shape8760 as number[]).map((f) => f * annual);
+    // Batch-43 (pass 1842): the scenario path previously scaled the shape
+    // linearly and set only a bare `extrapolated` flag when sqft fell outside
+    // the archetype's calibration bounds — no customer-facing disclosure named
+    // the cause, and the peak-derating the pipeline applies (sqrt-of-size load
+    // diversity) was silently absent here, so scenario baselines disagreed
+    // with analysis baselines for the same site. Route through
+    // archetypeBaseline for parity: same derating, same calibration semantics.
+    const outOfCalib =
+      (arch.calibMinSqft != null && site.sqft < arch.calibMinSqft) || (arch.calibMaxSqft != null && site.sqft > arch.calibMaxSqft);
+    const calibMid =
+      arch.calibMinSqft != null && arch.calibMaxSqft != null ? (arch.calibMinSqft + arch.calibMaxSqft) / 2 : (arch.calibMaxSqft ?? arch.calibMinSqft ?? null);
+    const ab = archetypeBaseline(arch.shape8760 as number[], arch.annualUsePerSqft, site.sqft, {
+      outOfCalibrationRange: outOfCalib,
+      calibMidSqft: calibMid,
+    });
+    hourly = ab.hourly;
     confidence = "low";
-    extrapolated = (arch.calibMinSqft != null && site.sqft < arch.calibMinSqft) || (arch.calibMaxSqft != null && site.sqft > arch.calibMaxSqft);
+    extrapolated = outOfCalib;
+    if (outOfCalib) {
+      const range = [
+        arch.calibMinSqft != null ? `${arch.calibMinSqft.toLocaleString()} sqft` : null,
+        arch.calibMaxSqft != null ? `${arch.calibMaxSqft.toLocaleString()} sqft` : null,
+      ]
+        .filter(Boolean)
+        .join(" – ");
+      archetypeZoneDisclosure = `Your building size (${site.sqft.toLocaleString()} sqft) is outside the ${site.buildingType} archetype's calibration range (${range}) — energy and peak-demand intensities are extrapolated beyond the model's valid domain, and confidence is reduced to low.`;
+    }
     // Cycle 10 (pass 546): an any-zone archetype fallback silently substitutes a
     // different climate's load shape — disclose the mismatch explicitly.
     if (arch.zoneMatched === false) {
-      archetypeZoneDisclosure = `Baseline uses a ${site.buildingType} archetype from a different climate zone (no ${climateZone} profile is seeded) — heating/cooling shape may differ materially from your climate.`;
+      const zoneNote = `Baseline uses a ${site.buildingType} archetype from a different climate zone (no ${climateZone} profile is seeded) — heating/cooling shape may differ materially from your climate.`;
+      archetypeZoneDisclosure = archetypeZoneDisclosure ? `${archetypeZoneDisclosure} ${zoneNote}` : zoneNote;
     }
     // Batch-36 (pass 1385): archetype baselines are climate-zone-driven — if the
     // zone is only the US-median fallback, say so explicitly instead of letting

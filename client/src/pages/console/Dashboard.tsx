@@ -490,6 +490,10 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCos
   const rows = metrics?.comparisons ?? [];
   if (rows.length === 0) return null;
   const noneEligible = rows.length > 0 && rows.every((r) => !r.eligible);
+  // Batch-43 (pass 1868): "No seeded rate matches" is factually wrong when the
+  // user's ASSIGNED rate IS in the table — it matched (by assignment), it is
+  // merely outside the eligibility bracket. Name that case distinctly.
+  const currentAssignedIneligible = rows.some((r) => r.isCurrentBasis && !r.eligible);
   // Batch-37 (pass 1518): no current-cost basis → savings deltas are zero
   // sentinels, not real comparisons — never render them as "$0/yr".
   const hasCostBasis = metrics?.hasCostBasis ?? true;
@@ -497,7 +501,9 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCos
     <>
     {noneEligible && (
       <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
-        No seeded rate matches this site's sector and peak-demand size. The seeded rate library is a snapshot — your actual utility rate may not be included. Cost figures use the closest available rate structure as a modeling basis, for reference only — you may not be eligible for that rate.
+        {currentAssignedIneligible
+          ? "Your assigned rate is shown below but sits outside this site's eligibility bracket (sector or peak-demand size), and no other seeded rate matches this site either. Cost figures are computed on your assigned rate as the modeling basis — verify the assignment against an actual bill. The seeded rate library is a snapshot; your actual utility rate may not be included."
+          : "No seeded rate matches this site's sector and peak-demand size. The seeded rate library is a snapshot — your actual utility rate may not be included. Cost figures use the closest available rate structure as a modeling basis, for reference only — you may not be eligible for that rate."}
       </p>
     )}
     <Table className="mt-3">

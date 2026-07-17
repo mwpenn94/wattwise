@@ -12,6 +12,8 @@ import {
   LABEL_CP_ESTIMATED,
   LABEL_NORMAL_YEAR,
   LABEL_PROTOTYPE_ARCHETYPE,
+  inferClimateZone,
+  inferClimateZoneWithSource,
   type IntervalPoint,
   type TariffStructure,
 } from "../shared/wattwise";
@@ -501,5 +503,20 @@ describe("Honest-labeling and cost-cap invariants", () => {
 
   it("free-tier marginal cost cap is ≤ $0.20 in code", () => {
     expect(FREE_TIER_MAX_COST_USD).toBeLessThanOrEqual(0.2);
+  });
+  /* Batch-43 (pass 1845): climate-zone inference exposes its provenance so
+   * disclosure code can distinguish location-derived zones from the US-median
+   * fallback — including the ZIP-present-but-unresolvable case the old
+   * "!zip && !state" heuristic missed. */
+  it("climate-zone inference reports provenance — unresolvable ZIP is a disclosed fallback, not a silent 4A", () => {
+    expect(inferClimateZoneWithSource("85004", undefined)).toEqual({ zone: "2B", source: "zip_inferred" });
+    expect(inferClimateZoneWithSource(undefined, "WA")).toEqual({ zone: "4C", source: "state_inferred" });
+    // ZIP present but unmapped prefix, no usable state → US-median fallback
+    expect(inferClimateZoneWithSource("99999", undefined)).toEqual({ zone: "4A", source: "us_median_fallback" });
+    expect(inferClimateZoneWithSource(undefined, "ZZ")).toEqual({ zone: "4A", source: "us_median_fallback" });
+    expect(inferClimateZoneWithSource(undefined, undefined).source).toBe("us_median_fallback");
+    // compatibility wrapper stays in lockstep
+    expect(inferClimateZone("99999", undefined)).toBe("4A");
+    expect(inferClimateZone("85004", undefined)).toBe("2B");
   });
 });
