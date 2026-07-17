@@ -429,7 +429,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       // unit semantics made explicit rather than ambiguous annual-vs-monthly).
       const cpMonths = structure.cp.chargeMonths ?? 12;
       cpMethodology = "cp_proxy_top_n_customer_peaks";
-      cpTopNApplied = topN;
+      // Batch-50 (pass 2572): report the number of peak events ACTUALLY used in
+      // the CP average — sparse seasonal histories can yield fewer distinct peak
+      // days than the requested topN (cpEvents is sliced to AT MOST cpTopN), and
+      // labeling the determinant "top-4" when only 2 events contributed would
+      // overstate the estimate's basis to API consumers and the UI.
+      cpTopNApplied = da.cpProxy.events.length;
       // Batch-13 (pass 62): fold the CP $/kW-month charge into monthlyCosts so
       // Σ(monthly totals) reconciles with breakdown.total — a UI summing the
       // monthly rows must never disagree with the annual figure. The determinant
@@ -463,7 +468,7 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
         );
       }
       disclosures.push(
-        `CP/4CP charge uses your top-${topN} seasonal customer peaks as proxy coincident peaks (${LABEL_CP_ESTIMATED}), billed as a $/kW-month determinant over ${cpMonths} months. Actual ISO/utility CP timing may differ materially.`,
+        `CP/4CP charge uses your top-${da.cpProxy.events.length} seasonal customer peak${da.cpProxy.events.length === 1 ? "" : "s"}${da.cpProxy.events.length < topN ? ` (fewer than the ${topN} requested — sparse seasonal history)` : ""} as proxy coincident peaks (${LABEL_CP_ESTIMATED}), billed as a $/kW-month determinant over ${cpMonths} months. Actual ISO/utility CP timing may differ materially.`,
       );
     } else {
       // Batch-32 (pass 1192): the tariff DOES carry a CP charge but no proxy
@@ -490,6 +495,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     }
   } else if (structure.cp) {
     // Batch-32 (pass 1192): CP-bearing tariff with NO interval points at all.
+    // Batch-50 (passes 2552/2562): pin the machine-readable label explicitly in
+    // this branch (it previously relied on the init value alone) so the label
+    // assignment is locally auditable and can never drift from the disclosure
+    // if the initializer changes. "cp_omitted_no_interval_data" is exactly this
+    // branch's meaning: structure.cp defined, points.length === 0.
+    cpMethodology = "cp_omitted_no_interval_data";
     disclosures.push(
       "This tariff includes a coincident-peak (CP) charge, but no interval data is available to estimate it — the cost shown EXCLUDES the CP component and understates the true bill on this rate.",
     );

@@ -276,7 +276,7 @@ export default function Dashboard() {
           sub={
             emissionsInsight
               ? emissionsInsight.mapped === false
-                ? `region unresolved — ${emissionsInsight.subregion ?? "default"} factor used as a fallback`
+                ? `region unresolved — ${emissionsInsight.subregion ? `the ${emissionsInsight.subregion} default factor` : "a default factor"} was applied, not a verified regional match`
                 : `${emissionsInsight.subregion ? `${emissionsInsight.subregion} · ` : ""}eGRID annual avg`
               : ""
           }
@@ -637,7 +637,7 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCos
     {noneEligible && (
       <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
         {currentAssignedIneligible
-          ? "Your assigned rate is shown below but sits outside this site's eligibility bracket (sector or peak-demand size), and no other seeded rate is eligible for this site either. Cost figures are computed on your assigned rate as the modeling basis — verify the assignment against an actual bill. The seeded rate library is a snapshot; your actual utility rate may not be included."
+          ? "Your assigned rate is shown below but sits outside this site's eligibility bracket (sector or peak-demand size), and no eligible seeded rate could be found for this site. Cost figures are computed on your assigned rate as the modeling basis — verify the assignment against an actual bill. The seeded rate library is a snapshot; your actual utility rate may not be included."
           : "No seeded rate is eligible for this site's sector and peak-demand size — the rates shown below are for reference only (closest available structures, not offers you qualify for). The seeded rate library is a snapshot; your actual utility rate may not be included. Cost figures use the closest available structure as a modeling basis — verify against an actual bill."}
       </p>
     )}

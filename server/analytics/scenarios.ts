@@ -170,7 +170,13 @@ export function dispatchBattery(
     // now contributes 0 to the monotone max; the load[h] fallback applies only
     // when no originalLoad was passed at all (battery-only dispatch, where
     // load IS the original profile).
-    peakSoFar = Math.max(peakSoFar, originalLoad != null ? (originalLoad[h] ?? 0) : load[h], 0);
+    // Batch-50 (pass 2589): NaN-sanitize both branches — Math.max(x, NaN, 0)
+    // is NaN, so a single corrupt upstream value would permanently poison
+    // peakSoFar from that hour onward and cascade NaN into headroom, dispatch,
+    // and the scenario deltas shown to the user. `?? 0` guards only
+    // null/undefined, not NaN.
+    const setpointSample = originalLoad != null ? originalLoad[h] : load[h];
+    peakSoFar = Math.max(peakSoFar, Number.isFinite(setpointSample) ? setpointSample : 0, 0);
     // RTE model (deliverable convergence cycle 1, passes 3/9/19): full
     // round-trip losses are taken on the charge leg — energy stored in SoC is
     // input kWh × rte; discharge delivers SoC kWh 1:1. Total delivered energy
@@ -429,8 +435,13 @@ export function runScenario(
   disclosures.push("Emissions deltas use annual-average grid intensity (eGRID subregion) — marginal/hourly intensity differs.");
 
   // Guard: Math.max(...[]) === -Infinity; empty series must yield 0 peak (pass-441).
-  const basePeak = baselineHourly.length > 0 ? Math.max(...baselineHourly) : 0;
-  const scenPeak = hourly.length > 0 ? Math.max(...hourly) : 0;
+  // Batch-50 (pass 2583): IMPORT-side peaks only. After solar subtraction the
+  // hourly array can be negative in every hour (export-dominated site); a raw
+  // Math.max then returns the least-negative EXPORT value, which is not a
+  // billing demand — demand charges bill on import kW, never export depth.
+  // Clamp both peaks at 0 so deltaDemandKw compares like with like.
+  const basePeak = baselineHourly.length > 0 ? Math.max(0, ...baselineHourly) : 0;
+  const scenPeak = hourly.length > 0 ? Math.max(0, ...hourly) : 0;
 
   let paybackYears: number | null = null;
   let paybackBand: string | null = null;

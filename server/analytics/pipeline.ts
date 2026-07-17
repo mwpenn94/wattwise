@@ -480,7 +480,17 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       severity: "info",
       disaggregationMethod: disaggMethod,
       confidence: "low",
-      provenance: { method: "quick_start_intake_v1", parsedState: site.state, parsedZip: site.zip, coreStillPlaceholder },
+      // Batch-50 (pass 2539): the site-level coreStillPlaceholder boolean was
+      // misleading after PARTIAL refinement (attrSource flips on the first core
+      // refine, so the flag read false while some placeholders remained). The
+      // provenance now names the ACTUAL remaining core placeholders, derived
+      // from the same per-field filter that gated the emitted lines.
+      provenance: {
+        method: "quick_start_intake_v1",
+        parsedState: site.state,
+        parsedZip: site.zip,
+        remainingCorePlaceholders: qsAssumptions.filter((a) => CORE_FIELDS.has(a.field)).map((a) => a.field),
+      },
       metrics: { assumptions: qsAssumptions },
     });
   }
