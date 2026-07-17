@@ -192,6 +192,10 @@ export interface CostBreakdown {
    * separate so energy/demand/fixed reflect actual metered charges and
    * Σ(components) − export ≡ total holds. 0 when no floor triggered. */
   minBillAdjustment?: number;
+  /** Batch-46 (pass 1990): export-credit subtrahend of the component identity
+   * Σ(energy+demand+fixed+cp+minBill) − exportCredits ≡ total. 0 when no
+   * export credits accrued (no negative net intervals, or zero-credit tariff). */
+  exportCredits?: number;
   total: number;
 }
 

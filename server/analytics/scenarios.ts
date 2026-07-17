@@ -462,7 +462,18 @@ export function runScenario(
     disclosures,
     assumptions: {
       solar: input.solarKwDc ? { ...SOLAR_DEFAULTS, kwDc: input.solarKwDc } : undefined,
-      battery: input.batteryKwh ? { ...BATTERY_DEFAULTS, kwh: input.batteryKwh, kw: input.batteryKw } : undefined,
+      // Batch-46 (pass 2023): report the EFFECTIVE power rating the dispatch
+      // actually used — when kW is omitted, dispatchBattery defaults it to
+      // kwh × cRate, and the disclosed assumptions must mirror that, not echo a
+      // null input. kwSource distinguishes user-specified from C-rate-defaulted.
+      battery: input.batteryKwh
+        ? {
+            ...BATTERY_DEFAULTS,
+            kwh: input.batteryKwh,
+            kw: input.batteryKw ?? input.batteryKwh * BATTERY_DEFAULTS.cRate,
+            kwSource: input.batteryKw != null ? "user_specified" : "defaulted_c_rate",
+          }
+        : undefined,
       efficiency: input.efficiencyReductions,
       ev: input.evAnnualKwh,
       capexUsd: input.capexUsd,

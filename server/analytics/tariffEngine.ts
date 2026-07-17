@@ -283,7 +283,26 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
   }
   const monthlyDetails = applyRatchet(monthlyPeaksAll, structure.ratchet);
   const detailByMonth = new Map(monthlyDetails.map((m) => [m.month, m]));
-
+  // Batch-46 (pass 2052): hoist the CP $/kW-month determinant ABOVE the monthly
+  // loop so the minimum-bill floor sees the month's FULL charges. Previously the
+  // floor compared energy+demand+fixed alone while CP was folded in afterwards —
+  // on a tariff carrying BOTH minBill and CP, a light month could take an uplift
+  // to the floor AND the CP charge on top, overstating the bill by the overlap.
+  // (No seeded tariff currently combines the two; this closes the engine-level
+  // correctness gap for user/OCR-derived structures.) The hoisted values are
+  // reused by the CP fold below — one determinant, computed once.
+  let hoistedCpDa: ReturnType<typeof computeDemandAnalytics> | null = null;
+  let hoistedCpPerMonth = 0;
+  let hoistedCpMonthsBilled = 0;
+  if (structure.cp && points.length > 0) {
+    const topNHoist = opts?.cpTopNOverride ?? structure.cp.topN;
+    hoistedCpDa = computeDemandAnalytics(points, topNHoist, structure.cp.peakSeasonMonths, tz);
+    if (hoistedCpDa?.cpProxy && hoistedCpDa.cpProxy.events.length > 0) {
+      const avgCpKwHoist = hoistedCpDa.cpProxy.events.reduce((a, e) => a + e.kw, 0) / hoistedCpDa.cpProxy.events.length;
+      hoistedCpPerMonth = avgCpKwHoist * structure.cp.ratePerKw;
+      hoistedCpMonthsBilled = Math.min(structure.cp.chargeMonths ?? 12, months.length);
+    }
+  }
   let energyTotal = 0;
   let minBillTotal = 0; // Batch-40 (pass 1742): explicit minimum-bill uplift component
   let demandTotal = 0;
@@ -329,7 +348,16 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       // monthly demand, never the raw window scan (cycle 5, pass 212 — made
       // explicit: detailByMonth always has every month key by construction,
       // and billedDemandKw ≥ actual peak, so the ratchet floor is applied).
-      if (dc.hourStart == null) {
+      // Batch-46 (pass 2012): only a TRULY unrestricted charge (no hour window
+      // AND no daysOfWeek filter) may substitute the ratcheted all-hours
+      // monthly peak — an hourless charge that still carries a daysOfWeek
+      // restriction (e.g. weekdays-only "anytime" demand) must bill the
+      // day-filtered window scan, or weekend peaks would leak into a
+      // weekday-only determinant. demandWindowMatch already applies the
+      // daysOfWeek filter independently of the hour window, so windowPeak is
+      // correct for that case; the ratchet floor intentionally does not apply
+      // to day-restricted determinants (ratchets ride on the full monthly peak).
+      if (dc.hourStart == null && !dc.daysOfWeek) {
         const det = detailByMonth.get(mk);
         windowPeak = det ? det.billedDemandKw : 0;
       }
@@ -355,10 +383,16 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     // breakdown.total whenever minBill triggered, misleading users about what
     // drove the bill. minBillTotal now carries the uplift so
     // Σ(energy+demand+fixed+cp+minBillAdjustment) − export ≡ total holds.
+    // Batch-46 (pass 2052): the floor test includes this month's CP charge —
+    // CP is billed revenue like any other charge, so a month whose
+    // energy+demand+fixed+CP already clears the minimum takes NO uplift. The
+    // CP allocation below assigns cpPerMonth to the first cpMonthsBilled
+    // months of monthlyCosts, which is exactly the months.indexOf order here.
+    const mCpForFloor = months.indexOf(mk) < hoistedCpMonthsBilled ? hoistedCpPerMonth : 0;
     let mMinBillUplift = 0;
-    if (structure.minBill != null && mCharges < structure.minBill) {
-      mMinBillUplift = structure.minBill - mCharges;
-      mCharges = structure.minBill;
+    if (structure.minBill != null && mCharges + mCpForFloor < structure.minBill) {
+      mMinBillUplift = structure.minBill - (mCharges + mCpForFloor);
+      mCharges = structure.minBill - mCpForFloor;
     }
     const mTotal = mCharges - mExport;
     energyTotal += mEnergy;
@@ -378,9 +412,11 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
   let cpTopNApplied: number | undefined;
   if (structure.cp && points.length > 0) {
     const topN = opts?.cpTopNOverride ?? structure.cp.topN;
-    const da = computeDemandAnalytics(points, topN, structure.cp.peakSeasonMonths, tz);
+    // Batch-46 (pass 2052): reuse the determinant hoisted above the monthly
+    // loop — one computeDemandAnalytics call, one CP figure, shared by the
+    // minimum-bill floor test and this fold.
+    const da = hoistedCpDa;
     if (da?.cpProxy && da.cpProxy.events.length > 0) {
-      const avgCpKw = da.cpProxy.events.reduce((a, e) => a + e.kw, 0) / da.cpProxy.events.length;
       // CP transmission-style charges (ERCOT 4CP pattern): the CP average sets a
       // billing determinant applied at $/kW-month for each month of the billing
       // year. cp.ratePerKw is defined as $/kW-month (documented in shared type
@@ -395,7 +431,7 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       // is billed per month; allocate one month's CP charge to each covered
       // month (all months when chargeMonths spans the year, else spread across
       // the months actually present, capped at cpMonths).
-      const cpPerMonth = avgCpKw * structure.cp.ratePerKw;
+      const cpPerMonth = hoistedCpPerMonth;
       const cpMonthsBilled = Math.min(cpMonths, monthlyCosts.length);
       // Batch-39 (pass 1642): breakdown.cp previously carried the FULL
       // cpMonths determinant while energy/demand/fixed cover only the
@@ -486,6 +522,11 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       cpMethodology,
       cpTopNApplied,
       minBillAdjustment: minBillTotal,
+      // Batch-46 (pass 1990): export credits are the subtrahend in the component
+      // identity Σ(energy+demand+fixed+cp+minBill) − exportCredits ≡ total.
+      // Exposing it lets tests and API consumers verify the identity exactly
+      // instead of the export term being silently absorbed into `total`.
+      exportCredits: exportTotal,
       total,
     },
     monthlyDetails,

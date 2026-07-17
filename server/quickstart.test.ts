@@ -156,7 +156,7 @@ describe("sites.quickCreate + refine (progressive participation)", () => {
     expect(site.attrSource).toBe("user_entered");
   }, 30_000);
 
-  it("refine with a new ZIP re-infers the climate zone, flips attrSource, and keeps tracking later moves", async () => {
+  it("refine with a new ZIP re-infers the climate zone WITHOUT flipping attrSource, and keeps tracking later moves", async () => {
     const caller = appRouter.createCaller(ctxFor({ id: qsUserId, openId: OPEN_ID, role: "admin" }));
     const created = await caller.sites.quickCreate({ address: "somewhere with no location info at all" });
     let site = await caller.sites.get({ siteId: created.id });
@@ -165,11 +165,15 @@ describe("sites.quickCreate + refine (progressive participation)", () => {
     await caller.sites.refine({ siteId: created.id, state: "AZ", zip: "86001" });
     site = await caller.sites.get({ siteId: created.id });
     expect(site.climateZone).toBe("5B"); // Flagstaff high country ZIP prefix
-    // Batch-21 (pass 565): explicitly-entered location IS user-entered data —
-    // the intake-assumptions insight must stop being re-emitted against it.
-    expect(site.attrSource).toBe("user_entered");
+    // Batch-46 (pass 2109): a location-only refine must NOT flip attrSource —
+    // buildingType/sqft/vintage are still quick-start defaults, and flipping
+    // would silence their placeholder disclosures on legacy rows (refinedFields
+    // null). Batch-21's re-emission concern (intake insight nagging about
+    // user-typed location) is handled by the pipeline's per-line location
+    // gating on the fields actually still missing.
+    expect(site.attrSource).toBe("quick_start_defaults");
     // Batch-21 (pass 566): climateZone always tracks location — a later move
-    // re-infers the zone even after attrSource has already flipped.
+    // re-infers the zone regardless of attrSource state.
     await caller.sites.refine({ siteId: created.id, zip: "85004" });
     site = await caller.sites.get({ siteId: created.id });
     expect(site.climateZone).toBe("2B"); // Phoenix — re-inferred post-flip

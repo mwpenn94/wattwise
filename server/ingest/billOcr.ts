@@ -128,14 +128,27 @@ export async function extractBill(
     // trip the free-tier kill-switch on large photos while still failing safe.
     const estPromptTokens = estimateBillOcrPromptTokens(imageDataUrl); // Batch-36 (pass 1397): shared with pre-flight
     const estCompletionTokens = Math.ceil((typeof raw === "string" ? raw.length : 0) / 4);
-    await recordMeterEvent({
-      userId,
-      analysisId,
-      kind: "bill_ocr_llm",
-      llmTokensIn: usage?.prompt_tokens ?? estPromptTokens,
-      llmTokensOut: usage?.completion_tokens ?? estCompletionTokens,
-      tier,
-    });
+    // Batch-46 (pass 2007): recordMeterEvent throws on DB-unavailable (Batch-45
+    // pass 1927 fail-loud rule). Without its own catch, that throw would fall
+    // into the outer `catch (llmErr)` and be misreported as an LLM availability
+    // incident — the LLM call SUCCEEDED and cost was incurred. Catch it here,
+    // attribute the failure accurately, and degrade to manual entry.
+    try {
+      await recordMeterEvent({
+        userId,
+        analysisId,
+        kind: "bill_ocr_llm",
+        llmTokensIn: usage?.prompt_tokens ?? estPromptTokens,
+        llmTokensOut: usage?.completion_tokens ?? estCompletionTokens,
+        tier,
+      });
+    } catch (meterErr) {
+      console.error("[billOcr] metering write failed (DB availability, NOT an LLM failure) — LLM cost was incurred but could not be recorded:", meterErr);
+      return {
+        status: "manual_entry_required",
+        reason: "Usage metering is temporarily unavailable, so AI parsing results cannot be delivered right now — enter the bill fields manually below, or retry shortly.",
+      };
+    }
 
     if (!raw || typeof raw !== "string") {
       return { status: "manual_entry_required", reason: "AI parser returned no result — please enter the bill fields manually." };

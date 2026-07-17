@@ -71,18 +71,32 @@ export async function recordMeterEvent(e: MeterEvent): Promise<number> {
   const comp = computeCostUsd(e.computeMs ?? 0);
   const total = llm + comp;
   if (db) {
-    await db.insert(metering).values({
-      userId: e.userId,
-      analysisId: e.analysisId ?? null,
-      kind: e.kind,
-      llmTokensIn: e.llmTokensIn ?? 0,
-      llmTokensOut: e.llmTokensOut ?? 0,
-      llmCostUsd: llm,
-      computeMs: e.computeMs ?? 0,
-      computeCostUsd: comp,
-      totalCostUsd: total,
-      tierAtTime: e.tier,
-    });
+    // Batch-46 (pass 2027): an insert-time throw (constraint violation,
+    // transient failure after the connection succeeded) previously escaped
+    // raw — no [METERING-DROPPED] log line and a nonstandard error shape that
+    // callers' catch-paths couldn't attribute. Route it through the SAME loud
+    // contract as the db-unavailable branch: log with full context, rethrow
+    // the standard refusing-to-proceed-unmetered error.
+    try {
+      await db.insert(metering).values({
+        userId: e.userId,
+        analysisId: e.analysisId ?? null,
+        kind: e.kind,
+        llmTokensIn: e.llmTokensIn ?? 0,
+        llmTokensOut: e.llmTokensOut ?? 0,
+        llmCostUsd: llm,
+        computeMs: e.computeMs ?? 0,
+        computeCostUsd: comp,
+        totalCostUsd: total,
+        tierAtTime: e.tier,
+      });
+    } catch (insertErr) {
+      console.error(
+        `[METERING-DROPPED] CRITICAL: metering event not recorded (insert failed) — user=${e.userId} kind=${e.kind} estCost=$${total.toFixed(4)}:`,
+        insertErr,
+      );
+      throw new Error(`Metering unavailable: ${e.kind} event (est $${total.toFixed(4)}) could not be recorded — refusing to proceed unmetered`);
+    }
   } else {
     // Cycle 1 pass 7: a silently dropped metering row would undermine the
     // free-tier budget enforcement invariant.

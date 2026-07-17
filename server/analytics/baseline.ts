@@ -136,7 +136,25 @@ export function fitCaltrackMonthly(
   if (!best) {
     // fall back to flat mean model
     const meanPerDay = usable.length ? usable.reduce((a, m) => a + m.usage / m.days, 0) / usable.length : 0;
-    disclosures.push("Weather regression not statistically valid for this data — flat per-day mean baseline used.");
+    // Batch-46 (pass 1981): the flat mean is NOT weather-normalized — labeling
+    // this path "normal-year basis" contradicted the fallback disclosure. The
+    // annualization here is observed-period daily mean × 365, and both the
+    // weatherBasis label and the disclosure now say exactly that.
+    // Batch-46 (pass 2061): the normals-as-REGRESSOR disclosure (pushed above
+    // when weatherIsNormalsProxy) describes a regression that, on this path,
+    // never produced a model — leaving it in place contradicted "NOT
+    // weather-normalized". Replace it with an accurate clause: normals were
+    // TRIED as the regressor and the fit failed.
+    const flatDisclosures = disclosures.filter(
+      (d) => !d.startsWith("Actual weather history unavailable"),
+    );
+    flatDisclosures.push(
+      "Weather regression not statistically valid for this data — flat per-day mean baseline used. " +
+        "Annualized usage is the observed-period daily mean × 365 (observed-period basis, NOT weather-normalized)." +
+        (opts.weatherIsNormalsProxy
+          ? " (Station climate normals were used as the candidate weather regressor, but no statistically valid fit resulted — no weather response is modeled.)"
+          : ""),
+    );
     const annual = meanPerDay * 365;
     return {
       method: "caltrack_monthly",
@@ -146,9 +164,9 @@ export function fitCaltrackMonthly(
       monthsCoverage: coverage,
       confidence: "low",
       confidenceLabel: `low confidence — ${coverage} months coverage, no valid weather fit; flat per-day mean baseline used (no R²/CVRMSE — model was not fit)`,
-      weatherBasis: LABEL_NORMAL_YEAR,
+      weatherBasis: "observed-period basis (not weather-normalized)",
       normalizedAnnualUsage: annual,
-      disclosures,
+      disclosures: flatDisclosures,
     };
   }
 

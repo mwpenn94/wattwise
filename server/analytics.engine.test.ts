@@ -140,12 +140,16 @@ describe("Exact-rules tariff engine", () => {
     const floored: TariffStructure = { ...FLAT, minBill: 1_000_000 };
     const res = costOnTariff(pts, floored, { tz: "UTC" });
     expect(res.breakdown.minBillAdjustment ?? 0).toBeGreaterThan(0);
+    // Batch-46 (pass 1990): the identity must include the export subtrahend —
+    // omitting it would let a miscalculated export credit slip past unnoticed
+    // whenever the other components happened to add up.
     const componentSum =
       res.breakdown.energy +
       res.breakdown.demand +
       res.breakdown.fixed +
       (res.breakdown.cp ?? 0) +
-      (res.breakdown.minBillAdjustment ?? 0);
+      (res.breakdown.minBillAdjustment ?? 0) -
+      (res.breakdown.exportCredits ?? 0);
     expect(res.breakdown.total).toBeCloseTo(componentSum, 6);
     // Monthly totals must also reconcile with the annual total.
     const monthlySum = res.monthlyCosts.reduce((s, m) => s + m.total, 0);

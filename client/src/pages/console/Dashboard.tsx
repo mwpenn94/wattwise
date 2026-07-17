@@ -226,17 +226,29 @@ export default function Dashboard() {
              $0 can also mean the components were not computable. When the
              structure flag is unavailable (older analyses), fall back to the
              honest "not determined" wording instead of "yours has none". */
+          /* Batch-46 (pass 2038): explicit priority order — (1) unpriced rate,
+             (2) PRICED demand/CP dollars in the breakdown (unequivocal — wins
+             even when the structure flag is null on older analyses), (3) the
+             structure flag, (4) flag unavailable → honest "not determined".
+             Batch-46 (pass 2058b): the flat-profile branch previously rendered
+             NOTHING when the rate could not be priced — a silent gap that let
+             "reasonably flat" read as verified-good without cost context. The
+             unpriced disclosure now shows regardless of load factor. */
           sub={
             demand
-              ? demand.loadFactor < 0.4
-                ? costInsight?.breakdown == null
+              ? costInsight?.breakdown == null
+                ? demand.loadFactor < 0.4
                   ? "peaky measured profile — cost impact unknown (current rate could not be priced)"
-                  : summary?.basisStructureHasDemandCharges === true || (costInsight.breakdown.demand ?? 0) + (costInsight.breakdown.cp ?? 0) > 0
+                  : "reasonably flat — cost context unavailable (current rate could not be priced)"
+                : demand.loadFactor < 0.4
+                  ? (costInsight.breakdown.demand ?? 0) + (costInsight.breakdown.cp ?? 0) > 0
                     ? "peaky measured profile — costly on a demand-charge rate like yours"
-                    : summary?.basisStructureHasDemandCharges === false
-                      ? "peaky measured profile — would matter only on a rate with demand charges (yours has none)"
-                      : "peaky measured profile — whether your rate bills demand charges could not be determined (re-run analysis)"
-                : "reasonably flat"
+                    : summary?.basisStructureHasDemandCharges === true
+                      ? "peaky measured profile — your rate has demand charges, though none were priced this period"
+                      : summary?.basisStructureHasDemandCharges === false
+                        ? "peaky measured profile — would matter only on a rate with demand charges (yours has none)"
+                        : "peaky measured profile — whether your rate bills demand charges could not be determined (re-run analysis)"
+                  : "reasonably flat"
               : ""
           }
         />
@@ -617,7 +629,7 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCos
       <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
         {currentAssignedIneligible
           ? "Your assigned rate is shown below but sits outside this site's eligibility bracket (sector or peak-demand size), and no other seeded rate is eligible for this site either. Cost figures are computed on your assigned rate as the modeling basis — verify the assignment against an actual bill. The seeded rate library is a snapshot; your actual utility rate may not be included."
-          : "No seeded rate matches this site's sector and peak-demand size. The seeded rate library is a snapshot — your actual utility rate may not be included. Cost figures use the closest available rate structure as a modeling basis, for reference only — you may not be eligible for that rate."}
+          : "No seeded rate is eligible for this site's sector and peak-demand size — the rates shown below are for reference only (closest available structures, not offers you qualify for). The seeded rate library is a snapshot; your actual utility rate may not be included. Cost figures use the closest available structure as a modeling basis — verify against an actual bill."}
       </p>
     )}
     <Table className="mt-3">
@@ -677,7 +689,17 @@ function Kpi({ icon, label, value, sub }: { icon: React.ReactNode; label: string
 }
 
 function Heatmap({ grid }: { grid: number[][] }) {
-  const flat = grid.flat().filter((v) => v > 0);
+  const all = grid.flat();
+  const flat = all.filter((v) => v > 0);
+  // Batch-46 (pass 2088b): a grid with real readings whose averages are ALL
+  // zero-or-negative (net-export site) is NOT missing data — telling the user
+  // to "upload interval data" they already uploaded misdirects them. The grid
+  // arrives zero-filled 7×24 even with no data, so "has data" is detected by
+  // any NONZERO cell (negative averages only occur when real export readings
+  // exist; an untouched grid is exactly zero everywhere). An all-exactly-zero
+  // grid with data is indistinguishable from no data at this layer and keeps
+  // the upload prompt — the conservative direction.
+  const hasAnyCells = all.some((v) => Number.isFinite(v) && v !== 0);
   // Batch-28 (pass 998): use the TRUE data maximum — the previous
   // `Math.max(...flat, 0.001)` floor inflated max above tiny-but-real values
   // (grids where every cell < 0.001 kW), which clipped legitimate readings to
@@ -696,7 +718,9 @@ function Heatmap({ grid }: { grid: number[][] }) {
   if (flat.length === 0) {
     return (
       <p className="py-8 text-center text-sm text-muted-foreground">
-        No demand data available for the heatmap — upload interval data to populate it.
+        {hasAnyCells
+          ? "No positive net-import demand in this period — the site was exporting or idle in every hour, so there is no import intensity to map."
+          : "No demand data available for the heatmap — upload interval data to populate it."}
       </p>
     );
   }

@@ -164,14 +164,40 @@ export const appRouter = router({
       // richer combined timezone + climate-zone disclosure below.
       const createTzNote = input.state ? tzAmbiguityNote(input.state) : null;
       if (createTzNote) {
+        // Batch-46 (pass 2036): an UNRECOGNIZED non-empty state (typo, territory
+        // like PR) doesn't just break the timezone — the climate zone falls to
+        // the US-median too, and the no-state branch below (which discloses that)
+        // never fires because input.state is non-empty. Append the same
+        // zone-context clause here so both consequences of the bad state are
+        // disclosed together, sharing one inference source with the stored zone.
+        const createZoneUsed = input.climateZone
+          ? { zone: input.climateZone, source: "user_entered" as const }
+          : inferClimateZoneWithSource(input.zip, input.state);
+        // "Unrecognized state" is precisely the tz-warning case where the zone
+        // inference could NOT resolve via the state table — the inference
+        // source is the single source of truth (state_inferred means the state
+        // WAS recognized, so no extra zone context is needed).
+        const stateUnrecognized = createTzNote.severity === "warning" && createZoneUsed.source !== "state_inferred";
+        const createZoneClause = stateUnrecognized
+          ? createZoneUsed.source === "user_entered"
+            ? ` The climate zone uses your entered value (${createZoneUsed.zone}) and is unaffected.`
+            : createZoneUsed.source === "zip_inferred"
+              ? ` The climate zone was still inferred from your ZIP (${createZoneUsed.zone}).`
+              : ` The climate zone also could not be derived and defaults to the US-median (${createZoneUsed.zone}) — archetype load shapes may not match your climate.`
+          : "";
         await h.addInsight({
           siteId: id,
           kind: "intake_assumptions",
           title: "Meter timezone assumption — verify if incorrect for this site",
-          body: createTzNote.body,
+          body: createTzNote.body + createZoneClause,
           severity: createTzNote.severity,
           confidence: createTzNote.confidence,
-          provenance: { method: "site_create_tz_disclosure_v1", state: input.state, tzAmbiguous: true },
+          provenance: {
+            method: "site_create_tz_disclosure_v1",
+            state: input.state,
+            tzAmbiguous: true,
+            ...(stateUnrecognized ? { climateZoneUsed: createZoneUsed.zone, climateZoneSource: createZoneUsed.source } : {}),
+          },
           metrics: null,
         });
       } else if (!input.state) {
@@ -271,9 +297,14 @@ export const appRouter = router({
             [
               `climate zone ${cascade.climateZone.value} (${cascade.climateZone.source.replace(/_/g, " ")})`,
               `timezone ${cascade.timezone.value} (${cascade.timezone.source.replace(/_/g, " ")})`,
+              // Batch-46 (pass 2026): when no utility was derived, cite the
+              // cascade's own note (which names the actual reason) instead of
+              // asserting "no state parsed" — the derivation can fail for
+              // reasons other than a missing state, and the note is the source
+              // of truth for why.
               cascade.utilityName.value
                 ? `likely utility ${cascade.utilityName.value} (${cascade.utilityName.source.replace(/_/g, " ")})`
-                : `utility unknown (no state parsed)`,
+                : `utility unknown — ${cascade.utilityName.note}`,
               `building prior: ${cascade.buildingType.value}, ${cascade.sqft.value.toLocaleString()} sqft, vintage ${cascade.vintage.value} (${cascade.sqft.source.replace(/_/g, " ")})`,
             ].join("; ") +
             `. These are starting points, not facts — every field is overridable, and each "add detail" chip on the dashboard shows exactly what refining a field unlocks.` +
@@ -319,14 +350,27 @@ export const appRouter = router({
         // attrSource guard silently pinned the zone — and every downstream
         // archetype/EUI/savings figure — to the pre-move location once any
         // earlier refinement had flipped attrSource).
-        const coreProvided = ["buildingType", "sqft", "vintage", "state", "zip"].some((k) => k in provided);
+        // Batch-46 (pass 2109): the attrSource flip keys off the BUILDING
+        // attributes only (was [buildingType, sqft, vintage, state, zip] since
+        // Batch-21 — that batch's concern, re-emitting the intake insight
+        // against user-typed location, is now handled by the pipeline's
+        // per-line location gating). A location-only refine on a LEGACY row
+        // (refinedFields null, no per-field record) must not flip attrSource
+        // and silently retire the buildingType/sqft/vintage placeholder lines
+        // that are still quick-start defaults.
+        const buildingAttrProvided = ["buildingType", "sqft", "vintage"].some((k) => k in provided);
         // Batch-45 (pass 1959): track WHICH core placeholders the user replaced.
         // Site-level attrSource flips on the FIRST core refinement, which alone
         // cannot say which of buildingType/sqft/vintage remain placeholders —
         // the per-field list can. Only maintained for quick-start-origin sites
         // (refinedFields non-null); regular sites stay null.
         const priorRefined = Array.isArray(site.refinedFields) ? (site.refinedFields as string[]) : null;
-        const newlyRefined = ["buildingType", "sqft", "vintage"].filter((k) => k in provided && !priorRefined?.includes(k));
+        // Batch-46 (pass 2035): utilityName is tracked per-field too — site-level
+        // attrSource flips on ANY core refinement, so it alone cannot distinguish
+        // "user typed this utility" from "cascade suggested it before the user
+        // refined an unrelated field". Only an explicitly-provided utilityName
+        // earns ownership for quick-start-origin sites.
+        const newlyRefined = ["buildingType", "sqft", "vintage", "utilityName"].filter((k) => k in provided && !priorRefined?.includes(k));
         const nextRefined = priorRefined != null && newlyRefined.length > 0 ? [...priorRefined, ...newlyRefined] : undefined;
         const nextState = (provided.state as string | undefined) ?? site.state ?? undefined;
         const nextZip = (provided.zip as string | undefined) ?? site.zip ?? undefined;
@@ -340,8 +384,19 @@ export const appRouter = router({
         const refineCascade = locationChanged
           ? deriveFromAddress(site.address ?? null, { state: nextState ?? null, zip: nextZip ?? null })
           : null;
+        // Batch-46 (pass 2035): for quick-start sites (refinedFields non-null),
+        // ownership requires the utility to have been EXPLICITLY provided — now
+        // or in a past refine (tracked per-field). The site-level attrSource
+        // check would otherwise pin a cascade-suggested utility as "user-owned"
+        // the moment the user refined an unrelated field like buildingType,
+        // blocking legitimate re-derivation on a later location change. Regular
+        // sites keep the attrSource heuristic (their utility, when present, was
+        // typed in sites.create or refine directly).
         const userOwnsUtility =
-          "utilityName" in provided || (site.utilityName != null && site.attrSource === "user_entered");
+          "utilityName" in provided ||
+          (priorRefined != null
+            ? priorRefined.includes("utilityName")
+            : site.utilityName != null && site.attrSource === "user_entered");
         await h.updateSite(siteId, ctx.user.id, {
           ...provided,
           // climateZone derives from location: always re-infer on location change
@@ -350,7 +405,7 @@ export const appRouter = router({
           ...(refineCascade && !userOwnsUtility && refineCascade.utilityName.value
             ? { utilityName: refineCascade.utilityName.value }
             : {}),
-          ...(coreProvided && site.attrSource === "quick_start_defaults" ? { attrSource: "user_entered" } : {}),
+          ...(buildingAttrProvided && site.attrSource === "quick_start_defaults" ? { attrSource: "user_entered" } : {}),
           ...(nextRefined !== undefined ? { refinedFields: nextRefined } : {}),
         });
         // Disclose the re-derivation so the location-driven update is never silent.
@@ -1137,8 +1192,16 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   // heuristic — a ZIP can be present yet unresolvable (unmapped prefix with
   // no recognizable state), which previously fell to 4A silently because the
   // old check required BOTH zip and state to be absent.
+  // Batch-46 (pass 2026): the STORED-zone branch also keys off the inference
+  // SOURCE now — a stored 4A that came from a create-path with an unresolvable
+  // ZIP (zip present but unmapped) previously escaped the disclosure because
+  // the old heuristic required BOTH zip and state to be absent. Re-inferring
+  // from the stored location fields tells us whether 4A is genuinely derivable
+  // or just the US-median bottom-out.
   const zoneIsUsMedianFallback =
-    site.climateZone == null ? zoneInference.source === "us_median_fallback" : (!site.zip && !site.state && site.climateZone === "4A");
+    site.climateZone == null
+      ? zoneInference.source === "us_median_fallback"
+      : site.climateZone === "4A" && zoneInference.source === "us_median_fallback";
   const meters = await h.listMeters(site.id, userId);
   const meter = meters.find((m) => m.commodity === "electric") ?? meters[0] ?? null;
 
@@ -1204,7 +1267,7 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
     // zone is only the US-median fallback, say so explicitly instead of letting
     // the customer assume it was derived from their location.
     if (zoneIsUsMedianFallback) {
-      const fallbackNote = `Climate zone ${climateZone} is the US-median assumption (this site has no state or ZIP on record) — the archetype load shape and yields may not match your actual climate; add a location to fix this.`;
+      const fallbackNote = `Climate zone ${climateZone} is the US-median assumption (it could not be resolved from this site's location fields) — the archetype load shape and yields may not match your actual climate; add or correct the state/ZIP to fix this.`;
       archetypeZoneDisclosure = archetypeZoneDisclosure ? `${archetypeZoneDisclosure} ${fallbackNote}` : fallbackNote;
     }
   }
