@@ -90,6 +90,15 @@ export function dispatchBattery(
   load: number[], // hourly kWh (post-solar residual; may be negative = surplus)
   spec: BatterySpec,
   hourlyRate: number[], // $/kWh rate signal for arbitrage
+  // Batch-42 (pass 1823): the demand-setpoint proxy must track the ORIGINAL
+  // (pre-solar) baseline load. When `load` is a post-solar residual, solar
+  // suppresses daytime values, so a residual-driven peakSoFar could sit far
+  // below the real billed baseline peak — grid-charging capped at that
+  // deflated setpoint could still create a metered import peak HIGHER than
+  // anything in the residual history yet the comparison the customer cares
+  // about is vs their original bill. Callers with a solar step pass the
+  // pre-solar baseline here; battery-only callers omit it (load IS original).
+  originalLoad?: number[],
 ): { residual: number[]; cycled: number } {
   const usable = spec.kwh * BATTERY_DEFAULTS.maxDepthOfDischarge;
   const maxRate = Math.min(spec.kw, spec.kwh * BATTERY_DEFAULTS.cRate);
@@ -137,7 +146,10 @@ export function dispatchBattery(
   let peakSoFar = 0; // running max of the POSITIVE original load (causal demand-setpoint proxy)
   for (let h = 0; h < residual.length; h++) {
     const rate = hourlyRate[h] ?? 0;
-    peakSoFar = Math.max(peakSoFar, load[h], 0);
+    // Batch-42 (pass 1823): causal max over the PRE-solar original profile
+    // when provided — the residual can be solar-suppressed and would
+    // understate the site's true demand setpoint.
+    peakSoFar = Math.max(peakSoFar, originalLoad?.[h] ?? load[h], 0);
     // RTE model (deliverable convergence cycle 1, passes 3/9/19): full
     // round-trip losses are taken on the charge leg — energy stored in SoC is
     // input kWh × rte; discharge delivers SoC kWh 1:1. Total delivered energy
@@ -360,7 +372,9 @@ export function runScenario(
 
   if ((input.kind === "battery" || input.kind === "solar_battery") && input.batteryKwh) {
     const rateSignal = hourlyRateSignal(structure);
-    const { residual } = dispatchBattery(hourly, { kwh: input.batteryKwh, kw: input.batteryKw ?? input.batteryKwh * BATTERY_DEFAULTS.cRate }, rateSignal);
+    // Batch-42 (pass 1823): pass the PRE-solar baseline so the demand-setpoint
+    // proxy is not solar-suppressed (for battery-only runs hourly === baseline).
+    const { residual } = dispatchBattery(hourly, { kwh: input.batteryKwh, kw: input.batteryKw ?? input.batteryKwh * BATTERY_DEFAULTS.cRate }, rateSignal, baselineHourly);
     hourly = residual;
     disclosures.push(BATTERY_DISCLOSURE);
     if (input.kind === "solar_battery") {

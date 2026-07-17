@@ -115,7 +115,10 @@ export const appRouter = router({
       // dominant zone may be wrong for this site, and (b) NO state at all, where
       // tzForState falls back to America/Phoenix and inferClimateZone falls back to
       // the US-median zone — both affect TOU periods, demand windows, and CP seasons.
-      const createTzNote = tzAmbiguityNote(input.state);
+      // Batch-42 (pass 1826): check !input.state FIRST — tzAmbiguityNote now
+      // also returns a (generic) note for empty states, but this path has the
+      // richer combined timezone + climate-zone disclosure below.
+      const createTzNote = input.state ? tzAmbiguityNote(input.state) : null;
       if (createTzNote) {
         await h.addInsight({
           siteId: id,
@@ -424,7 +427,7 @@ export const appRouter = router({
                 await h.addInsight({
                   siteId: input.siteId,
                   kind: "data_coverage",
-                  title: "Meter timezone assumed from state — verify if in a minority clock zone",
+                  title: "Meter timezone assumption — verify if incorrect for this site",
                   body: uploadTzNote,
                   severity: "info",
                   confidence: "low",
@@ -578,7 +581,7 @@ export const appRouter = router({
             await h.addInsight({
               siteId: input.siteId,
               kind: "data_coverage",
-              title: "Meter timezone assumed from state — verify if in a minority clock zone",
+              title: "Meter timezone assumption — verify if incorrect for this site",
               body: billTzNote,
               severity: "info",
               confidence: "low",
@@ -837,6 +840,16 @@ function tzAmbiguityNote(state: string | null | undefined): string | null {
   if (st && !(st in TZ_BY_STATE)) {
     return `State "${st}" was not recognized, so the meter timezone defaulted to America/Phoenix. Time-of-use periods, demand windows, and coincident-peak seasons may be shifted by several hours if that is wrong — correct the state (2-letter USPS code) or verify the meter timezone.`;
   }
+  // Batch-42 (pass 1826): an EMPTY/missing state silently returned null here
+  // even though tzForState defaults the meter to America/Phoenix — so the
+  // quick-start, refine, upload, and bill paths (which call this helper with
+  // site.state) produced NO timezone disclosure for state-less sites, while
+  // sites.create warned via its own dedicated branch. Parity: the helper now
+  // covers the empty case itself. sites.create checks !input.state FIRST and
+  // keeps its richer combined tz+climate-zone wording.
+  if (!st) {
+    return `No state is recorded for this site, so the meter timezone defaults to America/Phoenix. Time-of-use periods, demand windows, and coincident-peak seasons may be shifted by several hours if that is wrong — add a state (2-letter USPS code) to correct the timezone.`;
+  }
   return null;
 }
 
@@ -940,11 +953,16 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   // assigned rate — an arbitrary seeded tariff can materially shift projections.
   const tariffBasisDisclosure = current
     ? currentStateMismatch
-      ? // Batch-36 (pass 1376): state EXPLICITLY that the potentially-ineligible
-        // assigned rate is still the one used for the cost basis — the previous
-        // wording ("verify the assignment") let a customer infer an eligible
-        // substitute rate had been used instead.
-        `Cost basis: your assigned rate ${chosen.utilityName} ${chosen.name} is used for these figures even though its eligibility list does not include this site's state (${site.state ?? "unknown"}) — no substitute rate was applied; verify the assignment is correct.`
+      ? // Batch-36 (pass 1376) + Batch-42 (pass 1796): POLICY — the assigned rate
+        // is priced even when its eligibility list mismatches the site's state,
+        // because the assignment is the user's own declaration of what they are
+        // BILLED on; silently substituting a different "eligible" rate would
+        // produce projections against a tariff the customer never sees on a
+        // bill (the pre-Batch-33 behavior, which was itself flagged). The
+        // disclosure must therefore carry the full consequence: the figures
+        // are only as valid as the assignment, and the user has exactly two
+        // resolution paths (fix the assignment, or fix the site's state).
+        `Cost basis: your assigned rate ${chosen.utilityName} ${chosen.name} is used for these figures even though its eligibility list does not include this site's state (${site.state ?? "unknown"}) — no substitute rate was applied. These projections are only as valid as that assignment: if the rate is wrong, correct it on the meter; if the site's state is wrong, correct it on the site. Until then, treat all cost figures here as unverified.`
       : null
     : utilityMatch
       ? `Cost basis: ${chosen.utilityName} ${chosen.name} matched by utility name — assign your actual rate on the meter for firmer numbers.`

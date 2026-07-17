@@ -434,6 +434,35 @@ describe("Scenario engine", () => {
     expect(overnight.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 9);
   });
 
+  it("solar-suppressed residual never deflates the demand setpoint — originalLoad governs the charge cap (Batch-42 pass 1823)", () => {
+    // Original baseline peaks at 12 kW (daytime business load). A large solar
+    // array suppresses the residual to ≤2 kW everywhere. WITHOUT originalLoad,
+    // peakSoFar tracks the residual (max 2) — correct cap. The bug scenario is
+    // subtler: the residual-driven setpoint deflates over time relative to the
+    // customer's ORIGINAL billed peak, so the honest comparison basis is the
+    // pre-solar profile. With originalLoad passed, charging may fill up to the
+    // TRUE baseline peak (12) but never beyond it — and the scenario's metered
+    // import peak must never exceed the original billed peak.
+    const hours = 48;
+    const original: number[] = [];
+    const residualIn: number[] = [];
+    const rate: number[] = [];
+    for (let h = 0; h < hours; h++) {
+      const hod = h % 24;
+      const base = hod >= 8 && hod < 18 ? 12 : 3;
+      original.push(base);
+      residualIn.push(hod >= 8 && hod < 18 ? base - 11 : base); // solar wipes daytime load
+      rate.push(hod >= 15 && hod < 20 ? 0.3 : 0.05);
+    }
+    const { residual } = dispatchBattery(residualIn, { kw: 10, kwh: 20 }, rate, original);
+    const origPeak = Math.max(...original); // 12 — the billed baseline peak
+    const newPeak = Math.max(...residual.map((v) => Math.max(v, 0)));
+    expect(newPeak).toBeLessThanOrEqual(origPeak + 1e-9);
+    // and charging is allowed above the residual's own max (proves the
+    // original-profile setpoint, not the deflated residual one, is in effect)
+    expect(newPeak).toBeGreaterThan(Math.max(...residualIn));
+  });
+
   it("export-only sites never gain a manufactured import peak from grid-charging (Batch-41 passes 1754/1763/1769)", () => {
     // ALL hours export (negative residual), zero import history — peakSoFar
     // stays 0. The removed Batch-40 special case charged at full inverter rate

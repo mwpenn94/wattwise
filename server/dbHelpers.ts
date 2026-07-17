@@ -443,11 +443,19 @@ export async function createBill(data: typeof bills.$inferInsert, userId: number
 export async function listBills(siteId: number, userId: number) {
   await assertSiteOwner(siteId, userId);
   const db = await requireDb();
+  // Batch-42 (pass 1836): defense-in-depth — the query itself binds rows to
+  // sites.userId instead of trusting the meters.siteId join alone. Without
+  // this, a meter row whose siteId was erroneously (or via some future write
+  // path, maliciously) repointed at another user's site would leak that
+  // user's bills through this endpoint even though assertSiteOwner passed
+  // for the caller's own siteId. The sites join makes cross-tenant rows
+  // structurally unreturnable regardless of meter-row integrity.
   return db
     .select({ bill: bills })
     .from(bills)
     .innerJoin(meters, eq(bills.meterId, meters.id))
-    .where(eq(meters.siteId, siteId))
+    .innerJoin(sites, eq(meters.siteId, sites.id))
+    .where(and(eq(meters.siteId, siteId), eq(sites.userId, userId)))
     .orderBy(desc(bills.periodStart))
     .then((rows) => rows.map((r) => r.bill));
 }

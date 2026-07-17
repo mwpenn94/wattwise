@@ -421,17 +421,31 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
 
   if (demand) {
     if (demand.loadFactor < 0.35) {
+      // Batch-42 (pass 1809): the insight's cost claim must match the PRICED
+      // rate structure. Firing "demand charges are outsized" when the current
+      // rate is unpriced (currentCost null) or carries NO demand/CP charges
+      // misleads a facility manager into fixing a problem their rate doesn't
+      // bill for. The peaky-profile FACT is still reported — only the cost
+      // framing is conditioned. (KPI sub-text got the same fix in Batch-40.)
+      const demandBilled = currentCost != null && currentCost.breakdown.demand + (currentCost.breakdown.cp ?? 0) > 0;
+      const rateUnpriced = currentCost == null;
       insightRows.push({
         siteId: site.id,
         meterId: meter?.id ?? null,
         analysisId,
         kind: "load_factor",
-        title: `Low load factor (${(demand.loadFactor * 100).toFixed(0)}%) — demand charges are outsized for your usage`,
-        body: `Your average load is only ${(demand.loadFactor * 100).toFixed(0)}% of your peak (${demand.peakKw.toFixed(1)} kW at ${new Date(demand.peakTimestamp).toLocaleString("en-US", { timeZone: tz })}). Flattening short peaks (staggering equipment starts, load scheduling) directly reduces demand charges.`,
-        severity: "opportunity",
+        title: demandBilled
+          ? `Low load factor (${(demand.loadFactor * 100).toFixed(0)}%) — demand charges are outsized for your usage`
+          : `Low load factor (${(demand.loadFactor * 100).toFixed(0)}%) — peaky profile detected`,
+        body: demandBilled
+          ? `Your average load is only ${(demand.loadFactor * 100).toFixed(0)}% of your peak (${demand.peakKw.toFixed(1)} kW at ${new Date(demand.peakTimestamp).toLocaleString("en-US", { timeZone: tz })}). Flattening short peaks (staggering equipment starts, load scheduling) directly reduces demand charges.`
+          : rateUnpriced
+            ? `Your average load is only ${(demand.loadFactor * 100).toFixed(0)}% of your peak (${demand.peakKw.toFixed(1)} kW at ${new Date(demand.peakTimestamp).toLocaleString("en-US", { timeZone: tz })}). This COULD be costly if your tariff bills demand charges — your current rate could not be priced, so the cost impact is unknown. Assign your actual rate to quantify it.`
+            : `Your average load is only ${(demand.loadFactor * 100).toFixed(0)}% of your peak (${demand.peakKw.toFixed(1)} kW at ${new Date(demand.peakTimestamp).toLocaleString("en-US", { timeZone: tz })}). Your current rate carries no demand or coincident-peak charges, so this profile is not costing you extra today — but it would matter on demand-billed rates, including some in the comparison table.`,
+        severity: demandBilled ? "opportunity" : "info",
         disaggregationMethod: disaggMethod,
         confidence: "high",
-        provenance: { source: "interval_data", method: "demand_analytics" },
+        provenance: { source: "interval_data", method: "demand_analytics", demandBilled, rateUnpriced },
         metrics: { loadFactor: demand.loadFactor, peakKw: demand.peakKw },
       });
     }
