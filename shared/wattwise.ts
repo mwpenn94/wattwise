@@ -185,6 +185,10 @@ export interface CostBreakdown {
   cp: number | null; // null = omitted (no interval data)
   cpMethodology: "cp_proxy_top_n_customer_peaks" | "cp_omitted_no_interval_data";
   cpTopNApplied?: number;
+  /** Batch-40 (pass 1742): uplift added by a tariff minimum-bill floor, kept
+   * separate so energy/demand/fixed reflect actual metered charges and
+   * Σ(components) − export ≡ total holds. 0 when no floor triggered. */
+  minBillAdjustment?: number;
   total: number;
 }
 

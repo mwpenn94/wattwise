@@ -89,7 +89,7 @@ export default function Dashboard() {
     demand?: Demand | null;
     benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
     emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number } | null;
-    currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null } } | null;
+    currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
     tariffComparisons?: Array<{
       tariffName: string;
       utilityName: string;
@@ -211,12 +211,19 @@ export default function Dashboard() {
              measured interval points (pipeline.ts hasIntervals gate) — archetype
              sites never reach these branches — so the sub-text explicitly names
              its measured-interval provenance to keep that basis visible. */
+          /* Batch-40 (pass 1748): when the current rate could not be priced at
+             all (no cost basis → breakdown null/undefined), we cannot claim the
+             rate "has no demand charges" — say the cost impact is unknown. The
+             "(yours has none)" claim only renders when a priced breakdown
+             affirmatively shows $0 demand + $0 CP. */
           sub={
             demand
               ? demand.loadFactor < 0.4
-                ? (costInsight?.breakdown?.demand ?? 0) + (costInsight?.breakdown?.cp ?? 0) > 0
-                  ? "peaky measured profile — costly on your demand-charge rate"
-                  : "peaky measured profile — would matter only on a rate with demand charges (yours has none)"
+                ? costInsight?.breakdown == null
+                  ? "peaky measured profile — cost impact unknown (current rate could not be priced)"
+                  : (costInsight.breakdown.demand ?? 0) + (costInsight.breakdown.cp ?? 0) > 0
+                    ? "peaky measured profile — costly on your demand-charge rate"
+                    : "peaky measured profile — would matter only on a rate with demand charges (yours has none)"
                 : "reasonably flat"
               : ""
           }
@@ -355,6 +362,11 @@ export default function Dashboard() {
                       windowed demand in the engine breakdown — omitting this line made
                       energy+demand+fixed visibly fall short of total for CP tariffs. */}
                   {(costInsight.breakdown.cp ?? 0) > 0 && <span>coincident-peak {fmtUsd(costInsight.breakdown.cp)}</span>}
+                  {/* Batch-40 (pass 1742): minimum-bill uplift is its own line so
+                      components always sum to total — not silently folded in. */}
+                  {(costInsight.breakdown.minBillAdjustment ?? 0) > 0 && (
+                    <span>min-bill adj {fmtUsd(costInsight.breakdown.minBillAdjustment ?? 0)}</span>
+                  )}
                   <span className="text-foreground">total {fmtUsd(costInsight.breakdown.total)}</span>
                 </div>
                 <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">

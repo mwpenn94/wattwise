@@ -164,6 +164,14 @@ function hourSpan(hourStart: number, hourEnd: number): number {
 }
 
 function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFlag?: { used: boolean }): number {
+  // Batch-40 (pass 1746) invariant: pricing NEVER consults eligibility. State/
+  // sector/size eligibility (tariffEligible) gates tariff SELECTION upstream;
+  // once a structure reaches costOnTariff it prices every hour from its own
+  // TOU periods — so the buildScenarioBasis disclosure "your assigned
+  // (ineligible) rate is used for these figures; no substitute rate was
+  // applied" is literally true. The widest-coverage fallback below applies
+  // only to HOURS no defined period covers (a period-definition gap, disclosed
+  // via touFallback.used), never to eligibility mismatches.
   const { month, dow, hour } = localParts(ts, tz);
   // Most-specific matching period wins regardless of array order (deliverable
   // convergence cycle 1, pass 2): specificity = narrower month set + narrower
@@ -271,6 +279,7 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
   const detailByMonth = new Map(monthlyDetails.map((m) => [m.month, m]));
 
   let energyTotal = 0;
+  let minBillTotal = 0; // Batch-40 (pass 1742): explicit minimum-bill uplift component
   let demandTotal = 0;
   let fixedTotal = 0;
   let exportTotal = 0;
@@ -333,12 +342,24 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     // export credits reduce the bill after the minimum floor is established,
     // so exporters are not silently stripped of credit value by the floor.
     let mCharges = mEnergy + mDemand + mFixed;
-    if (structure.minBill != null && mCharges < structure.minBill) mCharges = structure.minBill;
+    // Batch-40 (pass 1742): the minimum-bill uplift is tracked as an EXPLICIT
+    // component instead of being folded invisibly into the monthly total. The
+    // old code raised monthly totals to the floor while breakdown.energy/
+    // demand/fixed kept pre-floor values — so Σ(components) understated
+    // breakdown.total whenever minBill triggered, misleading users about what
+    // drove the bill. minBillTotal now carries the uplift so
+    // Σ(energy+demand+fixed+cp+minBillAdjustment) − export ≡ total holds.
+    let mMinBillUplift = 0;
+    if (structure.minBill != null && mCharges < structure.minBill) {
+      mMinBillUplift = structure.minBill - mCharges;
+      mCharges = structure.minBill;
+    }
     const mTotal = mCharges - mExport;
     energyTotal += mEnergy;
     demandTotal += mDemand;
     fixedTotal += mFixed;
     exportTotal += mExport;
+    minBillTotal += mMinBillUplift;
     // Batch-30 (pass 1072): cp starts 0 here; the CP fold below fills it so
     // Σ(monthly.demand) ≡ breakdown.demand and Σ(monthly.cp) ≡ breakdown.cp —
     // monthly rows and the aggregate breakdown use identical line semantics.
@@ -441,7 +462,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     );
   }
 
-  const total = energyTotal + demandTotal + fixedTotal + (cp ?? 0) - exportTotal;
+  if (minBillTotal > 0) {
+    disclosures.push(
+      `A minimum-bill floor raised charges by $${minBillTotal.toFixed(2)} across the billed span — shown as a separate "minimum-bill adjustment" line so the energy/demand/fixed components still reflect actual metered charges.`,
+    );
+  }
+  const total = energyTotal + demandTotal + fixedTotal + (cp ?? 0) + minBillTotal - exportTotal;
   return {
     breakdown: {
       energy: energyTotal,
@@ -453,6 +479,7 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       cp,
       cpMethodology,
       cpTopNApplied,
+      minBillAdjustment: minBillTotal,
       total,
     },
     monthlyDetails,

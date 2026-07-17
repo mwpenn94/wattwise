@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { fitCaltrackMonthly, intervalsToMonthly, type MonthlyUsage, type MonthNormalRow } from "./analytics/baseline";
 import { applyRatchet, computeDemandAnalytics, costOnTariff, tariffEligible } from "./analytics/tariffEngine";
-import { runScenario } from "./analytics/scenarios";
+import { dispatchBattery, runScenario } from "./analytics/scenarios";
 import {
   FREE_TIER_MAX_COST_USD,
   LABEL_CP_ESTIMATED,
@@ -131,6 +131,28 @@ describe("Exact-rules tariff engine", () => {
     const kwh = pts.reduce((s, p) => s + p.usage, 0);
     expect(res.breakdown.total).toBeCloseTo(20 * 12 + kwh * 0.1, 0);
     expect(res.breakdown.cpMethodology).toBeDefined();
+  });
+
+  it("minimum-bill uplift is an explicit component: Σ(components) − export ≡ total (Batch-40 pass 1742)", () => {
+    // A floor far above actual charges forces the min-bill every month.
+    const floored: TariffStructure = { ...FLAT, minBill: 1_000_000 };
+    const res = costOnTariff(pts, floored, { tz: "UTC" });
+    expect(res.breakdown.minBillAdjustment ?? 0).toBeGreaterThan(0);
+    const componentSum =
+      res.breakdown.energy +
+      res.breakdown.demand +
+      res.breakdown.fixed +
+      (res.breakdown.cp ?? 0) +
+      (res.breakdown.minBillAdjustment ?? 0);
+    expect(res.breakdown.total).toBeCloseTo(componentSum, 6);
+    // Monthly totals must also reconcile with the annual total.
+    const monthlySum = res.monthlyCosts.reduce((s, m) => s + m.total, 0);
+    expect(monthlySum).toBeCloseTo(res.breakdown.total, 6);
+    // And the uplift is disclosed.
+    expect(res.disclosures.some((d) => d.includes("minimum-bill"))).toBe(true);
+    // Without a floor the adjustment is zero.
+    const noFloor = costOnTariff(pts, FLAT, { tz: "UTC" });
+    expect(noFloor.breakdown.minBillAdjustment ?? 0).toBe(0);
   });
 
   it("TOU pricing bills on-peak energy above flat-only pricing and includes demand charges", () => {
@@ -369,6 +391,30 @@ describe("Scenario engine", () => {
   // Batch-37 (pass 1493): climate zone lookup is case/whitespace-normalized —
   // a lowercase '2b' must yield the SAME solar production as '2B', never the
   // generic fallback (which would silently misprice while claiming a zone match).
+  it("solar-heavy sites (negative residual) still grid-charge; charging never raises the import peak (Batch-40 pass 1743)", () => {
+    // Post-solar residual: mostly negative (export) with a few small import hours.
+    // Old peakSoFar logic tracked raw load max = 0 on day-1 export hours →
+    // headroom clamped to 0 → grid-charging permanently blocked.
+    const hours = 48;
+    const load: number[] = [];
+    const rate: number[] = [];
+    for (let h = 0; h < hours; h++) {
+      const hod = h % 24;
+      load.push(hod >= 8 && hod < 18 ? -5 : 2); // daytime export, small night import
+      rate.push(hod >= 15 && hod < 20 ? 0.3 : 0.05); // clear TOU spread
+    }
+    const { residual, cycled } = dispatchBattery(load, { kw: 10, kwh: 20 }, rate);
+    // The battery must actually cycle (old code: cycled stalls at solar-surplus-only).
+    expect(cycled).toBeGreaterThan(0);
+    // Grid-charging must never raise the import peak above the original positive max.
+    const origPeak = Math.max(...load.map((v) => Math.max(v, 0)));
+    const newPeak = Math.max(...residual.map((v) => Math.max(v, 0)));
+    expect(newPeak).toBeLessThanOrEqual(origPeak + 1e-9);
+    // Physics: battery cannot create energy — net delivered ≤ net charged.
+    const netDelta = residual.reduce((s, v) => s + v, 0) - load.reduce((s, v) => s + v, 0);
+    expect(netDelta).toBeGreaterThanOrEqual(-1e-9); // losses mean net load never decreases
+  });
+
   it("solar yield lookup is case-insensitive (lowercase zone matches, no silent fallback)", () => {
     const upper = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, FLAT, "2B", 850, "medium", false);
     const lower = runScenario(hourly, { kind: "solar", solarKwDc: 100 }, FLAT, "2b", 850, "medium", false);
