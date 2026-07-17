@@ -109,6 +109,36 @@ export const appRouter = router({
           attrSource: "user_entered",
         });
       });
+      // Batch-39 (passes 1586/1626): the quick-start, file-upload, and bill-entry
+      // paths all disclose timezone assignment risk; the direct create path was the
+      // one silent exception. Two cases matter: (a) a split-timezone state where the
+      // dominant zone may be wrong for this site, and (b) NO state at all, where
+      // tzForState falls back to America/Phoenix and inferClimateZone falls back to
+      // the US-median zone — both affect TOU periods, demand windows, and CP seasons.
+      const createTzNote = tzAmbiguityNote(input.state);
+      if (createTzNote) {
+        await h.addInsight({
+          siteId: id,
+          kind: "intake_assumptions",
+          title: "Timezone assumption — split-timezone state",
+          body: createTzNote,
+          severity: "info",
+          confidence: "low",
+          provenance: { method: "site_create_tz_disclosure_v1", state: input.state, tzAmbiguous: true },
+          metrics: null,
+        });
+      } else if (!input.state) {
+        await h.addInsight({
+          siteId: id,
+          kind: "intake_assumptions",
+          title: "No state provided — timezone and climate zone are fallback assumptions",
+          body: `No state was provided for this site, so the meter timezone defaults to America/Phoenix and the climate zone defaults to the US-median (${input.climateZone ?? inferClimateZone(input.zip, input.state)}). Time-of-use periods, demand windows, coincident-peak seasons, and archetype baselines may be wrong for your actual location — add a state or ZIP to correct them.`,
+          severity: "warning",
+          confidence: "low",
+          provenance: { method: "site_create_tz_disclosure_v1", state: null, tzFallback: "America/Phoenix" },
+          metrics: null,
+        });
+      }
       await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name, hypothetical: input.isHypothetical });
       return { id };
     }),
@@ -210,6 +240,24 @@ export const appRouter = router({
           ...(provided.state || provided.zip ? { climateZone: inferClimateZone(nextZip, nextState) } : {}),
           ...(coreProvided && site.attrSource === "quick_start_defaults" ? { attrSource: "user_entered" } : {}),
         });
+        // Batch-39 (pass 1626): a refine that sets/changes the state must carry the
+        // same split-timezone disclosure as every creation path — the new state
+        // silently re-derives the meter timezone for all downstream TOU math.
+        if (provided.state) {
+          const refineTzNote = tzAmbiguityNote(provided.state as string);
+          if (refineTzNote) {
+            await h.addInsight({
+              siteId,
+              kind: "intake_assumptions",
+              title: "Timezone assumption — split-timezone state",
+              body: refineTzNote,
+              severity: "info",
+              confidence: "low",
+              provenance: { method: "site_refine_tz_disclosure_v1", state: provided.state, tzAmbiguous: true },
+              metrics: null,
+            });
+          }
+        }
         await h.audit(ctx.user.id, "site_refined", "site", String(siteId), { fields: Object.keys(provided) });
         return { ok: true as const, updated: Object.keys(provided) };
       }),

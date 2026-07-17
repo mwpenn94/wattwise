@@ -119,6 +119,19 @@ export function applyRatchet(
       // lookback INCLUDING current). For pct < 1 the inclusion is a no-op on
       // the current month itself (pct×own ≤ own), but it makes the convention
       // explicit and correct for pct ≥ 1 riders.
+      //
+      // Batch-39 (passes 1602/1622) — SUMMER-RATCHET SEMANTICS, made explicit
+      // because two reviews read `applicablePeriod: "summer"` in opposite ways:
+      // this field scopes WHICH months' peaks feed the ratchet DETERMINANT
+      // (summer-season peaks only, May–Oct), NOT which months the resulting
+      // floor is billed in. The floor applies to EVERY billing month, including
+      // winter — that is the defining behavior of the industry-standard summer
+      // ratchet (e.g. Georgia Power PLM, Duke I/OPT: winter billed demand =
+      // max(actual, pct × highest summer peak in the lookback)). Filtering
+      // non-summer months OUT of the determinant is therefore correct, and
+      // applying the floor IN non-summer months is also correct. All currently
+      // seeded tariffs use applicablePeriod "all", so this branch is dormant
+      // with seed data; it is covered by a dedicated unit test.
       const lookStart = Math.max(0, i - ratchet.lookbackMonths);
       let lookPeak = 0;
       for (let j = lookStart; j <= i; j++) {
@@ -347,7 +360,6 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       // + seeds); annualized here as ratePerKw × 12 months (cycle 1, pass 12:
       // unit semantics made explicit rather than ambiguous annual-vs-monthly).
       const cpMonths = structure.cp.chargeMonths ?? 12;
-      cp = avgCpKw * structure.cp.ratePerKw * cpMonths;
       cpMethodology = "cp_proxy_top_n_customer_peaks";
       cpTopNApplied = topN;
       // Batch-13 (pass 62): fold the CP $/kW-month charge into monthlyCosts so
@@ -358,6 +370,14 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       // the months actually present, capped at cpMonths).
       const cpPerMonth = avgCpKw * structure.cp.ratePerKw;
       const cpMonthsBilled = Math.min(cpMonths, monthlyCosts.length);
+      // Batch-39 (pass 1642): breakdown.cp previously carried the FULL
+      // cpMonths determinant while energy/demand/fixed cover only the
+      // months-with-data span — an internally inconsistent breakdown whose
+      // Σ(monthly.cp) ≠ breakdown.cp. All components now share the same
+      // coverage convention: cp = billed months present in the data, and the
+      // un-billable remainder is DISCLOSED (annualize() scales by coverage,
+      // so downstream annual figures are unaffected).
+      cp = cpPerMonth * cpMonthsBilled;
       let cpAllocated = 0;
       for (let i = 0; i < monthlyCosts.length && i < cpMonthsBilled; i++) {
         // Batch-30 (pass 1072): allocate to the dedicated cp field, NOT demand —
@@ -366,19 +386,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
         monthlyCosts[i].total += cpPerMonth;
         cpAllocated += cpPerMonth;
       }
-      // Remainder (cpMonths beyond the data span) stays in the annual cp figure
-      // and is disclosed — it cannot be attributed to a month with no data.
-      // Batch-19 (pass 522): condition directly on the CAUSE (fewer billed months
-      // than the determinant spans) instead of a float comparison of derived
-      // totals — cpAllocated < cp is mathematically guaranteed exactly when
-      // cpMonthsBilled < cpMonths, so the old epsilon test was an indirect,
-      // rounding-fragile restatement of this condition. `cpAllocated` remains
-      // as the reconciliation accumulator (kept: it documents the Batch-13
-      // Σ(monthly) ≡ annual invariant).
+      // Batch-13 Σ(monthly) ≡ annual invariant now holds by construction:
+      // cpAllocated === cp exactly (same per-month charge, same month count).
       void cpAllocated;
       if (cpMonthsBilled < cpMonths) {
         disclosures.push(
-          `CP charge spans ${cpMonths} billing months but only ${cpMonthsBilled} months of data are present — monthly rows include ${cpMonthsBilled} month(s) of CP charges; the annual total includes the full ${cpMonths}-month determinant.`,
+          `CP charge spans ${cpMonths} billing months but only ${cpMonthsBilled} months of data are present — the cost shown includes ${cpMonthsBilled} month(s) of CP charges (matching the data span, like all other components); a full billing year would add approximately $${(cpPerMonth * (cpMonths - cpMonthsBilled)).toFixed(0)} more in CP charges.`,
         );
       }
       disclosures.push(

@@ -8,8 +8,10 @@
 import {
   BATTERY_DEFAULTS,
   BATTERY_DISCLOSURE,
+  DEFAULT_TZ,
   IntervalPoint,
   LABEL_NORMAL_YEAR,
+  localParts,
   ScenarioResults,
   SEQUENTIAL_DISPATCH_DISCLOSURE,
   SOLAR_DEFAULTS,
@@ -97,31 +99,32 @@ export function dispatchBattery(
   let soc = usable * BATTERY_DEFAULTS.initialSoC;
   let cycled = 0;
 
-  // Rate thresholds: charge below 30th percentile, discharge above 80th.
-  // Batch-21 (pass 563): filter non-finite values BEFORE sorting — sort
-  // comparators receiving NaN are implementation-defined, so a single NaN in
-  // the rate signal could scramble the quantile indices and make both
-  // thresholds NaN, silently disabling every charge/discharge decision. With
-  // an empty/contaminated signal the battery stays idle (thresholds ±Infinity)
-  // rather than dispatching against garbage.
+  // Rate thresholds — Batch-39 (pass 1660): derived from distinct rate LEVELS,
+  // not percentile positions. The old 30th/80th-percentile approach silently
+  // disabled dispatch on realistic TOU tariffs: a summer-weekday-afternoon
+  // on-peak window covers only ~5% of the year's hours, so BOTH percentiles
+  // landed on the off-peak rate, the flat-signal guard tripped, and a battery
+  // facing an obvious 0.07/0.22 arbitrage spread sat idle all year (the
+  // strengthened battery vitest exposed this: zero kWh moved, $0 delta).
+  // Level-based thresholds are position-free: charge at the CHEAPEST distinct
+  // level, discharge at the MOST EXPENSIVE, regardless of how few hours the
+  // peak window spans. Batch-21 (pass 563) NaN filtering retained. Batch-27
+  // (pass 929) flat-signal semantics retained: a single distinct level means
+  // no spread to arbitrage — rate-driven dispatch stays disabled (±Infinity)
+  // and only solar-surplus absorption operates.
   const finiteRates = hourlyRate.filter((r) => Number.isFinite(r));
-  const sortedRates = finiteRates.sort((a, b) => a - b);
-  let chargeThresh = sortedRates.length > 0 ? sortedRates[Math.floor(sortedRates.length * 0.3)] : -Infinity;
-  let dischargeThresh = sortedRates.length > 0 ? sortedRates[Math.floor(sortedRates.length * 0.8)] : Infinity;
-  // Batch-27 (pass 929): on a flat rate signal the 30th/80th percentiles
-  // collapse to the same value, making `rate <= chargeThresh` AND
-  // `rate >= dischargeThresh` both true for every hour — the else-if order
-  // would then GRID-CHARGE at every hour and never discharge (worse than
-  // idle: pure added load + losses with zero arbitrage value). With no price
-  // spread there is nothing to arbitrage — disable rate-driven dispatch
-  // explicitly; solar-surplus absorption (residual<0 branch) still operates.
-  if (!(chargeThresh < dischargeThresh)) {
-    chargeThresh = -Infinity;
-    dischargeThresh = Infinity;
+  const levels = Array.from(new Set(finiteRates)).sort((a, b) => a - b);
+  let chargeThresh = -Infinity;
+  let dischargeThresh = Infinity;
+  if (levels.length >= 2) {
+    chargeThresh = levels[0];
+    dischargeThresh = levels[levels.length - 1];
   }
 
+  let peakSoFar = 0; // running max of the ORIGINAL load (causal demand-setpoint proxy)
   for (let h = 0; h < residual.length; h++) {
     const rate = hourlyRate[h] ?? 0;
+    if (load[h] > peakSoFar) peakSoFar = load[h];
     // RTE model (deliverable convergence cycle 1, passes 3/9/19): full
     // round-trip losses are taken on the charge leg — energy stored in SoC is
     // input kWh × rte; discharge delivers SoC kWh 1:1. Total delivered energy
@@ -133,8 +136,19 @@ export function dispatchBattery(
       soc += charge * rte;
       residual[h] += charge;
     } else if (rate <= chargeThresh && soc < usable) {
+      // Batch-39 (pass 1660): PEAK-AWARE charge cap. Naive grid-charging at
+      // full inverter rate during cheap hours can CREATE a new billing peak
+      // (e.g. +50 kW on top of a 120 kW business-hours load in a cheap-rate
+      // shoulder month → 170 kW new max), silently trading energy-arbitrage
+      // savings for a larger demand charge — the debug trace showed demand
+      // +$675/yr eating a third of the energy savings. A real BMS charges
+      // below the demand setpoint; model that by capping charge so residual
+      // never exceeds the highest load seen so far in the ORIGINAL profile
+      // (a conservative, causal proxy for the site's demand setpoint — uses
+      // no future information).
+      const headroom = Math.max(0, peakSoFar - residual[h]);
       const room = usable - soc;
-      const charge = Math.min(maxRate, room / rte);
+      const charge = Math.min(maxRate, room / rte, headroom);
       soc += charge * rte;
       residual[h] += charge; // grid charging adds load
     } else if (rate >= dischargeThresh && soc > 0 && residual[h] > 0) {
@@ -182,13 +196,22 @@ function widestCoverageRate(structure: TariffStructure): number {
   return widest ? widest.rate : 0;
 }
 
-export function hourlyRateSignal(structure: TariffStructure, refYear = 2025): number[] {
+export function hourlyRateSignal(structure: TariffStructure, refYear = 2025, tz: string = DEFAULT_TZ): number[] {
   const out: number[] = new Array(8760);
   const start = new Date(refYear, 0, 1).getTime();
   const fallbackRate = widestCoverageRate(structure);
   for (let h = 0; h < 8760; h++) {
     const ts = start + h * 3600_000;
-    const d = new Date(ts);
+    // Batch-39 (pass 1660): the dispatch signal MUST evaluate TOU windows in
+    // the SAME timezone costOnTariff bills in (localParts/tz), not the server's
+    // local clock (`new Date(ts).getHours()`). The old server-local evaluation
+    // shifted every on-peak window by the UTC↔tariff-tz offset (7h for the
+    // Phoenix default on a UTC server), so the battery discharged into hours
+    // that billing priced at OFF-peak — dispatch looked profitable to itself
+    // while the bill went UP (the strengthened battery vitest caught the
+    // scenario costing +$2.1k/yr instead of saving).
+    const lp = localParts(ts, tz);
+    const d = { getMonth: () => lp.month - 1, getDay: () => lp.dow, getHours: () => lp.hour };
     // Batch-20 (pass 549): explicit matched flag instead of the `rate === 0`
     // sentinel — a legitimately zero-priced period (e.g. free-nights TOU rider)
     // matched but was then clobbered by the widest-coverage fallback, biasing
@@ -371,7 +394,10 @@ export function runScenario(
     const lo = paybackYears * 0.75;
     const hi = paybackYears * 1.5;
     paybackBand = `${lo.toFixed(1)}–${hi.toFixed(1)} years`;
-    disclosures.push("Payback shown as a range reflecting modeling uncertainty — the band spans 75% to 150% of the point estimate; excludes incentives, financing, degradation, and rate escalation.");
+    // Batch-39 (pass 1609): the old wording ("reflecting modeling uncertainty")
+    // implied the band was DERIVED from the scenario's quantified uncertainty. It
+    // is not — it is a fixed heuristic spread. Say so, and say what it ignores.
+    disclosures.push("Payback band is a fixed heuristic spread (75%–150% of the point estimate), not derived from this scenario's quantified savings uncertainty; excludes incentives, financing, degradation, and rate escalation.");
   }
 
   // Batch-26 (passes 903/913): a scenario inherits its baseline's confidence,

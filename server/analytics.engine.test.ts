@@ -237,6 +237,29 @@ describe("Exact-rules tariff engine", () => {
     expect(jul3.ratchetApplied).toBe(true);
   });
 
+  it("summer ratchet: determinant uses summer peaks only, floor applies year-round (Batch-39 passes 1602/1622)", () => {
+    // Industry-standard summer ratchet (Georgia Power PLM / Duke pattern):
+    // applicablePeriod="summer" scopes WHICH months feed the determinant
+    // (May–Oct peaks), NOT which months the floor bills in.
+    const details = applyRatchet(
+      [
+        { month: "2025-07", peakKw: 400, peakTs: 1 }, // summer high — the determinant
+        { month: "2025-11", peakKw: 500, peakTs: 2 }, // WINTER spike — must NOT feed the determinant
+        { month: "2026-01", peakKw: 100, peakTs: 3 }, // winter month — floor STILL applies
+      ],
+      { lookbackMonths: 11, ratchetPct: 0.8, applicablePeriod: "summer" },
+    );
+    // January is billed at 0.8 × 400 (summer peak), not 0.8 × 500 (winter spike)
+    // and not its own 100 kW — the floor applies in a non-summer month.
+    const jan = details.find((b) => b.month === "2026-01")!;
+    expect(jan.billedDemandKw).toBeCloseTo(0.8 * 400, 5);
+    expect(jan.ratchetApplied).toBe(true);
+    // November's own 500 kW peak still bills at actual (billed = max(actual, floor)):
+    const nov = details.find((b) => b.month === "2025-11")!;
+    expect(nov.billedDemandKw).toBe(500);
+    expect(nov.ratchetApplied).toBe(false);
+  });
+
   it("eligibility filter blocks ineligible rates with a reason", () => {
     const verdict = tariffEligible(
       { sector: "residential", commodity: "electric", peakKwMin: null, peakKwMax: 20 },
@@ -278,6 +301,18 @@ describe("Scenario engine", () => {
     const res = runScenario(hourly, { kind: "battery", batteryKw: 50, batteryKwh: 200 }, TOU_DEMAND, "2B", 850, "medium", false);
     expect(res.disclosures.length).toBeGreaterThan(0);
     expect(res.disclosures.join(" ").toLowerCase()).toContain("round-trip");
+    // Batch-39 (pass 1660): assert the PHYSICS, not just the disclosure string.
+    // (a) A battery is not a generator: with <100% round-trip efficiency, net
+    // annual usage must INCREASE or stay flat — a negative deltaUsage means the
+    // simulation created energy from nothing.
+    const elec = res.perCommodity.electric!;
+    expect(elec.deltaUsage).toBeGreaterThanOrEqual(0);
+    // (b) Peak-shave must actually shave: the scenario peak cannot exceed the
+    // baseline peak (deltaDemandKw <= 0), and on a demand-charged TOU tariff
+    // the total cost delta must be negative (demand savings outweigh the
+    // round-trip energy penalty) for a correctly-functioning dispatch.
+    expect(elec.deltaDemandKw).toBeLessThanOrEqual(0);
+    expect(res.siteTotalDeltaCost).toBeLessThan(0);
   });
 
   it("solar+battery combo labels sequential dispatch honestly", () => {

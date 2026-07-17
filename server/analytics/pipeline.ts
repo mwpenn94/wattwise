@@ -390,8 +390,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       meterId: meter?.id ?? null,
       analysisId,
       kind: "data_coverage",
-      title: "Data span too short to annualize — benchmarking and emissions omitted",
-      body: "Your interval data covers fewer than 25 days, which is too short to reliably annualize usage. EUI benchmarking and annual emissions estimates are omitted rather than extrapolated from a short window. Upload at least ~1 month of data (ideally 12 months) to unlock them.",
+      // Batch-39 (pass 1659): the suppression list must be COMPLETE — the
+      // usage-scaled efficiency opportunities (HVAC tune-up, LED retrofit,
+      // baseload reduction) are also gated on annualized usage, and omitting
+      // them silently read as "no opportunities exist" for short-history sites.
+      title: "Data span too short to annualize — benchmarking, emissions, and usage-scaled opportunities omitted",
+      body: "Your interval data covers fewer than 25 days, which is too short to reliably annualize usage. EUI benchmarking, annual emissions estimates, and usage-scaled savings opportunities (HVAC tune-up, LED retrofit, after-hours baseload reduction) are omitted rather than extrapolated from a short window — their absence does NOT mean no savings exist. Rate comparisons and demand-based findings still use your real data. Upload at least ~1 month of data (ideally 12 months) to unlock the rest.",
       severity: "warning",
       disaggregationMethod: disaggMethod,
       confidence: "high",
