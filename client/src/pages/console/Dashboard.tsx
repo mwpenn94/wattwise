@@ -272,11 +272,14 @@ export default function Dashboard() {
           /* Batch-16 (pass 268): eGRID provenance label is unconditional whenever a figure is shown.
              Batch-49 (pass 2466b): when neither the ZIP3 crosswalk nor the state resolved an eGRID
              subregion (mapped === false, e.g. territories like PR/GU), citing "AZNM · eGRID annual avg"
-             misattributes the region — name the fallback explicitly instead. */
+             misattributes the region — name the fallback explicitly instead.
+             Batch-51 (passes 2618/2628): in the unresolved case the stored subregion IS the
+             unverified default — naming it ("the AZNM default factor") lends false specificity,
+             so the disclosure stays generic and names no region. */
           sub={
             emissionsInsight
               ? emissionsInsight.mapped === false
-                ? `region unresolved — ${emissionsInsight.subregion ? `the ${emissionsInsight.subregion} default factor` : "a default factor"} was applied, not a verified regional match`
+                ? "region unresolved — a default factor was applied, not a verified regional match"
                 : `${emissionsInsight.subregion ? `${emissionsInsight.subregion} · ` : ""}eGRID annual avg`
               : ""
           }

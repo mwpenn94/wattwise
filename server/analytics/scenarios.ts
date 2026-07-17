@@ -71,6 +71,12 @@ export function solarProduction8760(kwDc: number, climateZone: string): number[]
     raw[h] = solarHourlyShape(h);
     sum += raw[h];
   }
+  // Batch-51 (pass 2633): defensive divide-by-zero guard. If the hourly shape
+  // summed to 0 (unreachable with the current daylight window, but this is the
+  // single point where a shape regression would turn into 8760 NaN/Infinity
+  // values poisoning every downstream cost figure), return an all-zero
+  // production profile instead of scaling by annualYield/0.
+  if (!(sum > 0)) return new Array(8760).fill(0);
   const scale = annualYield / sum;
   return raw.map((v) => v * scale);
 }
