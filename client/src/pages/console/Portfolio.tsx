@@ -12,7 +12,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { FolderKanban, Gauge, Leaf, Wallet, Zap } from "lucide-react";
+import { FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Wallet, Zap } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { toast } from "sonner";
 import { fmtNum, fmtUsd } from "@/lib/wattwiseUi";
 import { DisclaimerBanner } from "@/components/Honesty";
 import { Link } from "wouter";
@@ -163,9 +168,126 @@ export default function Portfolio() {
               )}
             </CardContent>
           </Card>
+
+          {/* Site groups management (v1.7 §2.2a) */}
+          <GroupsManager sites={rows.map((r) => ({ siteId: r.siteId, name: r.name }))} />
         </>
       )}
     </div>
+  );
+}
+
+/** Create/delete site groups and toggle site membership — portfolio-scale organization. */
+function GroupsManager({ sites }: { sites: { siteId: number; name: string }[] }) {
+  const utils = trpc.useUtils();
+  const groups = trpc.sites.groups.useQuery();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [form, setForm] = useState<{ name: string; kind: "region" | "manager" | "brand" | "custom" }>({ name: "", kind: "custom" });
+
+  const create = trpc.sites.createGroup.useMutation({
+    onSuccess: async () => {
+      toast.success("Group created");
+      setCreateOpen(false);
+      setForm({ name: "", kind: "custom" });
+      await utils.sites.groups.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const setMembership = trpc.sites.setGroupMembership.useMutation({
+    onSuccess: () => utils.sites.groups.invalidate(),
+    onError: (e) => toast.error(e.message),
+  });
+  const del = trpc.sites.deleteGroup.useMutation({
+    onSuccess: async () => {
+      toast.success("Group deleted");
+      await utils.sites.groups.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="flex flex-row items-center justify-between pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <Tags className="h-4 w-4 text-primary" /> Site groups
+        </CardTitle>
+        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+          <DialogTrigger asChild>
+            <Button size="sm" variant="outline" className="bg-background">
+              <Plus className="mr-1 h-3.5 w-3.5" /> New group
+            </Button>
+          </DialogTrigger>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle className="font-display">New site group</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3">
+              <Input placeholder="Group name (e.g. Midwest region)" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
+              <Select value={form.kind} onValueChange={(v) => setForm((f) => ({ ...f, kind: v as typeof f.kind }))}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="region">Region</SelectItem>
+                  <SelectItem value="manager">Manager</SelectItem>
+                  <SelectItem value="brand">Brand</SelectItem>
+                  <SelectItem value="custom">Custom</SelectItem>
+                </SelectContent>
+              </Select>
+              <Button className="w-full" disabled={!form.name.trim() || create.isPending} onClick={() => create.mutate({ name: form.name.trim(), kind: form.kind })}>
+                {create.isPending ? "Creating…" : "Create group"}
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      </CardHeader>
+      <CardContent>
+        {groups.isLoading ? (
+          <Skeleton className="h-16 w-full" />
+        ) : (groups.data ?? []).length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            No groups yet — group sites by region, manager, or brand to slice the portfolio.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {(groups.data ?? []).map((g) => (
+              <div key={g.id} className="rounded-lg border border-border/70 p-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{g.name}</span>
+                    <Badge variant="secondary" className="text-[10px]">{g.kind}</Badge>
+                    <span className="text-xs text-muted-foreground">{g.siteIds.length} site{g.siteIds.length === 1 ? "" : "s"}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="text-muted-foreground transition-colors hover:text-destructive"
+                    title="Delete group (sites are not deleted)"
+                    onClick={() => {
+                      if (window.confirm(`Delete group “${g.name}”? Sites in it are not affected.`)) del.mutate({ groupId: g.id });
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                {sites.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+                    {sites.map((s) => (
+                      <label key={s.siteId} className="flex cursor-pointer items-center gap-1.5 text-xs">
+                        <Checkbox
+                          checked={g.siteIds.includes(s.siteId)}
+                          onCheckedChange={(v) => setMembership.mutate({ groupId: g.id, siteId: s.siteId, member: v === true })}
+                        />
+                        {s.name}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

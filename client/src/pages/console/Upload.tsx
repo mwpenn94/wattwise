@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
-import { CheckCircle2, FileSpreadsheet, FileUp, Receipt, XCircle } from "lucide-react";
+import { CheckCircle2, FileSpreadsheet, FileUp, Receipt, Trash2, XCircle } from "lucide-react";
 import { fileToBase64 } from "@/lib/wattwiseUi";
 import { DisclaimerBanner } from "@/components/Honesty";
 import { Link } from "wouter";
@@ -36,6 +36,13 @@ export default function Upload() {
 
   const ingest = trpc.uploads.ingest.useMutation();
   const billOcr = trpc.uploads.billOcr.useMutation();
+  const delUpload = trpc.uploads.delete.useMutation({
+    onSuccess: async (res) => {
+      toast.success(`Upload deleted — ${res.removedIntervals.toLocaleString()} readings removed`);
+      await utils.uploads.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
   const billCreate = trpc.bills.create.useMutation();
 
   async function onFiles(files: FileList | null) {
@@ -253,6 +260,7 @@ export default function Upload() {
                   <TableHead className="font-mono text-xs">Rows</TableHead>
                   <TableHead className="font-mono text-xs">Validation</TableHead>
                   <TableHead className="font-mono text-xs">Status</TableHead>
+                  <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -281,11 +289,29 @@ export default function Upload() {
                         u.status
                       )}
                     </TableCell>
+                    <TableCell>
+                      <button
+                        type="button"
+                        className="text-muted-foreground transition-colors hover:text-destructive"
+                        title="Delete upload (removes its ingested readings and bills)"
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Delete “${u.filename}”? Every interval reading and bill ingested from this file will be removed, and affected analyses should be re-run. This cannot be undone.`,
+                            )
+                          ) {
+                            delUpload.mutate({ uploadId: u.id });
+                          }
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </TableCell>
                   </TableRow>
                 ))}
                 {(uploads.data ?? []).length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={6} className="text-center text-sm text-muted-foreground">
                       Nothing uploaded yet.
                     </TableCell>
                   </TableRow>

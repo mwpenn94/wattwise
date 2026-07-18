@@ -164,6 +164,32 @@ export async function updateSite(
   await db.update(sites).set(patch).where(eq(sites.id, siteId));
 }
 
+/** Full site removal with cascade: meters → intervals, plus all derived data.
+ * Derived analytics rows (insights/opportunities/baselines/analyses/scenarios/
+ * bills/geometry/group memberships) reference the site and would orphan. */
+export async function deleteSite(siteId: number, userId: number) {
+  await assertSiteOwner(siteId, userId);
+  const db = await requireDb();
+  const meterRows = await db.select({ id: meters.id }).from(meters).where(eq(meters.siteId, siteId));
+  for (const m of meterRows) {
+    await db.delete(intervals).where(eq(intervals.meterId, m.id));
+  }
+  await db.delete(insights).where(eq(insights.siteId, siteId));
+  await db.delete(opportunities).where(eq(opportunities.siteId, siteId));
+  await db.delete(baselines).where(eq(baselines.siteId, siteId));
+  await db.delete(analyses).where(eq(analyses.siteId, siteId));
+  await db.delete(scenarios).where(eq(scenarios.siteId, siteId));
+  for (const m of meterRows) {
+    await db.delete(bills).where(eq(bills.meterId, m.id));
+  }
+  await db.delete(siteGeometry).where(eq(siteGeometry.siteId, siteId));
+  await db.delete(siteGroupMembers).where(eq(siteGroupMembers.siteId, siteId));
+  await db.delete(meters).where(eq(meters.siteId, siteId));
+  // uploads keep their file provenance but detach from the deleted site
+  await db.update(uploads).set({ siteId: null }).where(eq(uploads.siteId, siteId));
+  await db.delete(sites).where(eq(sites.id, siteId));
+}
+
 export async function countSites(userId: number): Promise<number> {
   const db = await requireDb();
   const rows = await db.select({ n: sql<number>`COUNT(*)` }).from(sites).where(eq(sites.userId, userId));
@@ -182,6 +208,29 @@ export async function createMeter(data: typeof meters.$inferInsert, userId: numb
   const db = await requireDb();
   const res = await db.insert(meters).values(data);
   return Number((res as unknown as [{ insertId: number }])[0].insertId);
+}
+
+/** Meter attribute edit: name, timezone, utility, units. Role/parent go through
+ * setMeterRole (which validates nesting); tariff through setMeterTariff. */
+export async function updateMeter(
+  meterId: number,
+  userId: number,
+  patch: Partial<Pick<typeof meters.$inferInsert, "label" | "timezone" | "usageUnit" | "demandUnit" | "commodity" | "accountNumber">>,
+) {
+  await assertMeterOwner(meterId, userId);
+  const db = await requireDb();
+  await db.update(meters).set(patch).where(eq(meters.id, meterId));
+}
+
+/** Meter removal with cascade: its intervals and bills go with it; any submeters
+ * that pointed at it are detached (parent cleared) rather than deleted. */
+export async function deleteMeter(meterId: number, userId: number) {
+  await assertMeterOwner(meterId, userId);
+  const db = await requireDb();
+  await db.delete(intervals).where(eq(intervals.meterId, meterId));
+  await db.delete(bills).where(eq(bills.meterId, meterId));
+  await db.update(meters).set({ parentMeterId: null }).where(eq(meters.parentMeterId, meterId));
+  await db.delete(meters).where(eq(meters.id, meterId));
 }
 
 export async function setMeterTariff(meterId: number, tariffId: number, userId: number) {
@@ -539,6 +588,33 @@ export async function saveScenario(data: typeof scenarios.$inferInsert) {
   const db = await requireDb();
   const res = await db.insert(scenarios).values(data);
   return Number((res as unknown as [{ insertId: number }])[0].insertId);
+}
+
+export async function renameScenario(scenarioId: number, userId: number, name: string) {
+  const db = await requireDb();
+  const [row] = await db.select({ userId: scenarios.userId }).from(scenarios).where(eq(scenarios.id, scenarioId));
+  if (!row || row.userId !== userId) throw new TenancyError();
+  await db.update(scenarios).set({ name }).where(eq(scenarios.id, scenarioId));
+}
+
+export async function deleteScenario(scenarioId: number, userId: number) {
+  const db = await requireDb();
+  const [row] = await db.select({ userId: scenarios.userId }).from(scenarios).where(eq(scenarios.id, scenarioId));
+  if (!row || row.userId !== userId) throw new TenancyError();
+  await db.delete(scenarios).where(eq(scenarios.id, scenarioId));
+}
+
+/** Upload removal: deletes the upload row AND every interval it ingested
+ * (provenance-linked via intervals.uploadId), so bad files can be fully backed
+ * out. Bills parsed from the upload are also removed. */
+export async function deleteUpload(uploadId: number, userId: number) {
+  const db = await requireDb();
+  const [row] = await db.select({ userId: uploads.userId }).from(uploads).where(eq(uploads.id, uploadId));
+  if (!row || row.userId !== userId) throw new TenancyError();
+  const removedIntervals = await db.delete(intervals).where(eq(intervals.uploadId, uploadId));
+  await db.delete(bills).where(eq(bills.uploadId, uploadId));
+  await db.delete(uploads).where(eq(uploads.id, uploadId));
+  return Number((removedIntervals as unknown as [{ affectedRows?: number }])[0]?.affectedRows ?? 0);
 }
 
 export async function listScenarios(siteId: number, userId: number) {

@@ -166,3 +166,30 @@
 - [x] Bill Builder: composer.ts engine (composition-not-addition, overlap honesty, weakest-chip confidence, rate re-sweep) + BillBuilder UI with presets and plan bar on Scenarios page
 - [x] Pricing page rules: concrete prices ($12/mo, from $29/site/mo), Recommended badge, persona descriptors, value-first free list, jargon fix, setTier WTP audit signal
 - [x] Tests for new schema helpers, estimate endpoint, composition engine (composer.test.ts 8 specs; suite 103 passing)
+
+## Remaining v1.7/v1.9 scope (full absorption — Jul 18 continuation)
+- [ ] §3b Peak Attribution Module: weather split, schedule split, coincidence residual, spike/plateau triage, counterfactual re-pricing, sufficiency gates; attribution card on Dashboard
+- [ ] §3e Prove-It loop: measure_implementations table, "I did this" action, monthly verdict card w/ honesty gates, cumulative verified-savings counter, miss-handling copy
+- [ ] §3k Anti-dashboard home feed: 3-item story feed, verified/projected greeting number, charts inside stories w/ Explore surface, Ask WattWise (Plus) NL → engine dispatch cards
+- [ ] §3g Persona fork: residential/commercial vocabulary + hero rotation + measure library filter (detected from building type, not asked)
+- [ ] §3h Processing proof-of-work: real pipeline stage narration during analysis runs (no theatrical delays)
+- [ ] Empty-of-data home feed runs on estimates with ladder invite (advisor, not zeros)
+- [ ] Add-to-plan on Dashboard opportunity cards → Bill Builder deep link with measure preselected
+- [ ] §3i-2 Portfolio: exception-first ranked view, roll-up KPI header, meter chips w/ role+utility badges, consolidation finding, weather/size-normalized league table, site_groups group-by
+- [ ] Per-commodity utility registries (electric/gas/water) + "one address, three utilities" moment in estimator and site view
+- [ ] §3l Reports: My Energy Plan (Plus, print), Verified Savings Statement (Pro), Practitioner export (CSV+stats), chips in print, footer verify link w/ report_artifacts tokens
+- [ ] §3f Lifecycle: digest settings (monthly, bill-cycle anchored, $-figure rule), quiet defaults
+- [ ] §3j honest labeling: site settings name the active data rung (manual upload today)
+- [ ] Verification deliverable: per-claim URL + screenshot walkthrough so the owner can verify every shipped claim
+
+## Core usability — CRUD + navigation (owner feedback Jul 18, PRIORITY)
+- [ ] Audit: CRUD coverage matrix for sites, meters, tariffs, scenarios, site groups, uploads, implementations
+- [ ] Sites: edit (rename, address/attrs), delete with cascade + confirm, from both Sites list and site context
+- [ ] Meters: create on a site, edit (name, role, parent, timezone, utility), delete with cascade + confirm — visible in UI
+- [ ] Scenarios: delete/rename saved runs
+- [ ] Site groups: manage UI (create/rename/delete, assign sites)
+- [ ] Uploads: delete an upload / clear bad data path
+- [ ] Nav: console ↔ public site escape routes (logo → home, back links everywhere)
+- [ ] Nav: site selector consistency across console pages; no dead-end pages
+- [ ] Nav: breadcrumbs or back affordance on detail views; mobile nav check
+- [ ] Click-through validation of every CRUD flow and nav path (screenshots)

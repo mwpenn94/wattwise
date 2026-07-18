@@ -9,7 +9,24 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Building2, FolderKanban, Plus, Trash2, Zap } from "lucide-react";
+import { Building2, FolderKanban, MoreVertical, Pencil, Plus, Trash2, Zap } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useLocation } from "wouter";
 import { ProvChip } from "@/components/Honesty";
 import QuickStart from "@/components/QuickStart";
@@ -148,7 +165,10 @@ export default function Sites() {
               <CardTitle className="flex items-center gap-2 font-display text-base">
                 <Building2 className="h-4 w-4 text-primary" /> {s.name}
               </CardTitle>
-              {s.isHypothetical ? <ProvChip>hypothetical</ProvChip> : <ProvChip>actual</ProvChip>}
+              <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                {s.isHypothetical ? <ProvChip>hypothetical</ProvChip> : <ProvChip>actual</ProvChip>}
+                <SiteActions site={s} />
+              </div>
             </CardHeader>
             <CardContent>
               <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
@@ -294,6 +314,268 @@ function SiteEntityPicker({ siteId, entityId }: { siteId: number; entityId: numb
   );
 }
 
+/** Per-site actions: rename/edit, delete (with cascade warning), manage meters. */
+function SiteActions({ site }: { site: { id: number; name: string; address?: string | null; city?: string | null; occupancyHours?: unknown; utilityName?: string | null } }) {
+  const utils = trpc.useUtils();
+  const [editOpen, setEditOpen] = useState(false);
+  const [metersOpen, setMetersOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [form, setForm] = useState({
+    name: site.name,
+    address: site.address ?? "",
+    city: site.city ?? "",
+    occupancyHours: typeof site.occupancyHours === "string" ? site.occupancyHours : "",
+    utilityName: site.utilityName ?? "",
+  });
+
+  const update = trpc.sites.update.useMutation({
+    onSuccess: async () => {
+      toast.success("Site updated");
+      setEditOpen(false);
+      await utils.sites.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const del = trpc.sites.delete.useMutation({
+    onSuccess: async () => {
+      toast.success("Site deleted — its meters, data, and analyses were removed");
+      await utils.sites.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Site actions">
+            <MoreVertical className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            onClick={() => {
+              setForm({ name: site.name, address: site.address ?? "", city: site.city ?? "", occupancyHours: typeof site.occupancyHours === "string" ? site.occupancyHours : "", utilityName: site.utilityName ?? "" });
+              setEditOpen(true);
+            }}
+          >
+            <Pencil className="mr-2 h-3.5 w-3.5" /> Edit site
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setMetersOpen(true)}>
+            <Zap className="mr-2 h-3.5 w-3.5" /> Manage meters
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => setConfirmDelete(true)}>
+            <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete site…
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="font-display">Edit site</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div>
+              <Label htmlFor="e-name">Name</Label>
+              <Input id="e-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            </div>
+            <div>
+              <Label htmlFor="e-addr">Address</Label>
+              <Input id="e-addr" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="e-city">City</Label>
+                <Input id="e-city" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} />
+              </div>
+              <div>
+                <Label htmlFor="e-occ">Occupancy hours</Label>
+                <Input id="e-occ" placeholder="e.g. 8-18 weekdays" value={form.occupancyHours} onChange={(e) => setForm({ ...form, occupancyHours: e.target.value })} />
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="e-util">Utility</Label>
+              <Input id="e-util" value={form.utilityName} onChange={(e) => setForm({ ...form, utilityName: e.target.value })} />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Building type, size, and year built are refined from the site's Dashboard — they feed the analysis cascade and carry provenance.
+            </p>
+            <Button
+              disabled={!form.name.trim() || update.isPending}
+              onClick={() =>
+                update.mutate({
+                  siteId: site.id,
+                  name: form.name.trim(),
+                  address: form.address.trim() || null,
+                  city: form.city.trim() || null,
+                  occupancyHours: form.occupancyHours.trim() || null,
+                  utilityName: form.utilityName.trim() || null,
+                })
+              }
+            >
+              {update.isPending ? "Saving…" : "Save changes"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={metersOpen} onOpenChange={setMetersOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="font-display">Meters — {site.name}</DialogTitle>
+          </DialogHeader>
+          <MeterManager siteId={site.id} />
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete “{site.name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the site and everything under it: meters, interval data, bills, analyses, insights, and scenarios. Uploaded files stay in your upload history. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={() => del.mutate({ siteId: site.id })}>
+              {del.isPending ? "Deleting…" : "Delete site"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
+const METER_ROLES = [
+  ["main", "Main"],
+  ["submeter", "Submeter"],
+  ["generation", "Generation"],
+  ["ev", "EV charging"],
+] as const;
+
+/** Full meter CRUD inside the site's meter dialog: add, rename, set role/parent, delete. */
+function MeterManager({ siteId }: { siteId: number }) {
+  const utils = trpc.useUtils();
+  const meters = trpc.sites.meters.useQuery({ siteId });
+  const [newLabel, setNewLabel] = useState("");
+  const [newCommodity, setNewCommodity] = useState<"electric" | "gas" | "water">("electric");
+
+  const refresh = async () => {
+    await utils.sites.meters.invalidate({ siteId });
+  };
+  const create = trpc.sites.createMeter.useMutation({
+    onSuccess: async () => {
+      toast.success("Meter added");
+      setNewLabel("");
+      await refresh();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const update = trpc.sites.updateMeter.useMutation({
+    onSuccess: refresh,
+    onError: (e) => toast.error(e.message),
+  });
+  const setRole = trpc.sites.setMeterRole.useMutation({
+    onSuccess: async () => {
+      toast.success("Meter role updated");
+      await refresh();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const del = trpc.sites.deleteMeter.useMutation({
+    onSuccess: async () => {
+      toast.success("Meter deleted — its readings and bills were removed");
+      await refresh();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const mains = (meters.data ?? []).filter((m) => m.meterRole === "main");
+
+  return (
+    <div className="grid gap-3">
+      {(meters.data ?? []).length === 0 && (
+        <p className="text-sm text-muted-foreground">No meters yet — add one below, or upload interval data and a meter is created automatically.</p>
+      )}
+      {(meters.data ?? []).map((m) => (
+        <div key={m.id} className="rounded-lg border border-border/70 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Zap className="h-3.5 w-3.5 text-primary" />
+            <Input
+              className="h-7 w-40 text-xs"
+              defaultValue={m.label ?? ""}
+              placeholder="Label"
+              onBlur={(e) => {
+                const v = e.target.value.trim();
+                if (v !== (m.label ?? "")) update.mutate({ meterId: m.id, label: v || null });
+              }}
+            />
+            <Badge variant="secondary" className="text-[10px]">{m.commodity}</Badge>
+            <Select
+              value={m.meterRole}
+              onValueChange={(role) =>
+                setRole.mutate({
+                  meterId: m.id,
+                  role: role as "main" | "submeter" | "generation" | "ev",
+                  parentMeterId: role === "submeter" ? (mains.find((p) => p.id !== m.id)?.id ?? null) : null,
+                })
+              }
+            >
+              <SelectTrigger className="h-7 w-32 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {METER_ROLES.map(([v, l]) => (
+                  <SelectItem key={v} value={v}>
+                    {l}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <button
+              type="button"
+              className="ml-auto text-muted-foreground transition-colors hover:text-destructive"
+              title="Delete meter (removes its readings and bills)"
+              onClick={() => {
+                if (window.confirm(`Delete meter “${m.label ?? m.id}”? Its interval readings and bills are removed. This cannot be undone.`)) {
+                  del.mutate({ meterId: m.id });
+                }
+              }}
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </div>
+          {m.meterRole === "submeter" && m.parentMeterId != null && (
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
+              Nested under meter #{m.parentMeterId} — excluded from site totals to avoid double-counting.
+            </p>
+          )}
+        </div>
+      ))}
+      <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
+        <Input className="h-8 w-44 text-xs" placeholder="New meter label" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} />
+        <Select value={newCommodity} onValueChange={(v) => setNewCommodity(v as typeof newCommodity)}>
+          <SelectTrigger className="h-8 w-28 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="electric">Electric</SelectItem>
+            <SelectItem value="gas">Gas</SelectItem>
+            <SelectItem value="water">Water</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button size="sm" className="h-8" disabled={create.isPending} onClick={() => create.mutate({ siteId, label: newLabel.trim() || undefined, commodity: newCommodity })}>
+          <Plus className="mr-1 h-3.5 w-3.5" /> Add meter
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function SiteMeters({ siteId }: { siteId: number }) {
   const meters = trpc.sites.meters.useQuery({ siteId });
   if (!meters.data || meters.data.length === 0) return null;
@@ -301,7 +583,7 @@ function SiteMeters({ siteId }: { siteId: number }) {
     <div className="mt-3 flex flex-wrap gap-1.5">
       {meters.data.map((m) => (
         <span key={m.id} className="inline-flex items-center gap-1 rounded border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-          <Zap className="h-3 w-3 text-primary" /> {m.label} · {m.commodity}
+          <Zap className="h-3 w-3 text-primary" /> {m.label ?? `meter ${m.id}`} · {m.commodity} · {m.meterRole}
         </span>
       ))}
     </div>

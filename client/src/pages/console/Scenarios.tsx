@@ -13,7 +13,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Battery, Lightbulb, PlugZap, Sun } from "lucide-react";
+import { Battery, Lightbulb, MoreVertical, Pencil, PlugZap, Sun, Trash2 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { fmtUsd, fmtNum } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
 import BillBuilder from "@/components/BillBuilder";
@@ -181,7 +189,10 @@ export default function Scenarios() {
                       {r && <ConfidenceBadge level={r.confidence} label={r.confidenceLabel} />}
                     </div>
                   </div>
-                  <span className="font-mono text-xs text-muted-foreground">{new Date(s.createdAt).toLocaleDateString()}</span>
+                  <div className="flex items-center gap-1">
+                    <span className="font-mono text-xs text-muted-foreground">{new Date(s.createdAt).toLocaleDateString()}</span>
+                    <ScenarioActions scenarioId={s.id} name={s.name} siteId={activeSiteId!} />
+                  </div>
                 </CardHeader>
                 <CardContent>
                   {r ? (
@@ -238,5 +249,68 @@ export default function Scenarios() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Rename / delete controls per saved scenario. */
+function ScenarioActions({ scenarioId, name, siteId }: { scenarioId: number; name: string; siteId: number }) {
+  const utils = trpc.useUtils();
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [newName, setNewName] = useState(name);
+  const rename = trpc.scenariosApi.rename.useMutation({
+    onSuccess: async () => {
+      toast.success("Scenario renamed");
+      setRenameOpen(false);
+      await utils.scenariosApi.list.invalidate({ siteId });
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const del = trpc.scenariosApi.delete.useMutation({
+    onSuccess: async () => {
+      toast.success("Scenario deleted");
+      await utils.scenariosApi.list.invalidate({ siteId });
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Scenario actions">
+            <MoreVertical className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            onClick={() => {
+              setNewName(name);
+              setRenameOpen(true);
+            }}
+          >
+            <Pencil className="mr-2 h-3.5 w-3.5" /> Rename
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive focus:text-destructive"
+            onClick={() => {
+              if (window.confirm(`Delete scenario “${name}”? This cannot be undone.`)) del.mutate({ scenarioId });
+            }}
+          >
+            <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="font-display">Rename scenario</DialogTitle>
+          </DialogHeader>
+          <Input value={newName} onChange={(e) => setNewName(e.target.value)} />
+          <Button disabled={!newName.trim() || rename.isPending} onClick={() => rename.mutate({ scenarioId, name: newName.trim() })}>
+            {rename.isPending ? "Saving…" : "Save"}
+          </Button>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

@@ -589,8 +589,85 @@ export const appRouter = router({
         await h.audit(ctx.user.id, "site_refined", "site", String(siteId), { fields: Object.keys(provided) });
         return { ok: true as const, updated: Object.keys(provided) };
       }),
+    /** Direct site edit: rename + core attributes. Distinct from `refine` (which
+     * runs the derivation cascade); this is a plain CRUD update for user control. */
+    update: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          name: z.string().min(1).max(255).optional(),
+          address: z.string().max(512).nullable().optional(),
+          city: z.string().max(128).nullable().optional(),
+          occupancyHours: z.string().max(64).nullable().optional(),
+          utilityName: z.string().max(255).nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { siteId, ...patch } = input;
+        const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+        if (Object.keys(clean).length === 0) return { ok: true as const };
+        await h.updateSite(siteId, ctx.user.id, clean);
+        await h.audit(ctx.user.id, "site_update", "site", String(siteId), { fields: Object.keys(clean) });
+        return { ok: true as const };
+      }),
+    /** Full site removal (cascade: meters, intervals, bills, analytics, geometry,
+     * group memberships). Uploads are detached, not deleted — file provenance survives. */
+    delete: protectedProcedure.input(z.object({ siteId: z.number() })).mutation(async ({ ctx, input }) => {
+      await h.deleteSite(input.siteId, ctx.user.id);
+      await h.audit(ctx.user.id, "site_delete", "site", String(input.siteId), {});
+      return { ok: true as const };
+    }),
     meters: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
       return h.listMeters(input.siteId, ctx.user.id);
+    }),
+    /** Manual meter creation — uploads auto-create meters, but users can also
+     * add one explicitly (e.g. to stage a submeter or gas meter before data). */
+    createMeter: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          label: z.string().max(255).optional(),
+          commodity: z.enum(["electric", "gas", "water"]).default("electric"),
+          timezone: z.string().max(64).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const usageUnit = input.commodity === "electric" ? "kWh" : input.commodity === "gas" ? "therms" : "gallons";
+        const id = await h.createMeter(
+          {
+            siteId: input.siteId,
+            userId: ctx.user.id,
+            commodity: input.commodity,
+            label: input.label ?? null,
+            usageUnit,
+            demandUnit: input.commodity === "electric" ? "kW" : null,
+            ...(input.timezone ? { timezone: input.timezone } : {}),
+          },
+          ctx.user.id,
+        );
+        return { id };
+      }),
+    updateMeter: protectedProcedure
+      .input(
+        z.object({
+          meterId: z.number(),
+          label: z.string().max(255).nullable().optional(),
+          timezone: z.string().max(64).optional(),
+          accountNumber: z.string().max(64).nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { meterId, ...patch } = input;
+        const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+        if (Object.keys(clean).length === 0) return { ok: true as const };
+        await h.updateMeter(meterId, ctx.user.id, clean);
+        return { ok: true as const };
+      }),
+    /** Meter removal (cascade: its intervals + bills; child submeters detach). */
+    deleteMeter: protectedProcedure.input(z.object({ meterId: z.number() })).mutation(async ({ ctx, input }) => {
+      await h.deleteMeter(input.meterId, ctx.user.id);
+      await h.audit(ctx.user.id, "meter_delete", "meter", String(input.meterId), {});
+      return { ok: true as const };
     }),
     setMeterTariff: protectedProcedure
       .input(z.object({ meterId: z.number(), tariffId: z.number() }))
@@ -752,6 +829,14 @@ export const appRouter = router({
   /* ================= uploads / ingestion ================= */
   uploads: router({
     list: protectedProcedure.query(async ({ ctx }) => h.listUploads(ctx.user.id)),
+    /** Back out a bad file: removes the upload row, every interval it ingested,
+     * and any bills parsed from it. Returns how many intervals were removed so
+     * the UI can say exactly what happened. */
+    delete: protectedProcedure.input(z.object({ uploadId: z.number() })).mutation(async ({ ctx, input }) => {
+      const removedIntervals = await h.deleteUpload(input.uploadId, ctx.user.id);
+      await h.audit(ctx.user.id, "upload_delete", "upload", String(input.uploadId), { removedIntervals });
+      return { ok: true as const, removedIntervals };
+    }),
     /** Interval file ingestion: xlsx | csv | espi_xml (base64 payload). */
     ingest: protectedProcedure
       .input(
@@ -1150,6 +1235,16 @@ export const appRouter = router({
   /* ================= scenarios ================= */
   scenariosApi: router({
     list: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => h.listScenarios(input.siteId, ctx.user.id)),
+    rename: protectedProcedure
+      .input(z.object({ scenarioId: z.number(), name: z.string().min(1).max(255) }))
+      .mutation(async ({ ctx, input }) => {
+        await h.renameScenario(input.scenarioId, ctx.user.id, input.name);
+        return { ok: true as const };
+      }),
+    delete: protectedProcedure.input(z.object({ scenarioId: z.number() })).mutation(async ({ ctx, input }) => {
+      await h.deleteScenario(input.scenarioId, ctx.user.id);
+      return { ok: true as const };
+    }),
     run: protectedProcedure
       .input(
         z.object({

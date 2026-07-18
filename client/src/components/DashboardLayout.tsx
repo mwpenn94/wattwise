@@ -187,14 +187,19 @@ function DashboardLayoutContent({
                 <PanelLeft className="h-4 w-4 text-muted-foreground" />
               </button>
               {!isCollapsed ? (
-                <div className="flex items-center gap-2 min-w-0">
+                <button
+                  onClick={() => setLocation("/")}
+                  className="flex items-center gap-2 min-w-0 rounded-md px-1 py-0.5 transition-colors hover:bg-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  title="Back to public site"
+                  aria-label="Back to public site"
+                >
                   <div className="flex h-6 w-6 items-center justify-center rounded bg-primary text-primary-foreground shrink-0">
                     <Zap className="h-4 w-4" />
                   </div>
                   <span className="font-semibold tracking-tight truncate font-display">
                     WattWise
                   </span>
-                </div>
+                </button>
               ) : null}
             </div>
           </SidebarHeader>
@@ -245,6 +250,10 @@ function DashboardLayoutContent({
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem onClick={() => setLocation("/")} className="cursor-pointer">
+                  <Zap className="mr-2 h-4 w-4" />
+                  <span>Public site</span>
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={logout}
                   className="cursor-pointer text-destructive focus:text-destructive"
