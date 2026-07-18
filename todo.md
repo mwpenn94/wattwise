@@ -206,12 +206,12 @@
 - [ ] §3i-2 Portfolio basket: apply a measure across selected sites, per-site composition rolled up, weakest-chip inheritance
 - [x] §3i Alerts framework: alerts table (migration 0009) w/ $25 materiality floor + per-(site,kind) open-row batching; generated at analysis time (sustained anomaly × annual cost, top rate opportunity); alerts router + AlertsInbox bell in console layout; digest now backed by a REAL per-user Heartbeat cron (setDigestPrefs creates/removes the job, /api/scheduled/digest handler w/ taskUid-only lookup + orphan→2xx), buildDigest enforces dollar-figure-or-silence, digestPreview "if it ran today" on Account — 9 vitest specs
 - [x] §3i Demand review ritual: DemandReview card on Explore for demand-charge sites only — 90th-percentile set-point (proven-target copy), billed-vs-actual monthly table w/ ratchet-applied flags (amber when billed > actual), attribution recap line, exactly ONE priced demand action w/ add-to-plan deep link, honest no-action copy; demandReview block persisted in pipeline summary metrics
-- [ ] §3 Hero 5 Energy Wrapped: shareable year-in-review card
+- [x] §3 Hero 5 Energy Wrapped: shareable year-in-review card (EnergyWrapped.tsx, launched from HomeFeed)
 - [x] §4 EN/ES language toggle (AZ/NM market)
 - [x] §3 Hero 4 bill-scan overlay verification: uploaded bill image renders beside the review form (object URL, revoked on save/skip; PDFs skip preview honestly), per-field extraction-confidence chips (green ≥0.8 / amber ≥0.5 / red) on all five fields; manual-entry fields ungraded
 - [ ] §1b Portfolio map: saved sites pinned, colored by opportunity size
-- [ ] Honest-gaps ledger: in-app + report disclosure of what is NOT built (Data Concierge rungs 1-4, continuous feeds, 3D extrusion, LiDAR/Solar API, GHL delivery, per-site roles) and why
-- [ ] Coverage report deliverable: gap-by-gap docs-vs-build matrix with evidence
+- [x] Honest-gaps ledger: in-app + report disclosure of what is NOT built (Data Concierge rungs 1-4, continuous feeds, 3D extrusion, LiDAR/Solar API, GHL delivery, per-site roles) and why
+- [x] Coverage report deliverable: gap-by-gap docs-vs-build matrix with evidence
 
 ## New docs received Jul 18 (handoff v1.15 + addendum v2.7 — supersede the v1.7/v1.9 we built against)
 - [x] §5b pricing rules: concrete prices not ranges, "Most popular" label, persona descriptors per tier, value-first Free list, jargon check
@@ -230,7 +230,7 @@
 - [x] v1.17 §5.0(c) recompute-disclosure groundwork: attribute confirmations state which insights recomputed/sharpened
 - [x] §3i-2 building profile "what we know about your building" chip panel with per-tier source chips (confirm/correct affordance)
 - [x] EN/ES groundwork: i18n scaffold + language toggle (EN complete, ES partial honestly labeled)
-- [ ] Final coverage report vs v1.17/v2.8: shipped / newly shipped / infeasible-on-runtime / large-scope-needs-prioritization
+- [x] Final coverage report vs v1.17/v2.8: shipped / newly shipped / infeasible-on-runtime / large-scope-needs-prioritization
 
 ## Owner update Jul 18 (v1.20 handoff / v2.11 addendum deltas)
 - [x] Tenure modes (own/rent/condo-HOA): site-level tenure field; renter mode suppresses owner-capex opportunities, leads with in-control measures; "worth raising with your landlord" list (v1.18 §5 stage 5)
