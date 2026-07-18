@@ -33,12 +33,12 @@ const FEATURES = [
   {
     icon: BarChart3,
     title: "Tariff optimization",
-    body: "Re-price your real 8760 against seeded AZ tariffs — TOU, demand, ratchets, export rates — ranked with eligibility disclosures.",
+    body: "Re-price your full year of usage, hour by hour, against seeded AZ rate plans — time-of-use, demand, ratchets, export rates — ranked with eligibility disclosures.",
   },
   {
     icon: Activity,
     title: "Weather-normalized baselines",
-    body: "CalTRACK-grade degree-day regressions with fitted balance points, reported on a normal-year basis with fit statistics.",
+    body: "Industry-standard weather models separate what the weather did from what you did — reported on a normal-year basis with fit quality stated. (CalTRACK methods, named in the provenance.)",
   },
   {
     icon: Sun,
@@ -53,7 +53,7 @@ const FEATURES = [
   {
     icon: Leaf,
     title: "Emissions & benchmarking",
-    body: "eGRID subregion emission factors and ENERGY STAR peer percentiles, with sources and vintages cited inline.",
+    body: "Regional grid emission factors and peer-building percentiles, with sources and vintages cited inline.",
   },
   {
     icon: ShieldCheck,
@@ -189,25 +189,26 @@ export default function Home() {
                 price: "$0",
                 // §5b rule 5: value first, limits last. Rule 6: no jargon ("Solar
                 // resource-class indicator" → "Solar potential rating").
-                items: ["Instant estimate for any address", "Weather-normalized analysis", "EUI + peer benchmark", "Rate check + demand snapshot", "Solar potential rating", "3 scenario runs/month", "Up to 2 sites"],
+                items: ["Instant estimate for any address", "Weather-normalized analysis", "Peer-building benchmark", "Rate check + demand snapshot", "Solar potential rating", "3 scenario runs/month", "Up to 2 sites"],
                 cta: "Start free",
                 highlight: false,
                 badge: null as string | null,
               },
               {
                 name: "Plus",
-                persona: "For owners acting on their plan",
+                persona: "For homeowners and owners acting on their plan",
                 // §5b rule 2: a number, not a range.
                 price: "$12/mo",
                 items: ["Full tariff sweep across every eligible plan", "End-use disaggregation", "Solar + battery modeling", "Unlimited scenarios + Bill Builder full basket", "Narrative reports", "PDF export"],
                 cta: "Start Plus (beta)",
                 highlight: true,
-                badge: "Recommended" as string | null,
+                badge: "Most popular" as string | null,
               },
               {
                 name: "Pro",
                 persona: "For facilities teams and portfolios",
-                price: "from $29/site/mo",
+                // §5b rule 2: "from $X" is allowed only with the driver stated — site count.
+                price: "$29/site/mo",
                 // §3i pre-purchase feed honesty: name the data mechanism before
                 // checkout — analysis re-runs on each upload; no live utility feed yet.
                 items: ["Portfolio view across every site", "Anomaly + demand-spike findings on each upload", "Demand-charge management", "M&V-grade reporting + practitioner export", "Data updates via bill/interval uploads today — utility feeds are on the roadmap, not sold as live"],

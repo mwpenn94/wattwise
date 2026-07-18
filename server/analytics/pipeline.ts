@@ -1045,7 +1045,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       analysisId,
       measure: c.key,
       title: c.title,
-      description: `${c.rationale} ${c.disclosures.join(" ")}`,
+      // Owner bug report (Jul 18): disclaimers were concatenated into the
+      // description, displacing the actual recommendation on the card. The
+      // description is now the cause/rationale ONLY; disclosures move to
+      // provenance where the card's "where this comes from" expander shows them.
+      description: c.rationale,
       estCostSavingsPerYr: (c.annualSavingsUsdLo + c.annualSavingsUsdHi) / 2,
       estEnergySavingsPerYr: null,
       energyUnit: COMMODITY_UNITS.electric.usageUnit,
@@ -1055,7 +1059,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       disaggregationMethod: disaggMethod,
       ratchetAware: c.key === "peak_management",
       rank: i + 1,
-      provenance: { savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi], category: c.category },
+      provenance: { savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi], category: c.category, disclosures: c.disclosures },
     })),
   );
     narrate(`Ranked ${ranked.length} opportunit${ranked.length === 1 ? "y" : "ies"} by estimated annual dollar impact`);

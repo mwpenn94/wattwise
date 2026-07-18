@@ -673,10 +673,11 @@ export default function Dashboard() {
                 <InsightCard
                   key={o.id}
                   rank={o.rank}
+                  title={o.title}
                   dollars={o.estCostSavingsPerYr}
                   framing="Save"
-                  headlineFallback={`${o.title} — no dollar figure yet (needs a priced rate)`}
-                  why={o.description ?? o.title}
+                  headlineFallback={`No dollar figure yet (needs a priced rate)`}
+                  why={o.description ?? ""}
                   confidence={chipFromConfidence(o.confidence, o.disaggregationMethod === "nilmtk_1min_plus")}
                   extraChips={[
                     ...(o.ratchetAware ? ["ratchet-aware"] : []),
@@ -704,6 +705,7 @@ export default function Dashboard() {
                   }}
                   provenance={[
                     `Measure: ${o.measure.replace(/_/g, " ")} · ranked #${o.rank} by estimated annual dollar impact.`,
+                    ...(((o.provenance as Record<string, unknown> | null)?.disclosures as string[] | undefined) ?? []),
                     o.disaggregationMethod
                       ? `End-use split method: ${o.disaggregationMethod.replace(/_/g, " ")}.`
                       : "Savings band from archetype priors for this building type and climate.",

@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { ArrowRight, BadgeCheck, Compass, Lightbulb, MessageCircleQuestion, Send, Sparkles } from "lucide-react";
 import { InsightCard, chipFromConfidence, type InsightConfidence } from "@/components/InsightCard";
+import EnergyWrapped from "@/components/EnergyWrapped";
 import { MarkImplementedDialog, ProveItStatusChip } from "@/components/ProveIt";
 import QuickStart from "@/components/QuickStart";
 import { useAuth } from "@/_core/hooks/useAuth";
@@ -142,6 +143,7 @@ export default function HomeFeed() {
               </SelectContent>
             </Select>
           )}
+          {activeSiteId != null && <EnergyWrapped siteId={activeSiteId} />}
           <Link href={`/app/explore${activeSiteId != null ? `?site=${activeSiteId}` : ""}`}>
             <Button variant="outline" className="gap-1.5">
               <Compass className="h-4 w-4" /> Explore
@@ -232,10 +234,11 @@ export default function HomeFeed() {
             <div className="mt-1.5">
               <InsightCard
                 rank={topOpp.rank}
+                title={topOpp.title}
                 dollars={topOpp.estCostSavingsPerYr}
                 framing="Save"
-                headlineFallback={`${topOpp.title} — no dollar figure yet (needs a priced rate)`}
-                why={topOpp.description ?? topOpp.title}
+                headlineFallback={`No dollar figure yet (needs a priced rate)`}
+                why={topOpp.description ?? ""}
                 confidence={chipFromConfidence(topOpp.confidence)}
                 extraChips={topOpp.paybackBandYears ? [`payback ${topOpp.paybackBandYears}`] : []}
                 action={{

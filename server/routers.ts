@@ -35,6 +35,7 @@ import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
 import { archetypeBaseline, type BaselineFit } from "./analytics/baseline";
 import { assembleReportData, newReportToken, practitionerCsv } from "./reports";
+import { assembleWrapped } from "./wrapped";
 
 /** §3l report kinds → human feature names for tier-gate error copy. */
 const REPORT_FEATURE_NAME: Record<"energy_plan" | "verified_savings" | "practitioner", string> = {
@@ -1715,6 +1716,120 @@ export const appRouter = router({
         await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0, tier });
         return { result, loadBasis: basis.loadBasis };
       }),
+    /* ---- §3i-2 portfolio basket: one measure applied across selected sites,
+       composed per site through the SAME composeMeasures path, rolled up with
+       weakest-chip inheritance. Pro-gated (portfolio surface). ---- */
+    portfolioCompose: protectedProcedure
+      .input(
+        z.object({
+          siteIds: z.array(z.number()).min(2).max(25),
+          measure: z.object({
+            key: z.string().max(64),
+            label: z.string().max(255),
+            kind: z.enum(["efficiency", "solar", "battery"]),
+            solarKwDc: z.number().positive().max(100_000).optional(),
+            batteryKwh: z.number().positive().max(1_000_000).optional(),
+            batteryKw: z.number().positive().max(500_000).optional(),
+            efficiencyReductions: z.record(z.string(), z.number().min(0).max(0.9)).optional(),
+            capexUsd: z.number().min(0).optional(),
+          }),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        await seeded();
+        const tier = tierOf(ctx.user);
+        requireTier(tier, "pro", "Portfolio basket (apply a measure across sites)");
+        const t0 = Date.now();
+        const CONF_RANK = { low: 0, medium: 1, high: 2 } as const;
+        const perSite: Array<{
+          siteId: number;
+          siteName: string;
+          ok: boolean;
+          reason?: string;
+          annualSavingsUsd?: number;
+          co2eDeltaLb?: number;
+          confidence?: "low" | "medium" | "high";
+          loadBasis?: string;
+        }> = [];
+        for (const siteId of input.siteIds) {
+          const site = await h.getSite(siteId, ctx.user.id);
+          if (!site) {
+            perSite.push({ siteId, siteName: `Site ${siteId}`, ok: false, reason: "Site not found" });
+            continue;
+          }
+          try {
+            const basis = await buildScenarioBasis(site, ctx.user.id);
+            const endUse = await endUseForSite(site);
+            const sectorClass =
+              site.buildingType && ["single_family", "multifamily"].includes(site.buildingType)
+                ? "residential"
+                : "commercial";
+            const result = composeMeasures(
+              basis.hourly,
+              [input.measure as PlanMeasure],
+              basis.structure,
+              basis.climateZone,
+              basis.co2eLbPerMwh,
+              basis.confidence,
+              basis.extrapolated,
+              endUse?.fractions,
+              basis.tariffRows.map((t) => ({
+                id: t.id,
+                name: t.name,
+                utilityName: t.utilityName,
+                sector: t.sector,
+                commodity: t.commodity,
+                peakKwMin: t.peakKwMin,
+                peakKwMax: t.peakKwMax,
+                structure: t.structure as TariffStructure,
+                isCurrentBasis: t.id === basis.chosenTariffId,
+              })),
+              sectorClass,
+            );
+            perSite.push({
+              siteId,
+              siteName: site.name,
+              ok: true,
+              annualSavingsUsd: result.composedSavings,
+              co2eDeltaLb: result.deltaCo2eLb,
+              confidence: result.confidence,
+              loadBasis: basis.loadBasis,
+            });
+          } catch (e) {
+            // Honesty rule: a site that cannot compose is NAMED with its reason,
+            // never silently dropped or zero-filled into the rollup.
+            perSite.push({
+              siteId,
+              siteName: site.name,
+              ok: false,
+              reason: e instanceof Error ? e.message : "Composition failed",
+            });
+          }
+        }
+        const okRows = perSite.filter((r) => r.ok);
+        // Weakest-chip inheritance across the whole basket (§3i-2): the rollup
+        // is never more confident than its least-confident site.
+        const rollupConfidence = okRows.length
+          ? okRows.reduce<"low" | "medium" | "high">(
+              (acc, r) => (CONF_RANK[r.confidence ?? "low"] < CONF_RANK[acc] ? (r.confidence ?? "low") : acc),
+              "high",
+            )
+          : ("low" as const);
+        await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0, tier });
+        return {
+          perSite,
+          rollup: {
+            sitesComposed: okRows.length,
+            sitesFailed: perSite.length - okRows.length,
+            annualSavingsUsd: okRows.reduce((s, r) => s + (r.annualSavingsUsd ?? 0), 0),
+            co2eDeltaLb: okRows.reduce((s, r) => s + (r.co2eDeltaLb ?? 0), 0),
+            confidence: rollupConfidence,
+          },
+          disclosure:
+            "Portfolio rollup sums per-site composed savings; sites are composed independently (no cross-site interaction modeled). Rollup confidence inherits the weakest site chip.",
+        };
+      }),
+
     /* ---- §3m plan_baskets: persist a composed plan across sessions ---- */
     saveBasket: protectedProcedure
       .input(
@@ -1919,6 +2034,12 @@ export const appRouter = router({
 
   /* §3l reports — three artifacts, one engine, verify tokens */
   reports: router({
+    /** §3 Hero 5 — Energy Wrapped: shareable year-in-review card, assembled
+     * from persisted rows only. Free-tier accessible (it's a delight/share
+     * surface, not a gated report). Null when no analysis exists yet. */
+    wrapped: protectedProcedure
+      .input(z.object({ siteId: z.number().int() }))
+      .query(async ({ ctx, input }) => assembleWrapped(input.siteId, ctx.user.id)),
     /** Assemble report data for preview/print. energy_plan = Plus+; the other two = Pro. */
     data: protectedProcedure
       .input(z.object({ siteId: z.number().int(), kind: z.enum(["energy_plan", "verified_savings", "practitioner"]) }))

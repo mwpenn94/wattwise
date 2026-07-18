@@ -37,6 +37,11 @@ export function chipFromConfidence(level: "low" | "medium" | "high" | null | und
 }
 
 export interface InsightCardProps {
+  /** The explicit action/recommendation title (e.g. "Rate switch: TEP TGS-1").
+   * Owner bug report (Jul 18): cards showed only the dollar figure + caveats
+   * with the actual recommendation buried in the expander — the title now
+   * renders directly under the dollar headline, always. */
+  title?: string;
   /** The dollar figure. Positive = savings/opportunity, negative = cost increase. Null = no dollar figure exists (headlineFallback explains why). */
   dollars: number | null;
   /** Cadence suffix, e.g. "/yr", "/mo". Default "/yr". */
@@ -101,6 +106,9 @@ export function InsightCard(p: InsightCardProps) {
           </span>
         </div>
       </div>
+
+      {/* 1b — the explicit action: WHAT to do, named, never buried in the expander */}
+      {p.title && <p className="mt-1 text-sm font-semibold leading-snug">{p.title}</p>}
 
       {/* 2 — one-line why */}
       <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{p.why}</p>

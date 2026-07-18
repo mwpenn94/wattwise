@@ -155,6 +155,9 @@ export default function Portfolio() {
           {/* §3i-2 utility-exposure rollup: spend concentration by provider */}
           <UtilityExposure rows={rows} />
 
+          {/* §3i-2 portfolio basket (Pro): one measure across selected sites */}
+          <PortfolioBasket rows={rows.map((r) => ({ siteId: r.siteId, name: r.name, analyzed: r.analyzed }))} />
+
           {/* §3i-2 bulk site screening (Pro): paste addresses → ranked estimate screen */}
           <BulkScreen />
 
@@ -686,6 +689,146 @@ function BulkScreen() {
               </Table>
             </div>
             <p className="mt-2 text-[10px] text-muted-foreground">{res.disclosure}</p>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * §3i-2 portfolio basket (Pro): apply ONE measure across selected sites; each
+ * site is composed independently through the same composer as Bill Builder,
+ * then rolled up with weakest-chip confidence inheritance. Sites that cannot
+ * compose are named with their reason — never silently dropped.
+ */
+function PortfolioBasket({ rows }: { rows: { siteId: number; name: string; analyzed: boolean }[] }) {
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [measureKey, setMeasureKey] = useState<string>("led_retrofit");
+  const compose = trpc.scenariosApi.portfolioCompose.useMutation({
+    onError: (e) => toast.error(e.message),
+  });
+
+  const MEASURES: Record<string, { label: string; kind: "efficiency" | "solar" | "battery"; efficiencyReductions?: Record<string, number>; solarKwDc?: number; batteryKwh?: number; batteryKw?: number; capexUsd?: number }> = {
+    led_retrofit: { label: "LED retrofit", kind: "efficiency", efficiencyReductions: { lighting: 0.5 }, capexUsd: 8000 },
+    hvac_tuneup: { label: "HVAC tune-up / controls", kind: "efficiency", efficiencyReductions: { cooling: 0.15, heating: 0.1 }, capexUsd: 5000 },
+    smart_thermostats: { label: "Smart thermostats / setpoints", kind: "efficiency", efficiencyReductions: { cooling: 0.08, heating: 0.08 }, capexUsd: 1200 },
+    solar_50kw: { label: "Solar 50 kW DC", kind: "solar", solarKwDc: 50, capexUsd: 110000 },
+    battery_100kwh: { label: "Battery 100 kWh / 50 kW", kind: "battery", batteryKwh: 100, batteryKw: 50, capexUsd: 90000 },
+  };
+
+  const toggle = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const run = () => {
+    const m = MEASURES[measureKey];
+    compose.mutate({
+      siteIds: Array.from(selected),
+      measure: { key: measureKey, label: m.label, kind: m.kind, efficiencyReductions: m.efficiencyReductions, solarKwDc: m.solarKwDc, batteryKwh: m.batteryKwh, batteryKw: m.batteryKw, capexUsd: m.capexUsd },
+    });
+  };
+
+  const data = compose.data;
+  const confBadge = (c?: "low" | "medium" | "high") =>
+    c === "high" ? "Measured-grade" : c === "medium" ? "Good" : "Est.";
+
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <FolderKanban className="h-4 w-4 text-primary" /> Portfolio basket
+          <Badge variant="secondary" className="text-[10px]">Pro</Badge>
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Apply one measure across selected sites — each site is composed independently on its own tariff and load
+          shape, then rolled up. The rollup chip inherits the weakest site&apos;s confidence.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {rows.length < 2 ? (
+          <p className="py-3 text-center text-sm text-muted-foreground">Add at least two sites to use the portfolio basket.</p>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <Select value={measureKey} onValueChange={setMeasureKey}>
+                <SelectTrigger className="w-64">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(MEASURES).map(([k, m]) => (
+                    <SelectItem key={k} value={k}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button size="sm" disabled={selected.size < 2 || compose.isPending} onClick={run}>
+                {compose.isPending ? "Composing…" : `Compose across ${selected.size} site${selected.size === 1 ? "" : "s"}`}
+              </Button>
+              {selected.size < 2 && <span className="text-xs text-muted-foreground">select at least 2 sites below</span>}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {rows.map((r) => (
+                <label
+                  key={r.siteId}
+                  className="flex cursor-pointer items-center gap-1.5 rounded-md border border-border/70 px-2 py-1 text-xs"
+                >
+                  <Checkbox checked={selected.has(r.siteId)} onCheckedChange={() => toggle(r.siteId)} />
+                  {r.name}
+                  {!r.analyzed && <span className="text-[10px] text-muted-foreground">(estimate basis)</span>}
+                </label>
+              ))}
+            </div>
+            {data && (
+              <div className="space-y-2 rounded-md border border-border/70 p-3">
+                <div className="flex flex-wrap items-center gap-3 text-sm">
+                  <span className="font-display text-lg font-bold text-primary">{fmtUsd(data.rollup.annualSavingsUsd)}/yr</span>
+                  <Badge variant="outline" className="text-[10px]">{confBadge(data.rollup.confidence)}</Badge>
+                  <span className="text-xs text-muted-foreground">
+                    {data.rollup.sitesComposed} composed{data.rollup.sitesFailed > 0 ? ` · ${data.rollup.sitesFailed} could not compose` : ""} ·{" "}
+                    {fmtNum(Math.abs(data.rollup.co2eDeltaLb))} lb CO₂e/yr {data.rollup.co2eDeltaLb <= 0 ? "avoided" : "added"}
+                  </span>
+                </div>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Site</TableHead>
+                      <TableHead className="text-right">Annual savings</TableHead>
+                      <TableHead className="text-right">Confidence</TableHead>
+                      <TableHead>Basis</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {data.perSite.map((r) => (
+                      <TableRow key={r.siteId}>
+                        <TableCell className="text-sm">{r.siteName}</TableCell>
+                        {r.ok ? (
+                          <>
+                            <TableCell className="text-right text-sm">{fmtUsd(r.annualSavingsUsd ?? 0)}/yr</TableCell>
+                            <TableCell className="text-right">
+                              <Badge variant="outline" className="text-[10px]">{confBadge(r.confidence)}</Badge>
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {r.loadBasis === "archetype_scaled" ? "archetype load shape" : "measured intervals"}
+                            </TableCell>
+                          </>
+                        ) : (
+                          <TableCell colSpan={3} className="text-xs text-amber-600 dark:text-amber-400">
+                            not composed — {r.reason}
+                          </TableCell>
+                        )}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                <p className="text-[11px] text-muted-foreground">{data.disclosure}</p>
+              </div>
+            )}
           </>
         )}
       </CardContent>

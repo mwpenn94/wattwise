@@ -218,3 +218,16 @@
 - [ ] §3i-2 identity-confirm moment + living building profile (chip panel w/ source tiers, confirm/correct)
 - [ ] Session A0 note: cold_context_review_runner.py requires ANTHROPIC_API_KEY — not available in this environment; per §7 halt-and-report (doc itself is marked CONVERGED by owner's log; build proceeds)
 - [ ] v1.15 large-scope items requiring owner prioritization (each is a multi-session build): attribute inference registry + PV gate (v1.9c), dimensional attribution (v1.10), estimated-read/tariff-vintage/baseline-lifecycle (v1.11), second-order inference/equipment health (v1.12), vertical packs + production_series (v1.13), incentives/DSIRE + escalation + split incentives (v1.14), WA compliance layer (v1.15), bill reconciliation self-calibration, cohort insights, geometry/3D layer (v1.4), Overture seeding (v1.8)
+
+## Owner bug report (Jul 18, mobile screenshots)
+- [ ] BUG: Ranked opportunity cards never name the actual recommendation — body leads with disclaimers/provenance while the measure headline ("Switch to <specific rate>", "Optimize cooling setpoints/schedule") is missing; fix cards to lead with an explicit action title wherever opportunities render (Explore, HomeFeed, Portfolio)
+
+## Owner update Jul 18 (later): handoff v1.17 + addendum v2.8 attached
+- [ ] Opportunity-card bug fix wave: gapfixes honesty specs green, sewer spec aligned to provenance-disclosure contract, full suite 172 passing (needs checkpoint)
+- [ ] §5b pricing rules final pass: "Most popular" badge, concrete prices, persona descriptors, value-first Free list, jargon sweep of marketing copy
+- [ ] v1.17 §5.0(a) capability matrix — codify insight-class × data-state unlock table as a shared module (single source of truth)
+- [ ] v2.8 §1 ladder-as-contract: accuracy ladder rungs generated FROM the capability matrix; each rung names the specific insights the next upload unlocks BEFORE upload
+- [ ] v1.17 §5.0(c) recompute-disclosure groundwork: attribute confirmations state which insights recomputed/sharpened
+- [ ] §3i-2 building profile "what we know about your building" chip panel with per-tier source chips (confirm/correct affordance)
+- [ ] EN/ES groundwork: i18n scaffold + language toggle (EN complete, ES partial honestly labeled)
+- [ ] Final coverage report vs v1.17/v2.8: shipped / newly shipped / infeasible-on-runtime / large-scope-needs-prioritization

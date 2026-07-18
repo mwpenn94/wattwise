@@ -90,7 +90,12 @@ describe("§2.57 sewer-on-winter-water linkage", () => {
     expect(sewer).toBeDefined();
     expect(sewer!.title).toMatch(/sewer/i);
     expect(sewer!.description).toMatch(/winter-quarter-average convention/i);
-    expect(sewer!.description).toMatch(/does not have your sewer tariff/i);
+    // Owner bug fix (Jul 18): disclosures no longer glued into the user-facing
+    // description — they live in provenance.disclosures. Assert the sewer
+    // assumption disclosure is still persisted there.
+    const prov = sewer!.provenance as { disclosures?: string[] } | null;
+    expect(prov?.disclosures?.some((d) => /does not have your sewer tariff/i.test(d))).toBe(true);
+    expect(sewer!.description).not.toMatch(/does not have your sewer tariff/i);
     expect(Number(sewer!.estCostSavingsPerYr)).toBeGreaterThan(0);
     expect(sewer!.confidence).toBe("low");
   }, 120_000);

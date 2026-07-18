@@ -149,3 +149,40 @@ describe("§3i-2 utility exposure input", () => {
     await caller.sites.delete({ siteId: s.id });
   }, 30_000);
 });
+
+/* ------------------------------------------------------------------ */
+/* Owner bug report (Jul 18): opportunity cards must lead with the     */
+/* recommendation — disclaimers must never displace the rationale.     */
+/* Root cause was `description: rationale + disclosures.join(" ")` in  */
+/* the pipeline persist. These specs pin the fixed contract.           */
+/* ------------------------------------------------------------------ */
+describe("opportunity card honesty (owner bug report Jul 18)", () => {
+  it("pipeline persists rationale-only descriptions with disclosures in provenance", async () => {
+    // The mapping is inline in the pipeline (no exported builder), so we pin
+    // the exact source contract that regressed: description must be the
+    // rationale alone, and disclosures must move to the provenance JSON.
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(__dirname, "analytics", "pipeline.ts"), "utf8");
+    expect(src).not.toContain("${c.rationale} ${c.disclosures.join");
+    expect(src).toContain("description: c.rationale");
+    expect(src).toMatch(/disclosures: c\.disclosures/);
+  });
+
+  it("no stored opportunity description still contains a glued disclaimer", async () => {
+    const db = (await getDb())!;
+    const { opportunities } = await import("../drizzle/schema");
+    const { like, or } = await import("drizzle-orm");
+    const rows = await db
+      .select({ id: opportunities.id })
+      .from(opportunities)
+      .where(
+        or(
+          like(opportunities.description, "%modeled estimates — not a professional%"),
+          like(opportunities.description, "%statistical prior from peer-building archetypes — not measured%"),
+          like(opportunities.description, "%national-average assumption%"),
+        ),
+      );
+    expect(rows.length).toBe(0);
+  }, 30_000);
+});
