@@ -19,6 +19,7 @@ import {
   Home as HomeIcon,
   Hotel,
   Landmark,
+  LocateFixed,
   MapPin,
   School,
   ShoppingBag,
@@ -68,6 +69,52 @@ export function PublicEstimator() {
     onSuccess: () => setStage("result"),
   });
 
+  // §1 demo building — zero-commitment sample estimate (no address typed).
+  const [sampleData, setSampleData] = useState<{ estimate: NonNullable<typeof estimateMut.data>["estimate"]; place: NonNullable<typeof estimateMut.data>["place"] } | null>(null);
+  const sampleMut = trpc.estimate.sample.useMutation({
+    onSuccess: (data) => {
+      setSampleData({ estimate: data.estimate, place: data.place });
+      setStage("result");
+    },
+  });
+
+  // §1b use-my-location — tap-triggered only (contextual permission rule);
+  // the coordinate is sent once for reverse lookup and never stored.
+  const [locating, setLocating] = useState(false);
+  const [locateError, setLocateError] = useState<string | null>(null);
+  const fromLocation = trpc.estimate.fromLocation.useMutation();
+  const useMyLocation = () => {
+    setLocateError(null);
+    if (!navigator.geolocation) {
+      setLocateError("Location isn't available in this browser — type your address instead.");
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const s = await fromLocation.mutateAsync({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+          if (s) {
+            setPicked({ placeId: s.placeId, description: s.description });
+            setDismissedSuggestions(true);
+            setStage("confirm");
+          } else {
+            setLocateError("We couldn't match your location to a street address — type it instead.");
+          }
+        } catch {
+          setLocateError("Location lookup failed — type your address instead.");
+        } finally {
+          setLocating(false);
+        }
+      },
+      () => {
+        setLocating(false);
+        setLocateError("No problem — type your address instead. We only ask for location when you tap the button.");
+      },
+      { timeout: 8000, maximumAge: 60_000 },
+    );
+  };
+
   useEffect(() => {
     function onDocClick(e: MouseEvent) {
       if (boxRef.current && !boxRef.current.contains(e.target as Node)) setDismissedSuggestions(true);
@@ -76,8 +123,9 @@ export function PublicEstimator() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
 
-  const est = estimateMut.data?.estimate;
-  const place = estimateMut.data?.place;
+  const est = sampleData?.estimate ?? estimateMut.data?.estimate;
+  const place = sampleData?.place ?? estimateMut.data?.place;
+  const isSample = sampleData != null;
 
   const mapUrl = useMemo(() => {
     if (!place || place.lat == null || place.lng == null) return null;
@@ -186,10 +234,35 @@ export function PublicEstimator() {
             </div>
           )}
           {stage === "address" && (
-            <p className="mt-3 text-[11px] text-muted-foreground/80">
-              Type your address, pick it from the list, and confirm what it is. Estimated from real building archetypes,
-              local climate, and seeded utility rates — never your personal data.
-            </p>
+            <>
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  className="flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+                  onClick={useMyLocation}
+                  disabled={locating || fromLocation.isPending}
+                >
+                  {locating || fromLocation.isPending ? <Spinner className="h-3 w-3" /> : <LocateFixed className="h-3.5 w-3.5" />}
+                  Use my location
+                </button>
+                <button
+                  type="button"
+                  className="flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
+                  onClick={() => sampleMut.mutate()}
+                  disabled={sampleMut.isPending}
+                >
+                  {sampleMut.isPending ? <Spinner className="h-3 w-3" /> : <Building2 className="h-3.5 w-3.5" />}
+                  Try a sample Tucson office
+                </button>
+              </div>
+              {locateError && <p className="mt-2 text-[11px] text-muted-foreground">{locateError}</p>}
+              {sampleMut.error && <p className="mt-2 text-[11px] text-destructive">{sampleMut.error.message}</p>}
+              <p className="mt-3 text-[11px] text-muted-foreground/80">
+                Type your address, pick it from the list, and confirm what it is. Estimated from real building archetypes,
+                local climate, and seeded utility rates — never your personal data. Location is only used when you tap the
+                button, and never stored.
+              </p>
+            </>
           )}
         </>
       )}
@@ -198,7 +271,7 @@ export function PublicEstimator() {
       {stage === "result" && est && (
         <div>
           <div className="mb-2 flex items-center justify-between">
-            <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">your estimate</span>
+            <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{isSample ? "sample estimate · demo building" : "your estimate"}</span>
             <span className="prov-chip">estimated</span>
           </div>
 
@@ -292,10 +365,11 @@ export function PublicEstimator() {
                 setPicked(null);
                 setQuery("");
                 setBuildingType(null);
+                setSampleData(null);
                 estimateMut.reset();
               }}
             >
-              Try another address
+              {isSample ? "Try my real address" : "Try another address"}
             </button>
           </div>
         </div>

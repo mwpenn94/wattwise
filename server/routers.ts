@@ -49,7 +49,7 @@ import { costOnTariff } from "./analytics/tariffEngine";
 import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend, llmBudgetAllows } from "./analytics/costModel";
 import { storagePut } from "./storage";
 import { deriveFromAddress, cascadeProvenance } from "./cascade";
-import { placeAutocomplete, resolvePlace } from "./places";
+import { placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
 import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { createHash } from "crypto";
 import { intervals as intervalsTable } from "../drizzle/schema";
@@ -135,6 +135,38 @@ export const appRouter = router({
           sqft: input.sqft ?? null,
         });
         return { estimate: est, place: { formattedAddress: place.formattedAddress, lat: place.lat, lng: place.lng, placeId: place.placeId } };
+      }),
+    /* §1 demo building — a zero-commitment sample estimate (no address, no
+     * sign-up). Uses a fixed, clearly-labeled Tucson office archetype so a
+     * visitor can see the product's voice before typing anything real. */
+    sample: publicProcedure.mutation(async ({ ctx }) => {
+      if (!estimateRateAllows(ctx.req.ip ?? "unknown")) {
+        throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many estimates from this connection — try again in a few minutes." });
+      }
+      const est = await computeAddressEstimate({
+        formattedAddress: "Sample office · Tucson, AZ 85701",
+        city: "Tucson",
+        state: "AZ",
+        zip: "85701",
+        placeVerified: false,
+        buildingType: "office",
+        sqft: 12_000,
+      });
+      return {
+        estimate: est,
+        place: { formattedAddress: "Sample office · Tucson, AZ 85701 (demo building)", lat: 32.2217, lng: -110.9698, placeId: "sample-tucson-office" },
+        isSample: true as const,
+      };
+    }),
+    /* §1b use-my-location — tap-triggered reverse geocode. The coordinate is
+     * used once for the lookup and never stored (GPS-never-stored rule). */
+    fromLocation: publicProcedure
+      .input(z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }))
+      .mutation(async ({ ctx, input }) => {
+        if (!estimateRateAllows(ctx.req.ip ?? "unknown")) {
+          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many lookups — try again in a few minutes." });
+        }
+        return await reverseGeocode(input.lat, input.lng);
       }),
   }),
 
@@ -819,6 +851,8 @@ export const appRouter = router({
               state: s.state,
               buildingType: s.buildingType,
               climateZone: s.climateZone ?? null,
+              // §3i-2 utility-exposure rollup input: which provider serves this site
+              utilityName: s.utilityName ?? null,
               sqft: s.sqft ?? null,
               meterCount: meterRows.length,
               analyzed: m != null,
@@ -1661,6 +1695,41 @@ export const appRouter = router({
         await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0, tier });
         return { result, loadBasis: basis.loadBasis };
       }),
+    /* ---- §3m plan_baskets: persist a composed plan across sessions ---- */
+    saveBasket: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          name: z.string().min(1).max(255),
+          measures: z.array(z.object({}).passthrough()).min(1).max(12),
+          composedResults: z.object({}).passthrough().nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Persisted plans are a Plus feature, matching the full-basket unlock;
+        // free users can still compose transiently up to 3 measures.
+        requireTier(tierOf(ctx.user), "plus", "Saving a plan");
+        const id = await h.savePlanBasket({
+          siteId: input.siteId,
+          userId: ctx.user.id,
+          name: input.name,
+          measures: input.measures,
+          composedResults: input.composedResults ?? null,
+        });
+        return { id };
+      }),
+    listBaskets: protectedProcedure
+      .input(z.object({ siteId: z.number().optional() }))
+      .query(async ({ ctx, input }) => h.listPlanBaskets(ctx.user.id, input.siteId)),
+    getBasket: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ ctx, input }) => {
+      const row = await h.getPlanBasket(input.id, ctx.user.id);
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Plan not found" });
+      return row;
+    }),
+    deleteBasket: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
+      await h.deletePlanBasket(input.id, ctx.user.id);
+      return { ok: true };
+    }),
   }),
   /* ================= reference / transparency ================= */
   reference: router({

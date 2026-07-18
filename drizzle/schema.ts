@@ -431,6 +431,27 @@ export const scenarios = mysqlTable(
   (t) => [index("scenarios_site_idx").on(t.siteId)],
 );
 
+/** 11b. plan_baskets — §3m manifest: persisted Bill Builder plans (selected
+ * measures + composed-results cache) so a composed plan survives the session
+ * and can feed the My Energy Plan report. */
+export const planBaskets = mysqlTable(
+  "plan_baskets",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    /** selected measures: PlanMeasure[] as chosen in the Bill Builder */
+    measures: json("measures").notNull(),
+    /** cache of the last composed result (composeMeasures output) — display
+     * cache only; re-composed on load if the baseline has since changed */
+    composedResults: json("composedResults"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [index("plan_baskets_site_idx").on(t.siteId), index("plan_baskets_user_idx").on(t.userId)],
+);
+
 /** 12. emissions_factors — eGRID subregion factors (seeded). */
 export const emissionsFactors = mysqlTable(
   "emissions_factors",

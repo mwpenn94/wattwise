@@ -152,6 +152,9 @@ export default function Portfolio() {
           {/* §3i-2 league table: weather- and size-normalized — never raw kWh across climates */}
           <LeagueTable rows={rows} />
 
+          {/* §3i-2 utility-exposure rollup: spend concentration by provider */}
+          <UtilityExposure rows={rows} />
+
           {/* Per-site table */}
           <Card className="mt-4 border-border/70">
             <CardHeader className="pb-2">
@@ -350,6 +353,7 @@ type PortfolioRow = {
   state: string | null;
   buildingType: string | null;
   climateZone: string | null;
+  utilityName?: string | null;
   sqft: number | null;
   analyzed: boolean;
   annualCostUsd: number | null;
@@ -508,6 +512,70 @@ function TotalCard({ icon, label, value, sub }: { icon: React.ReactNode; label: 
         </div>
         <div className="mt-1 font-display text-xl font-bold">{value}</div>
         {sub && <div className="mt-0.5 text-[11px] text-muted-foreground">{sub}</div>}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** §3i-2 utility-exposure rollup — how much annual spend sits with each
+ * provider. Concentration is decision-relevant for rate-change risk: a
+ * portfolio 80% exposed to one utility should watch that utility's filings.
+ * Honesty rules: sites without an analyzed cost are counted by site, not
+ * dollars; provider names come from each site's confirmed/derived utility
+ * (never guessed at display time), and unknowns are shown as their own row. */
+function UtilityExposure({ rows }: { rows: PortfolioRow[] }) {
+  const byUtility = new Map<string, { spendUsd: number; siteCount: number; analyzedCount: number }>();
+  for (const r of rows) {
+    const key = r.utilityName ?? "Utility not set";
+    const cur = byUtility.get(key) ?? { spendUsd: 0, siteCount: 0, analyzedCount: 0 };
+    cur.siteCount += 1;
+    if (r.annualCostUsd != null) {
+      cur.spendUsd += r.annualCostUsd;
+      cur.analyzedCount += 1;
+    }
+    byUtility.set(key, cur);
+  }
+  const entries = Array.from(byUtility.entries()).sort((a, b) => b[1].spendUsd - a[1].spendUsd);
+  const totalSpend = entries.reduce((a, [, v]) => a + v.spendUsd, 0);
+  if (rows.length === 0 || entries.length === 0) return null;
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <Zap className="h-4 w-4 text-primary" /> Utility exposure
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Where your annual spend is concentrated — a rate filing at your biggest provider moves more of your budget.
+          Dollars reflect analyzed sites only; unanalyzed sites are counted but not priced.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {entries.map(([name, v]) => {
+          const pct = totalSpend > 0 ? (v.spendUsd / totalSpend) * 100 : 0;
+          return (
+            <div key={name}>
+              <div className="flex items-baseline justify-between text-sm">
+                <span className={name === "Utility not set" ? "text-muted-foreground" : ""}>{name}</span>
+                <span className="font-mono text-xs text-muted-foreground">
+                  {v.spendUsd > 0 ? `${fmtUsd(v.spendUsd)}/yr · ` : ""}
+                  {v.siteCount} site{v.siteCount === 1 ? "" : "s"}
+                  {v.analyzedCount < v.siteCount ? ` (${v.siteCount - v.analyzedCount} not analyzed)` : ""}
+                </span>
+              </div>
+              {totalSpend > 0 && (
+                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div className="h-full rounded-full bg-primary/70" style={{ width: `${Math.max(pct, 2)}%` }} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {entries.length === 1 && entries[0][0] !== "Utility not set" && totalSpend > 0 && (
+          <p className="pt-1 text-[11px] text-muted-foreground">
+            All priced spend sits with one provider — their next rate filing affects your whole portfolio. The rate
+            check on each site's Explore page re-prices you against every eligible plan we have on file.
+          </p>
+        )}
       </CardContent>
     </Card>
   );

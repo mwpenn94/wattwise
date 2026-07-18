@@ -33,6 +33,7 @@ import {
   siteGeometry,
   measureImplementations,
   reportArtifacts,
+  planBaskets,
 } from "../drizzle/schema";
 
 export class TenancyError extends Error {
@@ -187,6 +188,7 @@ export async function deleteSite(siteId: number, userId: number) {
   await db.delete(siteGeometry).where(eq(siteGeometry.siteId, siteId));
   await db.delete(siteGroupMembers).where(eq(siteGroupMembers.siteId, siteId));
   await db.delete(measureImplementations).where(eq(measureImplementations.siteId, siteId));
+  await db.delete(planBaskets).where(eq(planBaskets.siteId, siteId));
   await db.delete(meters).where(eq(meters.siteId, siteId));
   // uploads keep their file provenance but detach from the deleted site
   await db.update(uploads).set({ siteId: null }).where(eq(uploads.siteId, siteId));
@@ -886,4 +888,44 @@ export async function getDigestPrefs(userId: number) {
     .where(eq(users.id, userId))
     .limit(1);
   return rows[0] ?? { digestOptIn: false, digestAnchorDay: 1 };
+}
+
+/* ------------------------------------------------------------------ */
+/* Plan baskets (§3m manifest) — persisted Bill Builder plans           */
+/* ------------------------------------------------------------------ */
+
+export async function savePlanBasket(row: {
+  siteId: number;
+  userId: number;
+  name: string;
+  measures: unknown;
+  composedResults?: unknown;
+}) {
+  await assertSiteOwner(row.siteId, row.userId);
+  const db = await requireDb();
+  const res = await db.insert(planBaskets).values({
+    siteId: row.siteId,
+    userId: row.userId,
+    name: row.name,
+    measures: row.measures as object,
+    composedResults: (row.composedResults ?? null) as object | null,
+  });
+  return Number((res as unknown as [{ insertId: number }])[0].insertId);
+}
+
+export async function listPlanBaskets(userId: number, siteId?: number) {
+  const db = await requireDb();
+  const where = siteId != null ? and(eq(planBaskets.userId, userId), eq(planBaskets.siteId, siteId)) : eq(planBaskets.userId, userId);
+  return db.select().from(planBaskets).where(where).orderBy(desc(planBaskets.updatedAt));
+}
+
+export async function getPlanBasket(id: number, userId: number) {
+  const db = await requireDb();
+  const rows = await db.select().from(planBaskets).where(and(eq(planBaskets.id, id), eq(planBaskets.userId, userId))).limit(1);
+  return rows[0] ?? null;
+}
+
+export async function deletePlanBasket(id: number, userId: number) {
+  const db = await requireDb();
+  await db.delete(planBaskets).where(and(eq(planBaskets.id, id), eq(planBaskets.userId, userId)));
 }

@@ -193,3 +193,22 @@
 - [x] Nav: site selector consistency across console pages; no dead-end pages
 - [x] Nav: breadcrumbs or back affordance on detail views; mobile nav check (375×812 pass on Home/Explore/Reports/Portfolio — sidebar collapses to header toggle, no dead-ends)
 - [x] Click-through validation of every CRUD flow and nav path (desktop + mobile screenshot pass Jul 18; Scenarios deep-link hardened — unowned ?site= now falls back to first owned site instead of a blank selector)
+
+## Docs-vs-build audit gaps (owner challenge Jul 18 — confirmed by full re-read)
+- [x] §1 Demo building: "Try a sample Tucson office" zero-commitment path on the public estimator (estimate.sample, labeled isSample, no auth — gapfixes.test.ts)
+- [x] §1b Use-my-location (tap-triggered geolocation → reverseGeocode → estimate) + graceful deny fallback on the estimator
+- [x] §3i Pre-purchase feed honesty: Pro tier card states "Data updates via bill/interval uploads today — utility feeds are on the roadmap, not sold as live"
+- [x] §3m plan_baskets persistence: save/load/delete composed plans (migration 0008, Plus-gated saveBasket, tenancy + cascade specs in gapfixes.test.ts, BillBuilder save/load UI w/ re-price-on-load disclosure)
+- [x] §5b rule 1: personalized tier cards — authed Plus card shows the user's open-$ total + biggest site; Pro card shows their site count (anon users see standard copy)
+- [ ] §2.57 Sewer-on-winter-water linkage: municipal template + priced year-long opportunity + story treatment
+- [x] §3i-2 Utility-exposure rollup on Portfolio: spend concentration by provider w/ bars, unanalyzed sites counted-not-priced, single-provider concentration note pointing at the rate check
+- [ ] §3i-2 Bulk site screening: CSV of addresses → batch hypothetical estimates → ranked screen (Pro, rate-limited)
+- [ ] §3i-2 Portfolio basket: apply a measure across selected sites, per-site composition rolled up, weakest-chip inheritance
+- [ ] §3i Alerts framework: dollar-first alert records w/ conservative default thresholds, daily batching, quiet-by-default (in-app; delivery labeled post-beta)
+- [ ] §3i Demand review ritual: per-cycle demand review flow (set-point interval + attribution + ratchet watch + one priced action)
+- [ ] §3 Hero 5 Energy Wrapped: shareable year-in-review card
+- [ ] §4 EN/ES language toggle (AZ/NM market)
+- [ ] §3 Hero 4 bill-scan overlay verification (parsed fields over bill image, confirm/correct)
+- [ ] §1b Portfolio map: saved sites pinned, colored by opportunity size
+- [ ] Honest-gaps ledger: in-app + report disclosure of what is NOT built (Data Concierge rungs 1-4, continuous feeds, 3D extrusion, LiDAR/Solar API, GHL delivery, per-site roles) and why
+- [ ] Coverage report deliverable: gap-by-gap docs-vs-build matrix with evidence

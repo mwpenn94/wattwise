@@ -1,4 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
+import { trpc } from "@/lib/trpc";
 import { startLogin } from "@/const";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -63,6 +64,15 @@ const FEATURES = [
 
 export default function Home() {
   const { user, isAuthenticated } = useAuth();
+  // §5b personalized upgrade moment: when signed in, the pricing section
+  // speaks with the user's own numbers instead of generic copy. Query is
+  // auth-gated; anonymous visitors see the standard cards untouched.
+  const portfolio = trpc.entities.portfolio.useQuery(undefined, { enabled: isAuthenticated, staleTime: 60_000, retry: false });
+  const personalOppUsd = portfolio.data?.totals.openOpportunityUsd ?? 0;
+  const personalTopSite = portfolio.data?.sites.reduce<{ name: string; usd: number } | null>((acc, s) => {
+    const usd = s.topOpportunityUsd ?? 0;
+    return acc == null || usd > acc.usd ? { name: s.name, usd } : acc;
+  }, null);
 
   return (
     <div className="min-h-screen bg-background text-foreground dark">
@@ -198,7 +208,9 @@ export default function Home() {
                 name: "Pro",
                 persona: "For facilities teams and portfolios",
                 price: "from $29/site/mo",
-                items: ["Continuous monitoring", "Anomaly + demand-spike alerts", "Demand-charge management", "Portfolio dashboard", "M&V-grade reporting"],
+                // §3i pre-purchase feed honesty: name the data mechanism before
+                // checkout — analysis re-runs on each upload; no live utility feed yet.
+                items: ["Portfolio view across every site", "Anomaly + demand-spike findings on each upload", "Demand-charge management", "M&V-grade reporting + practitioner export", "Data updates via bill/interval uploads today — utility feeds are on the roadmap, not sold as live"],
                 cta: "Start Pro (beta)",
                 highlight: false,
                 badge: null as string | null,
@@ -216,6 +228,18 @@ export default function Home() {
                     <span className="font-mono text-sm text-primary">{t.price}</span>
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">{t.persona}</p>
+                  {/* §5b personalized upgrade copy — the user's own numbers, only when they exist */}
+                  {isAuthenticated && t.name === "Plus" && personalOppUsd > 0 && (
+                    <p className="mt-2 rounded-md border border-primary/30 bg-primary/5 px-2 py-1.5 text-[11px] text-foreground">
+                      Your analysis found <strong>~${Math.round(personalOppUsd).toLocaleString()}/yr</strong> in open opportunities
+                      {personalTopSite && personalTopSite.usd > 0 ? <> — the biggest at {personalTopSite.name}</> : null}. Plus unlocks the full basket and reports for it.
+                    </p>
+                  )}
+                  {isAuthenticated && t.name === "Pro" && (portfolio.data?.totals.siteCount ?? 0) > 1 && (
+                    <p className="mt-2 rounded-md border border-border bg-muted/40 px-2 py-1.5 text-[11px] text-foreground">
+                      You have {portfolio.data!.totals.siteCount} sites — Pro ranks them by open dollars and anomalies in one view.
+                    </p>
+                  )}
                   <ul className="mt-4 space-y-2">
                     {t.items.map((i) => (
                       <li key={i} className="flex items-start gap-2 text-sm text-muted-foreground">

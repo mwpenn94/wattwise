@@ -14,7 +14,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
-import { Battery, Check, Layers, Lightbulb, Sun, TrendingDown } from "lucide-react";
+import { Battery, Check, Layers, Lightbulb, Save, Sun, TrendingDown, X } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { ConfidenceBadge } from "@/components/Honesty";
 
 interface Measure {
@@ -67,6 +68,22 @@ function CountUpUsd({ value }: { value: number }) {
 
 export default function BillBuilder({ siteId }: { siteId: number }) {
   const presets = trpc.scenariosApi.presets.useQuery({ siteId });
+  // §3m plan persistence — saved baskets survive the session and feed the
+  // My Energy Plan report. Saving is the Plus unlock; composing stays free.
+  const utils = trpc.useUtils();
+  const savedPlans = trpc.scenariosApi.listBaskets.useQuery({ siteId });
+  const saveBasket = trpc.scenariosApi.saveBasket.useMutation({
+    onSuccess: () => {
+      setPlanName("");
+      setSaving(false);
+      utils.scenariosApi.listBaskets.invalidate();
+    },
+  });
+  const deleteBasket = trpc.scenariosApi.deleteBasket.useMutation({
+    onSuccess: () => utils.scenariosApi.listBaskets.invalidate(),
+  });
+  const [saving, setSaving] = useState(false);
+  const [planName, setPlanName] = useState("");
   const compose = trpc.scenariosApi.compose.useMutation({
     onError: (e) => toast.error(e.message),
   });
@@ -262,6 +279,81 @@ export default function BillBuilder({ siteId }: { siteId: number }) {
           <p className="rounded-md border border-dashed border-border p-3 text-center text-xs text-muted-foreground">
             Pick measures above, or start from a preset — the plan bar shows your current bill against the composed plan.
           </p>
+        )}
+
+        {/* §3m save / saved plans */}
+        {(selected.size > 0 || (savedPlans.data?.length ?? 0) > 0) && (
+          <div className="space-y-2 border-t border-border pt-3">
+            {selected.size > 0 && !saving && (
+              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setSaving(true)}>
+                <Save className="mr-1 h-3.5 w-3.5" /> Save this plan
+              </Button>
+            )}
+            {saving && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  value={planName}
+                  onChange={(e) => setPlanName(e.target.value)}
+                  placeholder="Plan name — e.g. Summer readiness"
+                  className="h-8 max-w-xs text-xs"
+                  autoFocus
+                />
+                <Button
+                  size="sm"
+                  className="h-8 text-xs"
+                  disabled={!planName.trim() || saveBasket.isPending}
+                  onClick={() =>
+                    saveBasket.mutate({
+                      siteId,
+                      name: planName.trim(),
+                      measures: Array.from(selected.values()) as unknown as Array<Record<string, unknown>>,
+                      composedResults: (compose.data?.result ?? null) as unknown as Record<string, unknown> | null,
+                    })
+                  }
+                >
+                  {saveBasket.isPending ? "Saving…" : "Save"}
+                </Button>
+                <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setSaving(false)}>
+                  Cancel
+                </Button>
+              </div>
+            )}
+            {saveBasket.error && <p className="text-[11px] text-destructive">{saveBasket.error.message}</p>}
+            {(savedPlans.data?.length ?? 0) > 0 && (
+              <div>
+                <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">Saved plans</p>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {savedPlans.data!.map((p) => (
+                    <span key={p.id} className="flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs">
+                      <button
+                        type="button"
+                        className="hover:text-primary"
+                        title="Load this plan"
+                        onClick={() => {
+                          const ms = (p.measures as Measure[]) ?? [];
+                          setSelected(new Map(ms.map((m) => [m.key, m])));
+                        }}
+                      >
+                        {p.name}
+                      </button>
+                      <span className="text-[10px] text-muted-foreground">· {(p.measures as Measure[]).length} measures</span>
+                      <button
+                        type="button"
+                        title="Delete plan"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => deleteBasket.mutate({ id: p.id })}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <p className="mt-1 text-[10px] text-muted-foreground/70">
+                  Loading a plan re-prices it against your latest baseline — saved dollar figures refresh rather than being replayed.
+                </p>
+              </div>
+            )}
+          </div>
         )}
       </CardContent>
     </Card>

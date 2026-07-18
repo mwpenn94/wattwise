@@ -114,3 +114,40 @@ export async function resolvePlace(placeId: string): Promise<ResolvedPlace> {
     residentialHint,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* Reverse geocode (§1b use-my-location — tap-triggered only, never on  */
+/* load; the coordinate is used once for address lookup and discarded,  */
+/* honoring the GPS-never-stored privacy rule).                         */
+/* ------------------------------------------------------------------ */
+interface ReverseGeocodeApiResponse {
+  status: string;
+  results?: Array<{
+    place_id?: string;
+    formatted_address?: string;
+    types?: string[];
+    address_components?: Array<{ long_name: string; short_name: string; types: string[] }>;
+  }>;
+  error_message?: string;
+}
+
+/** Resolve device coordinates to the nearest street address. Returns null when
+ *  Google has no addressable result (rural parcels, mid-block drops). */
+export async function reverseGeocode(lat: number, lng: number): Promise<PlaceSuggestion | null> {
+  const resp = await makeRequest<ReverseGeocodeApiResponse>("/maps/api/geocode/json", {
+    latlng: `${lat},${lng}`,
+    result_type: "street_address|premise|subpremise",
+  });
+  if (resp.status === "ZERO_RESULTS") return null;
+  if (resp.status !== "OK" || !resp.results?.length) {
+    throw new Error(`Location lookup failed (${resp.status})${resp.error_message ? `: ${resp.error_message}` : ""}`);
+  }
+  const r = resp.results[0];
+  if (!r.place_id || !r.formatted_address) return null;
+  return {
+    placeId: r.place_id,
+    description: r.formatted_address,
+    mainText: r.formatted_address.split(",")[0] ?? r.formatted_address,
+    secondaryText: r.formatted_address.split(",").slice(1).join(",").trim(),
+  };
+}
