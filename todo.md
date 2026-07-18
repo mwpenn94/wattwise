@@ -81,7 +81,7 @@
 - [x] AC6: seeders idempotent/versioned/provenance-logged
 - [x] AC7: UHOP convergence log present and current
 - [x] AC8: 15-min disaggregation labeled archetype_prior_only/regression_split, never nilmtk
-- [ ] UHOP expert-lens convergence passes on deliverable (code series — 100-streak gate unchanged, runner active)
+- [ ] UHOP expert-lens convergence passes on deliverable (code series — 100-streak gate; runner PAUSED Jul 17 per owner feedback prioritizing grounded intake over further review passes; 61 batches adjudicated, best organic streak 14; resume on owner request)
 - [x] Live virtual-user E2E testing (Playwright): 18/18 assertions across 3 personas (pro upload+analyze real Cantex file, free hypothetical wizard, free-tier quota/gating)
 - [x] Session A0 series closed as converged-in-practice on HANDOFF.md v3.7 (close-out protocol per DECISION above — not a literal 100-streak; declaration + residual-risk register delivered)
 
@@ -153,3 +153,16 @@
 - [x] Building-type confirmation step in the quick-start flow — required chip selection (Home / Apartment / Office / Retail / … 12 types); Analyze disabled until chosen; confirmation counts as user_entered refinement
 - [x] Residential sector eligibility in tariff sweep — pre-existing (sectorClass keys off buildingType; residential seed tariffs exist); now reachable because homes are actually created as single_family
 - [x] Tests: grounded intake — 6 places.test.ts specs (mocked proxy) + quickstart grounded spec (residential priors, confirmed provenance, utility override); live smoke script scripts/places-smoke.mjs verified against the real proxy
+
+## Handoff v1.7 + UX Addendum v1.9 absorption (uploaded Jul 18)
+- [x] Schema: meter_role enum (main/submeter/generation/ev/virtual_total) + parentMeterId on meters (migration 0005; meters.setRole with nesting validation)
+- [x] Schema: site_groups table + site_group_members (siteGroups router: list/create/setMembership/delete)
+- [x] Schema: site_geometry table (footprint GeoJSON, source, height, stories, roof, orientation, exposure, geometry_confidence) — table + helpers live; 3D renderer deferred
+- [x] Aggregation physics: pipeline meter selection uses main-role electric meters only (submeter double-count guard); demand never summed
+- [x] Public estimate-first onboarding: zero-signup address → instant estimated annual cost + peer percentile + top opportunity (server/estimate.ts + PublicEstimator in hero; IP rate-limited; live-tested)
+- [x] Map tap-to-confirm moment on the estimate page (pin confirm step in PublicEstimator; 3D building moment deferred — no 3D renderer yet)
+- [x] Accuracy ladder component (Estimate → Good → Great → Measured) visible on the public estimate result
+- [x] InsightCard grammar component: headline $ → why → confidence chip → action → provenance expander; Dashboard opportunities + additional insights converted
+- [x] Bill Builder: composer.ts engine (composition-not-addition, overlap honesty, weakest-chip confidence, rate re-sweep) + BillBuilder UI with presets and plan bar on Scenarios page
+- [x] Pricing page rules: concrete prices ($12/mo, from $29/site/mo), Recommended badge, persona descriptors, value-first free list, jargon fix, setTier WTP audit signal
+- [x] Tests for new schema helpers, estimate endpoint, composition engine (composer.test.ts 8 specs; suite 103 passing)

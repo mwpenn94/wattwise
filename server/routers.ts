@@ -33,11 +33,13 @@ import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
 import { archetypeBaseline } from "./analytics/baseline";
 import { runScenario, hourlyToPoints, type ScenarioInput } from "./analytics/scenarios";
+import { composeMeasures, presetBaskets, type PlanMeasure } from "./analytics/composer";
 import { costOnTariff } from "./analytics/tariffEngine";
 import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend } from "./analytics/costModel";
 import { storagePut } from "./storage";
 import { deriveFromAddress, cascadeProvenance } from "./cascade";
 import { placeAutocomplete, resolvePlace } from "./places";
+import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { createHash } from "crypto";
 import { intervals as intervalsTable } from "../drizzle/schema";
 import { and, asc, eq, gte, lte } from "drizzle-orm";
@@ -85,6 +87,44 @@ export const appRouter = router({
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
+  }),
+
+  /* ================= public estimate (UX v1.9 estimate-first onboarding) =================
+   * Zero-signup: the landing page delivers a grounded dollar estimate from an
+   * address + confirmed building type. IP rate-limited; no LLM cost. */
+  estimate: router({
+    autocomplete: publicProcedure
+      .input(z.object({ query: z.string().min(3).max(200) }))
+      .query(({ ctx, input }) => {
+        if (!estimateRateAllows(ctx.req.ip ?? "unknown")) {
+          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many lookups — try again in a few minutes, or sign in for unlimited access." });
+        }
+        return placeAutocomplete(input.query);
+      }),
+    fromAddress: publicProcedure
+      .input(
+        z.object({
+          placeId: z.string().min(1).max(512),
+          buildingType: z.string().min(1).max(64),
+          sqft: z.number().positive().max(10_000_000).nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (!estimateRateAllows(ctx.req.ip ?? "unknown")) {
+          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many estimates from this connection — try again in a few minutes, or sign in to continue." });
+        }
+        const place = await resolvePlace(input.placeId);
+        const est = await computeAddressEstimate({
+          formattedAddress: place.formattedAddress,
+          city: place.city,
+          state: place.state,
+          zip: place.zip,
+          placeVerified: true,
+          buildingType: input.buildingType,
+          sqft: input.sqft ?? null,
+        });
+        return { estimate: est, place: { formattedAddress: place.formattedAddress, lat: place.lat, lng: place.lng, placeId: place.placeId } };
+      }),
   }),
 
   /* ================= places (grounded address intake, Jul 17) ================= */
@@ -558,6 +598,50 @@ export const appRouter = router({
         await h.setMeterTariff(input.meterId, input.tariffId, ctx.user.id);
         return { ok: true };
       }),
+    /** v1.7 §2.4: assign meter role + optional parent (submeter nesting). Aggregation
+     * physics depend on this: site totals sum main meters only; submeters roll under parents. */
+    setMeterRole: protectedProcedure
+      .input(
+        z.object({
+          meterId: z.number(),
+          role: z.enum(["main", "submeter", "generation", "ev", "virtual_total"]),
+          parentMeterId: z.number().nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (input.role === "submeter" && input.parentMeterId == null) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "A submeter must name its parent meter — its load is inside the parent's and would otherwise double-count site totals." });
+        }
+        if (input.parentMeterId != null && input.parentMeterId === input.meterId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "A meter cannot be its own parent." });
+        }
+        await h.setMeterRole(input.meterId, input.role, input.parentMeterId ?? null, ctx.user.id);
+        return { ok: true as const };
+      }),
+    /* --------- site groups (v1.7 §2.2a portfolio rollups) --------- */
+    groups: protectedProcedure.query(async ({ ctx }) => h.listSiteGroups(ctx.user.id)),
+    createGroup: protectedProcedure
+      .input(
+        z.object({
+          name: z.string().min(1).max(128),
+          kind: z.enum(["region", "manager", "brand", "custom"]).default("custom"),
+          entityId: z.number().nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const id = await h.createSiteGroup(ctx.user.id, input.name, input.kind, input.entityId ?? null);
+        return { id };
+      }),
+    setGroupMembership: protectedProcedure
+      .input(z.object({ groupId: z.number(), siteId: z.number(), member: z.boolean() }))
+      .mutation(async ({ ctx, input }) => {
+        await h.setGroupMembership(input.groupId, input.siteId, input.member, ctx.user.id);
+        return { ok: true as const };
+      }),
+    deleteGroup: protectedProcedure.input(z.object({ groupId: z.number() })).mutation(async ({ ctx, input }) => {
+      await h.deleteSiteGroup(input.groupId, ctx.user.id);
+      return { ok: true as const };
+    }),
   }),
 
   /* ================= entities (Gap-9 organizational layer) =================
@@ -1150,12 +1234,94 @@ export const appRouter = router({
         // failed save must never consume quota. (Verified ordering; the LLM/
         // compute meter events inside the pipeline are cost-metering, not
         // scenario-quota events.)
-        await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0, tier });
+                await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0, tier });
         await h.audit(ctx.user.id, "scenario_run", "scenario", String(id), { kind: input.kind, siteId: site.id });
         return { id, results };
       }),
+    /* ---- Bill Builder (UX addendum §3c): composed what-if across measures ---- */
+    presets: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      await seeded();
+      const site = await h.getSite(input.siteId, ctx.user.id);
+      if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+      const endUse = await endUseForSite(site);
+      return presetBaskets(site.sqft, endUse?.fractions);
+    }),
+    compose: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          measures: z
+            .array(
+              z.object({
+                key: z.string().max(64),
+                label: z.string().max(255),
+                kind: z.enum(["efficiency", "solar", "battery"]),
+                solarKwDc: z.number().positive().max(100_000).optional(),
+                batteryKwh: z.number().positive().max(1_000_000).optional(),
+                batteryKw: z.number().positive().max(500_000).optional(),
+                efficiencyReductions: z.record(z.string(), z.number().min(0).max(0.9)).optional(),
+                capexUsd: z.number().min(0).optional(),
+              }),
+            )
+            .min(1)
+            .max(12),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        await seeded();
+        const tier = tierOf(ctx.user);
+        // §3c conversion rule: free tier composes up to 3 measures; the full
+        // basket is the Plus unlock at the moment of demonstrated value.
+        if (tier === "free" && input.measures.length > 3) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Free tier composes up to 3 measures — upgrade to Plus for the full basket." });
+        }
+        // Solar/battery measures are Plus features, consistent with scenariosApi.run.
+        if (input.measures.some((m) => m.kind === "solar" || m.kind === "battery")) {
+          requireTier(tier, "plus", "Solar/battery plan composition");
+        }
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        const basis = await buildScenarioBasis(site, ctx.user.id);
+        const endUse = await endUseForSite(site);
+        const sectorClass = site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? "residential" : "commercial";
+        const t0 = Date.now();
+        const result = composeMeasures(
+          basis.hourly,
+          input.measures as PlanMeasure[],
+          basis.structure,
+          basis.climateZone,
+          basis.co2eLbPerMwh,
+          basis.confidence,
+          basis.extrapolated,
+          endUse?.fractions,
+          basis.tariffRows.map((t) => ({
+            id: t.id,
+            name: t.name,
+            utilityName: t.utilityName,
+            sector: t.sector,
+            commodity: t.commodity,
+            peakKwMin: t.peakKwMin,
+            peakKwMax: t.peakKwMax,
+            structure: t.structure as TariffStructure,
+            isCurrentBasis: t.id === basis.chosenTariffId,
+          })),
+          sectorClass,
+        );
+        if (basis.tariffBasisDisclosure) result.disclosures.push(basis.tariffBasisDisclosure);
+        if (basis.archetypeZoneDisclosure) result.disclosures.push(basis.archetypeZoneDisclosure);
+        if (basis.loadBasis === "archetype_scaled") {
+          result.disclosures.push(
+            "Composed-plan savings are modeled on a typical archetype load shape, not measured data — upload interval data to tighten these figures.",
+          );
+        }
+        // Composition is a modeling call like a scenario run — meter compute,
+        // but do NOT consume the monthly scenario quota (nothing is saved; the
+        // plan bar re-prices on every toggle and quota-charging each toggle
+        // would make the feature unusable).
+        await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0, tier });
+        return { result, loadBasis: basis.loadBasis };
+      }),
   }),
-
   /* ================= reference / transparency ================= */
   reference: router({
     convergenceLog: publicProcedure.query(async () => {
@@ -1194,10 +1360,22 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const prev = tierOf(ctx.user);
         await h.setUserTier(ctx.user.id, input.tier);
+        // §5b rule 7: beta tier selections are willingness-to-pay signal —
+        // capture persona (building types owned) and analysis state alongside
+        // the switch so the market-research read is possible later.
+        const userSites = await h.listSites(ctx.user.id);
+        const buildingTypes = Array.from(new Set(userSites.map((s) => s.buildingType).filter(Boolean)));
+        const persona = buildingTypes.length === 0 ? "no_sites_yet" : buildingTypes.every((b) => ["single_family", "multifamily"].includes(b as string)) ? "residential" : "commercial";
         await h.audit(ctx.user.id, "tier_change", "user", String(ctx.user.id), {
           from: prev,
           to: input.tier,
           billing: "none — beta period, no payment collected",
+          wtpSignal: {
+            persona,
+            siteCount: userSites.length,
+            buildingTypes,
+            hasAnalyzedSite: (await Promise.all(userSites.slice(0, 5).map((s) => h.getLatestAnalysis(s.id, ctx.user.id)))).some(Boolean),
+          },
         });
         return { tier: input.tier, previous: prev };
       }),
@@ -1310,7 +1488,18 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
       ? zoneInference.source === "us_median_fallback"
       : site.climateZone === "4A" && zoneInference.source === "us_median_fallback";
   const meters = await h.listMeters(site.id, userId);
-  const meter = meters.find((m) => m.commodity === "electric") ?? meters[0] ?? null;
+  // v1.7 §2.4a aggregation physics: site-level analysis reads MAIN-role meters only.
+  // A submeter's load is inside its parent's — naive inclusion double-counts; generation
+  // meters carry production, not consumption. virtual_total (when materialized) wins outright
+  // so site analytics reuse the single-meter path on the summed main series.
+  const virtualTotal = meters.find((m) => m.meterRole === "virtual_total" && m.commodity === "electric");
+  const mainElectric = meters.filter((m) => m.meterRole === "main" && m.commodity === "electric");
+  const meter =
+    virtualTotal ??
+    mainElectric[0] ??
+    meters.find((m) => m.commodity === "electric" && m.meterRole !== "submeter" && m.meterRole !== "generation") ??
+    meters.find((m) => m.meterRole !== "submeter" && m.meterRole !== "generation") ??
+    null;
 
   let hourly: number[] | null = null;
   let loadBasis = "archetype_scaled";
@@ -1428,6 +1617,10 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
     climateZone,
     tariffBasisDisclosure,
     archetypeZoneDisclosure,
+    // Bill Builder (§3c): the composed-plan rate re-sweep needs the full
+    // candidate list and which row is the current cost basis.
+    chosenTariffId: chosen.id,
+    tariffRows,
   };
 }
 

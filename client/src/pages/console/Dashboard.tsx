@@ -16,6 +16,7 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { Activity, BarChart3, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown } from "lucide-react";
 import { decimateForChart, fmtNum, fmtUsd, type ChartPoint } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
+import { InsightCard, chipFromConfidence } from "@/components/InsightCard";
 import QuickStart from "@/components/QuickStart";
 import RefineChips from "@/components/RefineChips";
 import { Link, useSearch } from "wouter";
@@ -548,35 +549,45 @@ export default function Dashboard() {
             <p className="py-4 text-center text-sm text-muted-foreground">Run analysis to generate ranked measures.</p>
           ) : (
             <div className="space-y-3">
+              {/* UX v1.9 §2 card grammar: dollar headline → one-line why →
+                  confidence chip → one-tap action → provenance expander.
+                  kWh/kW/payback live below the fold, never as the headline. */}
               {oppRows.map((o) => (
-                <div key={o.id} className="rounded-md border border-border/70 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm font-medium">
-                      <span className="mr-2 font-mono text-xs text-primary">#{o.rank}</span>
-                      {o.title}
-                    </p>
-                    <div className="flex items-center gap-1.5">
-                      {o.ratchetAware && <ProvChip>ratchet-aware</ProvChip>}
-                      {o.disaggregationMethod && <ProvChip>{o.disaggregationMethod.replace(/_/g, " ")}</ProvChip>}
-                      <ConfidenceBadge level={o.confidence} />
-                    </div>
-                  </div>
-                  {o.description && <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{o.description}</p>}
-                  <div className="mt-2 flex flex-wrap gap-4 font-mono text-xs text-muted-foreground">
-                    {o.estCostSavingsPerYr != null && (
-                      <span>
-                        est. <span className="text-emerald-400">{fmtUsd(o.estCostSavingsPerYr)}</span>/yr
-                      </span>
-                    )}
-                    {o.estEnergySavingsPerYr != null && (
-                      <span>
-                        {fmtNum(o.estEnergySavingsPerYr)} {o.energyUnit ?? "kWh"}/yr
-                      </span>
-                    )}
-                    {o.estDemandSavingsKw != null && <span>{fmtNum(o.estDemandSavingsKw)} kW post-ratchet</span>}
-                    {o.paybackBandYears && <span>payback {o.paybackBandYears}</span>}
-                  </div>
-                </div>
+                <InsightCard
+                  key={o.id}
+                  rank={o.rank}
+                  dollars={o.estCostSavingsPerYr}
+                  framing="Save"
+                  headlineFallback={`${o.title} — no dollar figure yet (needs a priced rate)`}
+                  why={o.description ?? o.title}
+                  confidence={chipFromConfidence(o.confidence, o.disaggregationMethod === "nilmtk_1min_plus")}
+                  extraChips={[
+                    ...(o.ratchetAware ? ["ratchet-aware"] : []),
+                    ...(o.disaggregationMethod ? [o.disaggregationMethod.replace(/_/g, " ")] : []),
+                  ]}
+                  metrics={[
+                    ...(o.estEnergySavingsPerYr != null
+                      ? [{ label: "energy", value: `${fmtNum(o.estEnergySavingsPerYr)} ${o.energyUnit ?? "kWh"}/yr` }]
+                      : []),
+                    ...(o.estDemandSavingsKw != null
+                      ? [{ label: "demand", value: `${fmtNum(o.estDemandSavingsKw)} kW post-ratchet` }]
+                      : []),
+                    ...(o.paybackBandYears ? [{ label: "payback", value: o.paybackBandYears }] : []),
+                  ]}
+                  action={{
+                    label: "Model this in Scenarios",
+                    onClick: () => {
+                      window.location.href = `/app/scenarios?site=${activeSiteId}`;
+                    },
+                  }}
+                  provenance={[
+                    `Measure: ${o.measure.replace(/_/g, " ")} · ranked #${o.rank} by estimated annual dollar impact.`,
+                    o.disaggregationMethod
+                      ? `End-use split method: ${o.disaggregationMethod.replace(/_/g, " ")}.`
+                      : "Savings band from archetype priors for this building type and climate.",
+                    "Modeled estimate — run the scenario to re-price a full year on your rate.",
+                  ]}
+                />
               ))}
             </div>
           )}
@@ -590,19 +601,27 @@ export default function Dashboard() {
             <CardTitle className="font-display text-base">Additional insights</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
+            {/* Same card grammar as opportunities — these narrative insights
+                rarely carry a dollar figure, so the headline is the honest
+                title and the why-line carries the substance. */}
             {insightRows
               .filter((i) => !["demand", "benchmark", "emissions", "cost", "tariff_comparison", "cp_proxy"].includes(i.kind))
               .map((i) => (
-                <div key={i.id} className="border-b border-border/50 pb-3 last:border-0 last:pb-0">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-sm font-medium">{i.title}</p>
-                    <div className="flex items-center gap-1.5">
-                      {i.disaggregationMethod && <ProvChip>{i.disaggregationMethod.replace(/_/g, " ")}</ProvChip>}
-                      <ConfidenceBadge level={i.confidence} />
-                    </div>
-                  </div>
-                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{i.body}</p>
-                </div>
+                <InsightCard
+                  key={i.id}
+                  dollars={null}
+                  headlineFallback={i.title}
+                  why={i.body ?? i.title}
+                  confidence={chipFromConfidence(i.confidence)}
+                  extraChips={i.disaggregationMethod ? [i.disaggregationMethod.replace(/_/g, " ")] : []}
+                  provenance={
+                    i.provenance && typeof i.provenance === "object"
+                      ? Object.entries(i.provenance as Record<string, unknown>)
+                          .filter(([, v]) => v != null && typeof v !== "object")
+                          .map(([k, v]) => `${k.replace(/([A-Z])/g, " $1").toLowerCase()}: ${String(v)}`)
+                      : undefined
+                  }
+                />
               ))}
           </CardContent>
         </Card>

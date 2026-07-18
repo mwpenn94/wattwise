@@ -16,6 +16,7 @@ import { toast } from "sonner";
 import { Battery, Lightbulb, PlugZap, Sun } from "lucide-react";
 import { fmtUsd, fmtNum } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
+import BillBuilder from "@/components/BillBuilder";
 import type { ScenarioResults } from "@shared/wattwise";
 
 const KINDS = [
@@ -165,6 +166,7 @@ export default function Scenarios() {
         </Card>
 
         <div className="space-y-4">
+          {activeSiteId != null && <BillBuilder siteId={activeSiteId} />}
           {scenarios.isLoading && <Skeleton className="h-40" />}
           {(scenarios.data ?? []).map((s) => {
             const r = s.results as unknown as ScenarioResults | null;

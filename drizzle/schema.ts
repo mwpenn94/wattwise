@@ -107,6 +107,12 @@ export const meters = mysqlTable(
     /** canonical units: electric kWh/kW; gas therms; water gallons */
     usageUnit: varchar("usageUnit", { length: 16 }).notNull(),
     demandUnit: varchar("demandUnit", { length: 16 }),
+    /** v1.7 §2.4: meter role — aggregation physics key. Submeters nest under mains via parentMeterId;
+     * generation meters carry negative/net flow; virtual_total materializes summed main series. */
+    meterRole: mysqlEnum("meterRole", ["main", "submeter", "generation", "ev", "virtual_total"])
+      .default("main")
+      .notNull(),
+    parentMeterId: int("parentMeterId"),
     /** Cycle 5: meter-swap handling — serial transitions create a new meter row */
     meterSerial: varchar("meterSerial", { length: 64 }),
     activeFrom: bigint("activeFrom", { mode: "number" }),
@@ -540,7 +546,75 @@ export const convergenceLog = mysqlTable("convergence_log", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
+/** 20. site_groups — v1.7 §2.2a: org-scoped tags (region, manager, brand) for portfolio rollups.
+ * Flat user→site scales to hundreds of sites without a hierarchy rewrite. */
+export const siteGroups = mysqlTable(
+  "site_groups",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    /** optional owning entity scope (household/company), mirrors sites.entityId semantics */
+    entityId: int("entityId"),
+    name: varchar("name", { length: 128 }).notNull(),
+    kind: mysqlEnum("kind", ["region", "manager", "brand", "custom"]).default("custom").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [index("site_groups_user_idx").on(t.userId)],
+);
+
+/** 20b. site_group_members — many-to-many: sites carry group ids. */
+export const siteGroupMembers = mysqlTable(
+  "site_group_members",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    groupId: int("groupId").notNull(),
+    siteId: int("siteId").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [
+    index("sgm_group_idx").on(t.groupId),
+    index("sgm_site_idx").on(t.siteId),
+    uniqueIndex("sgm_unique").on(t.groupId, t.siteId),
+  ],
+);
+
+/** 21. site_geometry — v1.7 §2.9a: footprint/height/roof geometry with per-field provenance.
+ * A prism estimate is never presented with LiDAR confidence. ODbL-derived rows flagged for isolation. */
+export const siteGeometry = mysqlTable(
+  "site_geometry",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    /** GeoJSON polygon of the building footprint */
+    footprint: json("footprint"),
+    footprintSource: mysqlEnum("footprintSource", ["assessor_gis", "microsoft", "osm", "user_drawn"]),
+    /** footprint area in sqft (derived from polygon or dataset attribute) */
+    footprintSqft: double("footprintSqft"),
+    heightM: double("heightM"),
+    heightSource: mysqlEnum("heightSource", ["lidar", "footprint_dataset", "stories_estimate"]),
+    stories: int("stories"),
+    roofType: mysqlEnum("roofType", ["flat", "pitched", "complex"]),
+    /** roof segments (pitch, azimuth, area) from Solar API or LiDAR when available */
+    roofSegments: json("roofSegments"),
+    orientationDeg: double("orientationDeg"),
+    exposedWallAreaByOrientation: json("exposedWallAreaByOrientation"),
+    neighborShadingFactor: double("neighborShadingFactor"),
+    exposureScore: double("exposureScore"),
+    treeCanopyPct: double("treeCanopyPct"),
+    /** per-field provenance + confidence JSON: { field: { source, confidence } } */
+    geometryConfidence: json("geometryConfidence"),
+    /** ODbL share-alike isolation flag (S8 rule) */
+    odblDerived: boolean("odblDerived").default(false).notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("site_geometry_site_unique").on(t.siteId), index("site_geometry_user_idx").on(t.userId)],
+);
+
 export type Site = typeof sites.$inferSelect;
+export type SiteGroup = typeof siteGroups.$inferSelect;
+export type SiteGeometry = typeof siteGeometry.$inferSelect;
 export type Meter = typeof meters.$inferSelect;
 export type Interval = typeof intervals.$inferSelect;
 export type Upload = typeof uploads.$inferSelect;

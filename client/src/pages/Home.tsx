@@ -16,6 +16,7 @@ import {
   Zap,
 } from "lucide-react";
 import { MODELED_ESTIMATES_DISCLAIMER } from "@shared/wattwise";
+import { PublicEstimator } from "@/components/PublicEstimator";
 
 const FEATURES = [
   {
@@ -119,8 +120,12 @@ export default function Home() {
                     </Button>
                   </Link>
                 ) : (
-                  <Button size="lg" className="font-semibold" onClick={() => startLogin()}>
-                    Analyze my building <ArrowRight className="ml-2 h-4 w-4" />
+                  <Button
+                    size="lg"
+                    className="font-semibold"
+                    onClick={() => document.querySelector<HTMLInputElement>('input[aria-label="Address for estimate"]')?.focus()}
+                  >
+                    Estimate my costs — free, no sign-up <ArrowRight className="ml-2 h-4 w-4" />
                   </Button>
                 )}
                 <Link href="/convergence">
@@ -132,52 +137,9 @@ export default function Home() {
               <p className="rise-in rise-in-4 mt-6 max-w-lg text-xs text-muted-foreground/80">{MODELED_ESTIMATES_DISCLAIMER}</p>
             </div>
 
-            {/* stylized load curve */}
-            <div className="rise-in rise-in-2 relative hidden lg:block">
-              <div className="rounded-lg border border-border bg-card/80 p-5 shadow-2xl">
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
-                    demand profile · 15-min
-                  </span>
-                  <span className="prov-chip">measured</span>
-                </div>
-                <svg viewBox="0 0 400 160" className="w-full">
-                  <defs>
-                    <linearGradient id="loadFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="oklch(0.78 0.15 70)" stopOpacity="0.5" />
-                      <stop offset="100%" stopColor="oklch(0.78 0.15 70)" stopOpacity="0.02" />
-                    </linearGradient>
-                  </defs>
-                  <path
-                    d="M0,140 C30,138 45,120 70,110 C95,100 110,60 140,48 C160,40 175,30 200,26 C225,22 240,45 265,55 C290,65 305,95 330,105 C355,115 380,132 400,136 L400,160 L0,160 Z"
-                    fill="url(#loadFill)"
-                  />
-                  <path
-                    d="M0,140 C30,138 45,120 70,110 C95,100 110,60 140,48 C160,40 175,30 200,26 C225,22 240,45 265,55 C290,65 305,95 330,105 C355,115 380,132 400,136"
-                    fill="none"
-                    stroke="oklch(0.78 0.15 70)"
-                    strokeWidth="2"
-                  />
-                  <circle cx="200" cy="26" r="4" fill="oklch(0.78 0.15 70)" />
-                  <text x="208" y="22" fontSize="9" fill="currentColor" className="font-mono opacity-70">
-                    peak 412 kW · Jul 14 4:15p
-                  </text>
-                </svg>
-                <div className="mt-3 grid grid-cols-3 gap-3 border-t border-border pt-3">
-                  <div>
-                    <p className="font-mono text-[10px] uppercase text-muted-foreground">load factor</p>
-                    <p className="font-display text-xl font-bold stat-glow">0.46</p>
-                  </div>
-                  <div>
-                    <p className="font-mono text-[10px] uppercase text-muted-foreground">demand share</p>
-                    <p className="font-display text-xl font-bold stat-glow">38%</p>
-                  </div>
-                  <div>
-                    <p className="font-mono text-[10px] uppercase text-muted-foreground">rate check</p>
-                    <p className="font-display text-xl font-bold text-emerald-400">−$9.2k/yr</p>
-                  </div>
-                </div>
-              </div>
+            {/* estimate-first onboarding — the product IS the hero (UX v1.9) */}
+            <div className="rise-in rise-in-2 relative">
+              <PublicEstimator />
             </div>
           </div>
         </section>
@@ -213,32 +175,47 @@ export default function Home() {
             {[
               {
                 name: "Free",
+                persona: "For the curious — see what your building costs and why",
                 price: "$0",
-                items: ["2 sites", "Uploads + hypothetical wizard", "Weather-normalized analysis", "EUI + peer benchmark", "Rate check + demand snapshot", "3 scenario runs/month", "Solar resource-class indicator"],
+                // §5b rule 5: value first, limits last. Rule 6: no jargon ("Solar
+                // resource-class indicator" → "Solar potential rating").
+                items: ["Instant estimate for any address", "Weather-normalized analysis", "EUI + peer benchmark", "Rate check + demand snapshot", "Solar potential rating", "3 scenario runs/month", "Up to 2 sites"],
                 cta: "Start free",
                 highlight: false,
+                badge: null as string | null,
               },
               {
                 name: "Plus",
-                price: "$9–19/mo",
-                items: ["Full tariff sweep", "End-use disaggregation", "Solar + battery modeling", "Unlimited scenarios", "Narrative reports", "PDF export"],
+                persona: "For owners acting on their plan",
+                // §5b rule 2: a number, not a range.
+                price: "$12/mo",
+                items: ["Full tariff sweep across every eligible plan", "End-use disaggregation", "Solar + battery modeling", "Unlimited scenarios + Bill Builder full basket", "Narrative reports", "PDF export"],
                 cta: "Start Plus (beta)",
                 highlight: true,
+                badge: "Recommended" as string | null,
               },
               {
                 name: "Pro",
-                price: "$29–99/site/mo",
+                persona: "For facilities teams and portfolios",
+                price: "from $29/site/mo",
                 items: ["Continuous monitoring", "Anomaly + demand-spike alerts", "Demand-charge management", "Portfolio dashboard", "M&V-grade reporting"],
                 cta: "Start Pro (beta)",
                 highlight: false,
+                badge: null as string | null,
               },
             ].map((t) => (
               <Card key={t.name} className={`relative ${t.highlight ? "border-primary/60 shadow-lg shadow-primary/10" : "border-border/70"}`}>
+                {t.badge && (
+                  <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 rounded-full bg-primary px-2.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-primary-foreground">
+                    {t.badge}
+                  </span>
+                )}
                 <CardContent className="pt-6">
                   <div className="flex items-baseline justify-between">
                     <h3 className="font-display text-lg font-bold">{t.name}</h3>
                     <span className="font-mono text-sm text-primary">{t.price}</span>
                   </div>
+                  <p className="mt-1 text-xs text-muted-foreground">{t.persona}</p>
                   <ul className="mt-4 space-y-2">
                     {t.items.map((i) => (
                       <li key={i} className="flex items-start gap-2 text-sm text-muted-foreground">

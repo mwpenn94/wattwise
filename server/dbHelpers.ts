@@ -28,6 +28,9 @@ import {
   zipSubregions,
   entities,
   users,
+  siteGroups,
+  siteGroupMembers,
+  siteGeometry,
 } from "../drizzle/schema";
 
 export class TenancyError extends Error {
@@ -185,6 +188,34 @@ export async function setMeterTariff(meterId: number, tariffId: number, userId: 
   await assertMeterOwner(meterId, userId);
   const db = await requireDb();
   await db.update(meters).set({ currentTariffId: tariffId }).where(eq(meters.id, meterId));
+}
+
+/** v1.7 §2.4: meter role assignment. Parent (when named) must be owned by the same
+ * user AND belong to the same site — cross-site nesting would corrupt aggregation.
+ * Only one nesting level: a submeter cannot parent another submeter. */
+export async function setMeterRole(
+  meterId: number,
+  role: "main" | "submeter" | "generation" | "ev" | "virtual_total",
+  parentMeterId: number | null,
+  userId: number,
+) {
+  await assertMeterOwner(meterId, userId);
+  const db = await requireDb();
+  if (parentMeterId != null) {
+    await assertMeterOwner(parentMeterId, userId);
+    const [child] = await db.select({ siteId: meters.siteId }).from(meters).where(eq(meters.id, meterId));
+    const [parent] = await db
+      .select({ siteId: meters.siteId, role: meters.meterRole })
+      .from(meters)
+      .where(eq(meters.id, parentMeterId));
+    if (!child || !parent || child.siteId !== parent.siteId) {
+      throw new Error("Parent meter must belong to the same site as the submeter.");
+    }
+    if (parent.role === "submeter") {
+      throw new Error("Cannot nest under a submeter — only one level of nesting is supported (parent must be a main meter).");
+    }
+  }
+  await db.update(meters).set({ meterRole: role, parentMeterId }).where(eq(meters.id, meterId));
 }
 
 /* ---------------- intervals ---------------- */
@@ -355,6 +386,72 @@ export async function getArchetype(buildingType: string, climateZone: string, vi
   if (rows.length > 0) return { ...rows[0], zoneMatched: true };
   rows = await db.select().from(archetypeProfiles).where(eq(archetypeProfiles.buildingType, buildingType)).limit(1);
   return rows.length > 0 ? { ...rows[0], zoneMatched: false } : undefined;
+}
+
+/* ---------------- site groups (v1.7 §2.2a portfolio rollups) ---------------- */
+export async function listSiteGroups(userId: number) {
+  const db = await requireDb();
+  const groups = await db.select().from(siteGroups).where(eq(siteGroups.userId, userId)).orderBy(asc(siteGroups.name));
+  if (groups.length === 0) return [];
+  const members = await db
+    .select()
+    .from(siteGroupMembers)
+    .where(inArray(siteGroupMembers.groupId, groups.map((g) => g.id)));
+  return groups.map((g) => ({ ...g, siteIds: members.filter((m) => m.groupId === g.id).map((m) => m.siteId) }));
+}
+
+export async function createSiteGroup(userId: number, name: string, kind: "region" | "manager" | "brand" | "custom", entityId: number | null) {
+  const db = await requireDb();
+  if (entityId != null) await assertEntityOwner(entityId, userId);
+  const res = await db.insert(siteGroups).values({ userId, name, kind, entityId });
+  return Number((res as unknown as [{ insertId: number }])[0].insertId);
+}
+
+export async function assertGroupOwner(groupId: number, userId: number) {
+  const db = await requireDb();
+  const rows = await db.select({ id: siteGroups.id }).from(siteGroups).where(and(eq(siteGroups.id, groupId), eq(siteGroups.userId, userId))).limit(1);
+  if (rows.length === 0) throw new TenancyError();
+}
+
+export async function setGroupMembership(groupId: number, siteId: number, member: boolean, userId: number) {
+  await assertGroupOwner(groupId, userId);
+  await assertSiteOwner(siteId, userId);
+  const db = await requireDb();
+  if (member) {
+    await db
+      .insert(siteGroupMembers)
+      .values({ groupId, siteId })
+      .onDuplicateKeyUpdate({ set: { siteId: sql`VALUES(siteId)` } });
+  } else {
+    await db.delete(siteGroupMembers).where(and(eq(siteGroupMembers.groupId, groupId), eq(siteGroupMembers.siteId, siteId)));
+  }
+}
+
+export async function deleteSiteGroup(groupId: number, userId: number) {
+  await assertGroupOwner(groupId, userId);
+  const db = await requireDb();
+  await db.delete(siteGroupMembers).where(eq(siteGroupMembers.groupId, groupId));
+  await db.delete(siteGroups).where(eq(siteGroups.id, groupId));
+}
+
+/* ---------------- site geometry (v1.7 §2.9a) ---------------- */
+export async function getSiteGeometry(siteId: number, userId: number) {
+  await assertSiteOwner(siteId, userId);
+  const db = await requireDb();
+  const rows = await db.select().from(siteGeometry).where(eq(siteGeometry.siteId, siteId)).limit(1);
+  return rows[0] ?? null;
+}
+
+export async function upsertSiteGeometry(siteId: number, userId: number, patch: Partial<typeof siteGeometry.$inferInsert>) {
+  await assertSiteOwner(siteId, userId);
+  const db = await requireDb();
+  const existing = await db.select({ id: siteGeometry.id }).from(siteGeometry).where(eq(siteGeometry.siteId, siteId)).limit(1);
+  if (existing.length > 0) {
+    await db.update(siteGeometry).set(patch).where(eq(siteGeometry.id, existing[0].id));
+    return existing[0].id;
+  }
+  const res = await db.insert(siteGeometry).values({ ...patch, siteId, userId } as typeof siteGeometry.$inferInsert);
+  return Number((res as unknown as [{ insertId: number }])[0].insertId);
 }
 
 export async function listSeederRuns() {
