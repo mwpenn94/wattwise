@@ -180,7 +180,7 @@
 - [x] §3l Reports: My Energy Plan (Plus, print w/ cover number + per-measure what/why/payback + "what we'll verify"), Verified Savings Statement (Pro, verified headline + plain-language weather-adjustment box + verdict table), Practitioner export (Pro, CSV w/ CVRMSE/R²/months + chips), Est./Good/Measured chips in print, footer disclaimer + /verify/<token> link backed by report_artifacts (migration 0007); public Verify page shows printed snapshot vs live figures side-by-side — 9 vitest specs
 - [x] §3f Lifecycle: digest settings on Account (opt-in, quiet by default, bill-cycle anchor day 1–28, "dollar figure or it doesn't send" rule stated; delivery infra honestly labeled post-beta)
 - [x] §3j honest labeling: Account "How your data updates" card names the active rung (manual upload today; never claims automated; Green Button named as explicit future)
-- [ ] Verification deliverable: per-claim URL + screenshot walkthrough so the owner can verify every shipped claim
+- [x] Verification deliverable: VERIFICATION-WALKTHROUGH.md — per-claim URL + click path + code/test pointers for all 30 shipped claims across §3e/3k/3g/3h/3i-2/3l/3f/3j + CRUD/nav, plus an explicit not-claimed section
 
 ## Core usability — CRUD + navigation (owner feedback Jul 18, PRIORITY)
 - [x] Audit: CRUD coverage matrix for sites, meters, tariffs, scenarios, site groups, uploads, implementations
