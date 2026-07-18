@@ -32,6 +32,7 @@ import {
   siteGroupMembers,
   siteGeometry,
   measureImplementations,
+  reportArtifacts,
 } from "../drizzle/schema";
 
 export class TenancyError extends Error {
@@ -847,4 +848,42 @@ export async function exportUserData(userId: number) {
     uploads: userUploads.map(({ fileKey: _fk, fileUrl: _fu, ...rest }: Record<string, unknown>) => rest),
     metering: userMetering,
   };
+}
+
+/* ---------------- §3l report artifacts (verify tokens) ---------------- */
+export async function createReportArtifact(data: typeof reportArtifacts.$inferInsert) {
+  const db = await requireDb();
+  const res = await db.insert(reportArtifacts).values(data);
+  return Number((res as unknown as [{ insertId: number }])[0].insertId);
+}
+
+/** Public lookup by token — used by the /verify page. No tenancy check by
+ * design (the unguessable token IS the capability, like a share link), and
+ * the page renders only report-headline figures, never account data. */
+export async function getReportArtifactByToken(token: string) {
+  const db = await requireDb();
+  const rows = await db.select().from(reportArtifacts).where(eq(reportArtifacts.token, token)).limit(1);
+  return rows[0] ?? null;
+}
+
+export async function listReportArtifacts(userId: number) {
+  const db = await requireDb();
+  return db.select().from(reportArtifacts).where(eq(reportArtifacts.userId, userId)).orderBy(desc(reportArtifacts.createdAt)).limit(50);
+}
+
+/* ---------------- §3f digest settings ---------------- */
+export async function setDigestPrefs(userId: number, optIn: boolean, anchorDay: number) {
+  const db = await requireDb();
+  const day = Math.min(28, Math.max(1, Math.round(anchorDay)));
+  await db.update(users).set({ digestOptIn: optIn, digestAnchorDay: day }).where(eq(users.id, userId));
+}
+
+export async function getDigestPrefs(userId: number) {
+  const db = await requireDb();
+  const rows = await db
+    .select({ digestOptIn: users.digestOptIn, digestAnchorDay: users.digestAnchorDay })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return rows[0] ?? { digestOptIn: false, digestAnchorDay: 1 };
 }

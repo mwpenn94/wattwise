@@ -26,6 +26,11 @@ export const users = mysqlTable("users", {
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
   tier: mysqlEnum("tier", ["free", "plus", "pro"]).default("free").notNull(),
+  /** §3f lifecycle: monthly digest opt-in (quiet by default), anchored to the
+   * user's bill-cycle day (1–28). Every digest must contain a dollar figure
+   * or it doesn't send — enforced at send time, not here. */
+  digestOptIn: boolean("digestOptIn").default(false).notNull(),
+  digestAnchorDay: int("digestAnchorDay").default(1).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -663,3 +668,22 @@ export type WeatherNormal = typeof weatherNormals.$inferSelect;
 export type SeederRun = typeof seederRuns.$inferSelect;
 export type Metering = typeof metering.$inferSelect;
 export type Analysis = typeof analyses.$inferSelect;
+
+/** §3l reports — verification tokens. Every exported report carries a footer
+ * link to /verify/<token> which re-renders the CURRENT numbers live, so a
+ * forwarded PDF is never silently stale. Snapshot stores what was printed;
+ * the live page shows both printed-at and current figures. */
+export const reportArtifacts = mysqlTable(
+  "report_artifacts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    siteId: int("siteId").notNull(),
+    token: varchar("token", { length: 64 }).notNull().unique(),
+    kind: mysqlEnum("kind", ["energy_plan", "verified_savings", "practitioner"]).notNull(),
+    /** snapshot of the headline numbers at print time (for drift display) */
+    snapshot: json("snapshot"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [index("report_artifacts_user_idx").on(t.userId), index("report_artifacts_token_idx").on(t.token)],
+);

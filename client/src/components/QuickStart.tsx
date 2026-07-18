@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import { Building2, Check, Factory, Home as HomeIcon, Hotel, MapPin, Receipt, ShoppingCart, Sparkles, Store, Warehouse } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { fileToBase64 } from "@/lib/wattwiseUi";
+import AnalysisProgress from "@/components/AnalysisProgress";
 
 interface BillDraft {
   siteId: number;
@@ -52,6 +53,8 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
   const utils = trpc.useUtils();
   const [address, setAddress] = useState("");
   const [phase, setPhase] = useState<"idle" | "creating" | "analyzing" | "saving">("idle");
+  // §3h: track the site being analyzed so the live pipeline narration can poll it
+  const [analyzingSiteId, setAnalyzingSiteId] = useState<number | null>(null);
   const [billDraft, setBillDraft] = useState<BillDraft | null>(null);
   const billRef = useRef<HTMLInputElement>(null);
   // Grounded intake state
@@ -94,6 +97,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
   const busy = phase !== "idle";
 
   async function finishToDashboard(siteId: number) {
+    setAnalyzingSiteId(siteId);
     await analyze.mutateAsync({ siteId });
     await Promise.all([utils.insights.invalidate(), utils.sites.list.invalidate()]);
     navigate(`/app?site=${siteId}`);
@@ -293,6 +297,10 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
             {phase === "creating" ? "Creating…" : phase === "analyzing" ? "Analyzing…" : "Analyze"}
           </Button>
         </div>
+        {/* §3h: live pipeline narration — the engine's real stages, not theater */}
+        {analyzingSiteId != null && (phase === "analyzing" || phase === "saving") && (
+          <AnalysisProgress siteId={analyzingSiteId} active={true} />
+        )}
         {selectedPlace && (
           <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
             <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-600 dark:text-emerald-400">
@@ -306,6 +314,10 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
             )}
           </div>
         )}
+        {/* §3i-2 "one address, three utilities": show every commodity we hold rates
+            for in this state. Copy says "rates loaded", never "your utility is" —
+            the registry is our seeded snapshot, not a service-territory lookup. */}
+        {selectedPlace && resolved.data?.place.state && <UtilitiesMoment state={resolved.data.place.state} />}
         {address.trim().length >= 3 && !billDraft && (
           <div className="mt-3">
             <p className="text-[11px] font-medium text-muted-foreground">
@@ -447,5 +459,26 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/** §3i-2 "one address, three utilities" — per-commodity providers we hold
+    seeded rates for in the site's state. Explicitly a rates-loaded statement,
+    not a service-territory claim. Renders nothing while loading or when the
+    registry has no rows for the state (no fabricated providers). */
+function UtilitiesMoment({ state }: { state: string }) {
+  const reg = trpc.tariffs.utilitiesForState.useQuery({ state }, { staleTime: 5 * 60 * 1000 });
+  if (!reg.data || reg.data.rateCount === 0) return null;
+  const parts: string[] = [];
+  if (reg.data.electric.length > 0) parts.push(`${reg.data.electric.join(" / ")} (electric)`);
+  if (reg.data.gas.length > 0) parts.push(`${reg.data.gas.join(" / ")} (gas)`);
+  if (reg.data.water.length > 0) parts.push(`${reg.data.water.join(" / ")} (water)`);
+  if (parts.length === 0) return null;
+  return (
+    <p className="mt-1.5 text-[11px] text-muted-foreground">
+      <span className="font-medium text-foreground">Rates loaded for {reg.data.state}:</span> {parts.join(" · ")} —{" "}
+      {reg.data.rateCount} seeded rate{reg.data.rateCount === 1 ? "" : "s"}. We compare against these; confirm your actual
+      provider on your bill.
+    </p>
   );
 }

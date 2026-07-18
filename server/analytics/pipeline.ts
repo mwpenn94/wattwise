@@ -94,7 +94,9 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
       marginalCostUsd: result.marginalCostUsd,
       completedAt: new Date(),
       weatherBasis: LABEL_NORMAL_YEAR,
-      stagesCompleted: ["demand", "baseline", "tariff", "benchmark", "emissions", "insights", "opportunities"],
+      // §3h: stagesCompleted now carries the human-readable narration written
+      // incrementally by execute()'s narrate() — don't clobber it with the old
+      // stage-key list; the narration IS the record of completed stages.
     });
     await h.audit(userId, "analysis_complete", "analysis", String(analysisId), { siteId: site.id, durationMs });
     return result;
@@ -135,11 +137,26 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
 }
 
 async function execute(site: Site, meter: Meter | null, userId: number, tier: string, analysisId: number): Promise<PipelineResult> {
+  /* §3h processing as proof-of-work: each stage persists a narration line AS
+     IT COMPLETES (best-effort write to stagesCompleted) so the client can
+     poll the running analysis and show the real pipeline. Stages narrate
+     actual work — no theatrical delays; fallbacks are named inline. */
+  const narration: string[] = [];
+  const narrate = (line: string) => {
+    narration.push(line);
+    void h.updateAnalysis(analysisId, { stagesCompleted: [...narration] }).catch(() => {});
+  };
+
   // Cycle 9 (pass 505, extended): pipeline shares the ZIP/state-inferred zone
   // fallback rather than assuming the hot-arid AZ default for every site.
   const climateZone = site.climateZone ?? inferClimateZone(site.zip ?? undefined, site.state ?? undefined);
   const station = await h.getWeatherStation(climateZone);
   const normals = (station?.monthlyNormals ?? []) as MonthNormalRow[];
+  narrate(
+    station
+      ? `Matched weather normals — station ${station.stationId} (climate zone ${climateZone})`
+      : `No weather station for zone ${climateZone} — continuing with degree-day defaults`,
+  );
 
   /* ---------- stage 1: interval data + demand analytics ---------- */
   let points: IntervalPoint[] = [];
@@ -152,6 +169,13 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // timezone, never the server's.
   const tz = meter?.timezone ?? DEFAULT_TZ;
   const demand = hasIntervals ? computeDemandAnalytics(points, 4, [6, 7, 8, 9], tz) : null;
+  narrate(
+    hasIntervals
+      ? `Analyzed ${points.length.toLocaleString()} interval readings — peak ${demand ? demand.peakKw.toFixed(1) : "?"} kW, load factor ${demand ? Math.round(demand.loadFactor * 100) : "?"}%`
+      : meter
+        ? "No interval data on this meter — switching to archetype-synthetic baseline (disclosed)"
+        : "No meter on this site — building the archetype-synthetic baseline (disclosed)",
+  );
 
   /* ---------- stage 2: baseline ---------- */
   let baseline: BaselineFit | null = null;
@@ -221,6 +245,13 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       source: arch ? `${arch.source}:${arch.sourceVersion ?? ""}` : "prototype-archetype",
     });
   }
+  narrate(
+    baseline
+      ? baseline.method === "caltrack_monthly"
+        ? `Fit weather-normalized baseline — CalTRACK monthly, CVRMSE ${baseline.cvrmse != null ? (baseline.cvrmse * 100).toFixed(0) + "%" : "n/a"}`
+        : "Built archetype-synthetic baseline for this building type and climate"
+      : "No baseline possible — missing both interval data and square footage",
+  );
 
   /* ---------- stage 3: tariff check (current + sweep) ---------- */
   const costPoints = hasIntervals ? points : archetypeHourly ? hourlyPoints(archetypeHourly) : [];
@@ -380,6 +411,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       return (b.savingsVsCurrent ?? 0) - (a.savingsVsCurrent ?? 0);
     });
   }
+  narrate(
+    comparisons.length > 0
+      ? `Re-priced a full year on ${comparisons.length} seeded rate${comparisons.length === 1 ? "" : "s"} — ${comparisons.filter((c) => c.eligible).length} eligible for this ${meter?.commodity ?? "electric"} meter`
+      : "No rate sweep possible — no load profile or no seeded rates for this commodity/state",
+  );
 
   /* ---------- stage 4: benchmarking ---------- */
   let benchmark: PipelineResult["benchmark"] = null;
@@ -396,6 +432,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       benchmark = { siteEui, percentileBand: pct.percentileBand, betterThanMedian: pct.betterThanMedian, source: `${bench.source} (${bench.sourceVersion})` };
     }
   }
+  narrate(
+    benchmark
+      ? `Benchmarked against ${benchmark.source ?? "peer"} peers — ${benchmark.percentileBand ?? "percentile computed"}`
+      : "Benchmark skipped — needs building type, square footage, and an annualizable usage figure",
+  );
 
   /* ---------- stage 5: emissions ---------- */
   // eGRID CO2e factors are lb/MWh of ELECTRICITY — applying them to gas therms
@@ -409,6 +450,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       emissions = { annualCo2eLb: (annualUsage / 1000) * factor.co2eLbPerMwh, subregion, factorYear: factor.year, mapped };
     }
   }
+  narrate(
+    emissions
+      ? `Applied eGRID ${emissions.factorYear} emissions factor${emissions.mapped ? ` for ${emissions.subregion}` : " (regional default — ZIP unmapped)"}`
+      : "Emissions skipped — electric-only factors; no annualizable electric usage this run",
+  );
 
   /* ---------- stage 6: insights ---------- */
   const insightRows: Parameters<typeof h.replaceInsights>[1] = [];
@@ -678,6 +724,78 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     });
   }
 
+  /* §3i-2 consolidation finding — sites with 2+ MAIN electric meters that
+     both carry interval data: if their peaks land at different hours, the
+     coincident (summed-series) peak is lower than the sum of individual
+     peaks, and combined billing MIGHT cut demand charges. Honesty gates:
+     needs ≥2 metered mains with ≥10 readings each; the coincident profile is
+     labeled ANALYSIS ONLY (utilities decide consolidation eligibility, not
+     us); no dollar claim without a demand rate on the basis tariff. */
+  try {
+    const siteMeters = await h.listMeters(site.id, userId);
+    const mainElectric = siteMeters.filter((m2) => m2.commodity === "electric" && m2.meterRole === "main");
+    if (mainElectric.length >= 2) {
+      const series = await Promise.all(
+        mainElectric.map(async (m2) => {
+          const rows = await h.getIntervalPoints(m2.id, userId);
+          return { meter: m2, rows };
+        }),
+      );
+      const metered = series.filter((s2) => s2.rows.length >= 10);
+      if (metered.length >= 2) {
+        // Per-meter peak kW + peak hour; coincident peak from the summed series.
+        const perMeter = metered.map((s2) => {
+          let peakKw = 0;
+          let peakTs = 0;
+          for (const r of s2.rows) {
+            const kw = r.demand ?? (r.durationMin > 0 ? (r.usage * 60) / r.durationMin : 0);
+            if (kw > peakKw) {
+              peakKw = kw;
+              peakTs = r.ts;
+            }
+          }
+          return { label: s2.meter.label ?? `meter ${s2.meter.id}`, peakKw, peakHour: new Date(peakTs).getHours() };
+        });
+        const bucket = new Map<number, number>();
+        for (const s2 of metered) {
+          for (const r of s2.rows) {
+            const kw = r.demand ?? (r.durationMin > 0 ? (r.usage * 60) / r.durationMin : 0);
+            bucket.set(r.ts, (bucket.get(r.ts) ?? 0) + kw);
+          }
+        }
+        let coincidentPeakKw = 0;
+        bucket.forEach((v) => {
+          if (v > coincidentPeakKw) coincidentPeakKw = v;
+        });
+        const sumOfPeaks = perMeter.reduce((a, p) => a + p.peakKw, 0);
+        const reductionKw = sumOfPeaks - coincidentPeakKw;
+        const hoursDiffer = new Set(perMeter.map((p) => p.peakHour)).size > 1;
+        if (hoursDiffer && reductionKw > 0.5) {
+          insightRows.push({
+            siteId: site.id,
+            meterId: null,
+            analysisId,
+            kind: "consolidation",
+            title: `Your ${metered.length} main meters peak at different hours — combined billing could reduce billed demand`,
+            body:
+              `${perMeter.map((p) => `${p.label} peaks ~${p.peakHour}:00 at ${p.peakKw.toFixed(1)} kW`).join("; ")}. ` +
+              `Sum of individual peaks: ${sumOfPeaks.toFixed(1)} kW; coincident (combined-profile) peak: ${coincidentPeakKw.toFixed(1)} kW — ` +
+              `${reductionKw.toFixed(1)} kW lower. If your utility offers meter consolidation or totalized billing on a demand rate, ` +
+              `billed demand could drop by up to that amount. The coincident profile is an analysis-only construct — ` +
+              `consolidation eligibility, fees, and rate impacts are the utility's call; dollar impact depends on your demand rate.`,
+            severity: "opportunity",
+            disaggregationMethod: disaggMethod,
+            confidence: "medium",
+            provenance: { method: "coincident_sum_of_meter_series", meters: perMeter.map((p) => p.label) },
+            metrics: { perMeter, sumOfPeaksKw: sumOfPeaks, coincidentPeakKw, reductionKw },
+          });
+        }
+      }
+    }
+  } catch {
+    /* consolidation finding is best-effort — never fails the pipeline */
+  }
+
   // Cycle 6 finding 13: free-tier solar teaser for high-solar-resource zones
   const highSolarZones = ["2B", "3B", "2A"];
   if (highSolarZones.includes(climateZone)) {
@@ -736,6 +854,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     },
   });
   await h.replaceInsights(site.id, insightRows);
+  narrate(`Wrote ${insightRows.length} insight${insightRows.length === 1 ? "" : "s"} — every figure carries its provenance`);
 
   /* ---------- stage 7: opportunities ---------- */
   const oppCands: OpportunityCandidate[] = [];
@@ -874,6 +993,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       provenance: { savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi], category: c.category },
     })),
   );
+  narrate(`Ranked ${ranked.length} opportunit${ranked.length === 1 ? "y" : "ies"} by estimated annual dollar impact`);
 
   return {
     analysisId,

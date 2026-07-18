@@ -177,7 +177,7 @@ export default function Sites() {
                 {s.sqft && <span>{s.sqft.toLocaleString()} sqft</span>}
                 {s.climateZone && <span>CZ {s.climateZone}</span>}
               </div>
-              <SiteMeters siteId={s.id} />
+              <SiteMeters siteId={s.id} state={s.state} />
               <SiteEntityPicker siteId={s.id} entityId={(s as { entityId?: number | null }).entityId ?? null} />
             </CardContent>
           </Card>
@@ -576,16 +576,34 @@ function MeterManager({ siteId }: { siteId: number }) {
   );
 }
 
-function SiteMeters({ siteId }: { siteId: number }) {
+function SiteMeters({ siteId, state }: { siteId: number; state?: string | null }) {
   const meters = trpc.sites.meters.useQuery({ siteId });
+  // §3i-2: per-commodity "rates loaded" registry line under the meter chips —
+  // only for commodities this site actually has meters on.
+  const reg = trpc.tariffs.utilitiesForState.useQuery({ state: state ?? "" }, { enabled: !!state, staleTime: 5 * 60 * 1000 });
   if (!meters.data || meters.data.length === 0) return null;
+  const commodities = Array.from(new Set(meters.data.map((m) => m.commodity)));
+  const regParts =
+    reg.data && reg.data.rateCount > 0
+      ? commodities
+          .map((c) => {
+            const providers = reg.data![c as "electric" | "gas" | "water"] ?? [];
+            return providers.length > 0 ? `${providers.join(" / ")} (${c})` : null;
+          })
+          .filter((p): p is string => p != null)
+      : [];
   return (
-    <div className="mt-3 flex flex-wrap gap-1.5">
-      {meters.data.map((m) => (
-        <span key={m.id} className="inline-flex items-center gap-1 rounded border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-          <Zap className="h-3 w-3 text-primary" /> {m.label ?? `meter ${m.id}`} · {m.commodity} · {m.meterRole}
-        </span>
-      ))}
+    <div className="mt-3">
+      <div className="flex flex-wrap gap-1.5">
+        {meters.data.map((m) => (
+          <span key={m.id} className="inline-flex items-center gap-1 rounded border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+            <Zap className="h-3 w-3 text-primary" /> {m.label ?? `meter ${m.id}`} · {m.commodity} · {m.meterRole}
+          </span>
+        ))}
+      </div>
+      {regParts.length > 0 && (
+        <p className="mt-1 text-[10px] text-muted-foreground">Rates loaded: {regParts.join(" · ")} — confirm your actual provider on your bill.</p>
+      )}
     </div>
   );
 }

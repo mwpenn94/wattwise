@@ -3,7 +3,8 @@
  * year on the active tariff; results carry payback bands, confidence, and
  * disclosure text (handoff §7).
  */
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useSearch } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -35,14 +36,40 @@ const KINDS = [
   { kind: "ev_load", label: "EV charging", icon: PlugZap, plus: false },
 ] as const;
 
+/**
+ * Deep-link vocabulary → scenario kind. Opportunity cards and Ask WattWise
+ * link here as /app/scenarios?site=N&measure=X so the right measure arrives
+ * preselected (§3k "add to plan" continuity — no re-picking what you clicked).
+ */
+export function measureToKind(measure: string): (typeof KINDS)[number]["kind"] | null {
+  const m = measure.toLowerCase();
+  if ((m.includes("solar") || m.includes("pv")) && m.includes("batter")) return "solar_battery";
+  if (m.includes("batter") || m.includes("peak_shave") || m.includes("demand")) return "battery";
+  if (m.includes("solar") || m.includes("pv")) return "solar";
+  if (m.startsWith("ev") || m.includes("_ev") || m.includes("charg")) return "ev_load";
+  if (m.includes("led") || m.includes("light") || m.includes("hvac") || m.includes("cool") || m.includes("heat") || m.includes("setpoint") || m.includes("efficien") || m.includes("insulat") || m.includes("retrofit") || m.includes("schedule")) return "efficiency";
+  return null;
+}
+
 export default function Scenarios() {
   const sites = trpc.sites.list.useQuery();
-  const [siteId, setSiteId] = useState<string>("");
-  const activeSiteId = siteId ? Number(siteId) : (sites.data?.[0]?.id ?? null);
+  const search = useSearch();
+  const deepLink = useMemo(() => {
+    const p = new URLSearchParams(search);
+    return { site: p.get("site"), measure: p.get("measure") };
+  }, [search]);
+  const [siteId, setSiteId] = useState<string>(deepLink.site ?? "");
+  // A deep-linked ?site= may reference a site the viewer doesn't own (stale or
+  // copied URL) — fall back to the first owned site instead of a blank selector.
+  const requestedSiteId = siteId ? Number(siteId) : null;
+  const activeSiteId =
+    requestedSiteId != null && (sites.data == null || sites.data.some((s) => s.id === requestedSiteId))
+      ? requestedSiteId
+      : (sites.data?.[0]?.id ?? null);
   const scenarios = trpc.scenariosApi.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const utils = trpc.useUtils();
 
-  const [kind, setKind] = useState<(typeof KINDS)[number]["kind"]>("efficiency");
+  const [kind, setKind] = useState<(typeof KINDS)[number]["kind"]>(() => (deepLink.measure ? measureToKind(deepLink.measure) ?? "efficiency" : "efficiency"));
   const [params, setParams] = useState({ solarKwDc: "10", batteryKwh: "20", batteryKw: "10", reduction: "15", evAnnualKwh: "3500", capexUsd: "" });
 
   const run = trpc.scenariosApi.run.useMutation({

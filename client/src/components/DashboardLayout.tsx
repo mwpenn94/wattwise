@@ -34,6 +34,8 @@ import {
   Sparkles,
   Sun,
   Zap,
+  Home as HomeIcon,
+  FileText,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -41,13 +43,15 @@ import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
 
 const menuItems = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/app" },
+  { icon: HomeIcon, label: "Home", path: "/app" },
+  { icon: LayoutDashboard, label: "Explore", path: "/app/explore" },
   { icon: Building2, label: "Sites", path: "/app/sites" },
   { icon: FolderKanban, label: "Portfolio", path: "/app/portfolio" },
   { icon: FileUp, label: "Upload data", path: "/app/upload" },
   { icon: Sparkles, label: "Hypothetical building", path: "/app/wizard" },
   { icon: Sun, label: "Scenarios", path: "/app/scenarios" },
   { icon: Receipt, label: "Tariffs", path: "/app/tariffs" },
+  { icon: FileText, label: "Reports", path: "/app/reports" },
   { icon: GitBranch, label: "Convergence log", path: "/app/convergence" },
   { icon: Settings, label: "Account & usage", path: "/app/account" },
 ];

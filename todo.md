@@ -170,16 +170,16 @@
 ## Remaining v1.7/v1.9 scope (full absorption — Jul 18 continuation)
 - [x] §3b Peak Attribution Module: weather split, schedule split, coincidence residual, spike/plateau triage, counterfactual re-pricing, sufficiency gates; attribution card on Dashboard
 - [x] §3e Prove-It loop: measure_implementations table (migration 0006), "I did this" action on opportunity cards, monthly verdict ledger w/ honesty gates (no verdict <1 month, early read <3, CVRMSE band, inconclusive-inside-band), cumulative verified-savings counter, miss-handling copy (11 vitest specs)
-- [ ] §3k Anti-dashboard home feed: 3-item story feed, verified/projected greeting number, charts inside stories w/ Explore surface, Ask WattWise (Plus) NL → engine dispatch cards
-- [ ] §3g Persona fork: residential/commercial vocabulary + hero rotation + measure library filter (detected from building type, not asked)
-- [ ] §3h Processing proof-of-work: real pipeline stage narration during analysis runs (no theatrical delays)
-- [ ] Empty-of-data home feed runs on estimates with ladder invite (advisor, not zeros)
-- [ ] Add-to-plan on Dashboard opportunity cards → Bill Builder deep link with measure preselected
-- [ ] §3i-2 Portfolio: exception-first ranked view, roll-up KPI header, meter chips w/ role+utility badges, consolidation finding, weather/size-normalized league table, site_groups group-by
-- [ ] Per-commodity utility registries (electric/gas/water) + "one address, three utilities" moment in estimator and site view
-- [ ] §3l Reports: My Energy Plan (Plus, print), Verified Savings Statement (Pro), Practitioner export (CSV+stats), chips in print, footer verify link w/ report_artifacts tokens
-- [ ] §3f Lifecycle: digest settings (monthly, bill-cycle anchored, $-figure rule), quiet defaults
-- [ ] §3j honest labeling: site settings name the active data rung (manual upload today)
+- [x] §3k Anti-dashboard home feed: /app is now a 3-story feed (this month's verdict, one new insight, next move), verified-else-projected greeting number w/ chip, full analytics moved to /app/explore (Explore nav), Ask WattWise (Plus-gated, budget-checked) NL → engine dispatch cards w/ keyword fallback + provenance disclosure (9 vitest specs)
+- [x] §3g Persona fork: residential/commercial detected from building type (client/src/lib/persona.ts, never asked) — home/facility vocabulary, hero rotation via CSS order (residential: rate check first; commercial: demand story first) on Explore
+- [x] §3h Processing proof-of-work: pipeline narrate() persists real per-stage lines into analyses.stagesCompleted as each stage completes (weather station match, N interval readings + peak/LF, CalTRACK fit + CVRMSE, N rates re-priced, benchmark, eGRID factor, N insights, N opportunities); analysis.progress polling proc; AnalysisProgress live log on Explore + QuickStart — fallbacks named inline, nothing staged
+- [x] Empty-of-data home feed runs on estimates with ladder invite (advisor, not zeros) — QuickStart + accuracy-ladder copy on the no-sites home
+- [x] Add-to-plan continuity: opportunity cards → /app/scenarios?site=N&measure=X; Scenarios reads params, preselects site and maps measure vocab to scenario kind (measureToKind); Bill Builder renders on the same page
+- [x] §3i-2 Portfolio: exception-first ranked view ($ opportunity + anomaly bump, top 3 expanded, rest collapsed), roll-up KPI header (cost · verified savings · usage-weighted portfolio load factor w/ disclosure · emissions), meter chips w/ role badges, consolidation finding in pipeline (2+ metered main electric meters peaking at different hours → coincident vs sum-of-peaks, analysis-only label, 0.5 kW materiality floor), league table (kWh/sqft/yr w/ basis chips, unrankable sites named not zeroed), site_groups group-by filter — 6 vitest specs
+- [x] Per-commodity utility registries (electric/gas/water) via tariffs.utilitiesForState from the seeded snapshot — "Rates loaded" honesty copy (never "your utility is") at QuickStart address-confirm + Sites meter view
+- [x] §3l Reports: My Energy Plan (Plus, print w/ cover number + per-measure what/why/payback + "what we'll verify"), Verified Savings Statement (Pro, verified headline + plain-language weather-adjustment box + verdict table), Practitioner export (Pro, CSV w/ CVRMSE/R²/months + chips), Est./Good/Measured chips in print, footer disclaimer + /verify/<token> link backed by report_artifacts (migration 0007); public Verify page shows printed snapshot vs live figures side-by-side — 9 vitest specs
+- [x] §3f Lifecycle: digest settings on Account (opt-in, quiet by default, bill-cycle anchor day 1–28, "dollar figure or it doesn't send" rule stated; delivery infra honestly labeled post-beta)
+- [x] §3j honest labeling: Account "How your data updates" card names the active rung (manual upload today; never claims automated; Green Button named as explicit future)
 - [ ] Verification deliverable: per-claim URL + screenshot walkthrough so the owner can verify every shipped claim
 
 ## Core usability — CRUD + navigation (owner feedback Jul 18, PRIORITY)
@@ -191,5 +191,5 @@
 - [x] Uploads: delete an upload / clear bad data path
 - [x] Nav: console ↔ public site escape routes (logo → home, back links everywhere)
 - [x] Nav: site selector consistency across console pages; no dead-end pages
-- [ ] Nav: breadcrumbs or back affordance on detail views; mobile nav check
-- [ ] Click-through validation of every CRUD flow and nav path (screenshots)
+- [x] Nav: breadcrumbs or back affordance on detail views; mobile nav check (375×812 pass on Home/Explore/Reports/Portfolio — sidebar collapses to header toggle, no dead-ends)
+- [x] Click-through validation of every CRUD flow and nav path (desktop + mobile screenshot pass Jul 18; Scenarios deep-link hardened — unowned ?site= now falls back to first owned site instead of a blank selector)

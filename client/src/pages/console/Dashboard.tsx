@@ -6,6 +6,8 @@
  */
 import { useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc";
+import { detectPersona, personaVocab } from "@/lib/persona";
+import AnalysisProgress from "@/components/AnalysisProgress";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -156,12 +158,23 @@ export default function Dashboard() {
 
   const activeSite = (sites.data ?? []).find((s) => s.id === activeSiteId) ?? null;
 
+  /* §3g persona fork — detected from building type, never asked. Flips
+     vocabulary (home/facility) and hero rotation: residential leads with the
+     rate check (plan choice), commercial leads with the demand story (load
+     factor, peak triage). Same grammar, two voices. */
+  const persona = detectPersona(activeSite?.buildingType);
+  const vocab = personaVocab(persona);
+  const demandFirst = vocab.heroOrder === "demand_first";
+
   return (
     <div className="container max-w-6xl py-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="font-display text-2xl font-bold tracking-tight">Dashboard</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Analytics for the selected site — all modeled estimates.</p>
+          <h1 className="font-display text-2xl font-bold tracking-tight">Explore</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            The full picture for your {vocab.building} — all modeled estimates.
+            {persona === "commercial" ? " Facility voice: demand story first." : " Home voice: rate check first."}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={setSiteSel}>
@@ -185,6 +198,9 @@ export default function Dashboard() {
       <div className="mt-4">
         <DisclaimerBanner />
       </div>
+
+      {/* §3h: live pipeline narration while an analysis runs — real stages only */}
+      {activeSiteId != null && <AnalysisProgress siteId={activeSiteId} active={run.isPending} />}
 
       {/* Progressive participation: optional add-detail chips while quick-start
           placeholders remain in effect — each names what refining unlocks. */}
@@ -290,8 +306,13 @@ export default function Dashboard() {
         />
       </div>
 
+      {/* §3g hero rotation container — CSS order flips the story order per
+          persona without duplicating JSX: commercial (facility voice) leads
+          with the demand story, residential leads with the rate check. */}
+      <div className="flex flex-col">
+
       {/* Interval chart */}
-      <Card className="mt-4 border-border/70">
+      <Card className={`mt-4 border-border/70 ${demandFirst ? "order-1" : "order-3"}`}>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <CardTitle className="font-display text-base">
             Interval demand — {rangeDays === "all" ? "full history" : `last ${rangeDays} days of data`}
@@ -359,7 +380,7 @@ export default function Dashboard() {
           the demand side of the bill. Only renders once analysis produced a
           measured demand block (archetype-only sites have none to show). */}
       {demand && (
-        <Card className="mt-4 border-border/70">
+        <Card className={`mt-4 border-border/70 ${demandFirst ? "order-2" : "order-4"}`}>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="flex items-center gap-2 font-display text-base">
               <Gauge className="h-4 w-4 text-primary" /> Demand & peak charges
@@ -441,7 +462,7 @@ export default function Dashboard() {
         </Card>
       )}
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <div className={`mt-4 grid gap-4 lg:grid-cols-2 ${demandFirst ? "order-3" : "order-5"}`}>
         {/* Demand heatmap */}
         <Card className="border-border/70">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
@@ -520,11 +541,12 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {/* Tariff comparison */}
+      {/* Tariff comparison — §3g hero rotation: residential renders this ABOVE
+          the demand story (order-none default), commercial pushes it after. */}
       {tariffInsight && tariffInsight.length > 0 && (
-        <Card className="mt-4 border-border/70">
+        <Card className={`mt-4 border-border/70 ${demandFirst ? "order-5" : "order-1"}`}>
           <CardHeader className="pb-2">
-            <CardTitle className="font-display text-base">Rate check</CardTitle>
+            <CardTitle className="font-display text-base">Rate check{persona === "residential" ? " — is there a better plan for your home?" : ""}</CardTitle>
           </CardHeader>
           <CardContent>
             <p className="text-sm font-medium">Your load profile re-priced on every seeded rate you may be eligible for</p>
@@ -539,6 +561,8 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       )}
+
+      </div>{/* end §3g hero rotation container */}
 
       {/* Opportunities */}
       {/* §3b Peak attribution story — what made the peak happen. Rendered as its

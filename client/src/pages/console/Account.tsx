@@ -9,7 +9,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Download, Gauge, ShieldCheck } from "lucide-react";
+import { Download, Gauge, ShieldCheck, BellRing, Database } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 const TIERS: Array<{ id: "free" | "plus" | "pro"; name: string; blurb: string }> = [
   { id: "free", name: "Free", blurb: "2 sites · 12 uploads/mo · 3 scenario runs/mo · template-first bill parsing" },
@@ -124,6 +126,27 @@ export default function Account() {
         </Card>
       </div>
 
+      {/* §3j honest labeling: name the active data rung — never claim "automated" */}
+      <Card className="mt-4 border-border/70">
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 font-display text-base">
+            <Database className="h-4 w-4 text-primary" /> How your data updates
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm">
+            <Badge variant="outline" className="mr-2">manual upload</Badge>
+            Your data updates via <strong>manual upload</strong> — interval files, bill photos, or the hypothetical
+            estimator. WattWise does not yet pull from your utility automatically; when automated feeds (Green Button
+            Connect, utility APIs) become available for your providers, this card will say so explicitly. We never label a
+            manual rung “automated.”
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* §3f lifecycle: monthly digest — quiet by default, bill-cycle anchored */}
+      <DigestCard />
+
       <Card className="mt-4 border-border/70">
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 font-display text-base">
@@ -141,5 +164,67 @@ export default function Account() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+/** §3f digest settings — one monthly digest anchored to the bill cycle, opt-in
+ * (quiet by default). The dollar-figure send rule is enforced by the digest
+ * builder, and stated here so the contract is visible. */
+function DigestCard() {
+  const prefs = trpc.account.digestPrefs.useQuery();
+  const utils = trpc.useUtils();
+  const save = trpc.account.setDigestPrefs.useMutation({
+    onSuccess: async () => {
+      await utils.account.digestPrefs.invalidate();
+      toast.success("Digest settings saved");
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const optIn = prefs.data?.digestOptIn ?? false;
+  const day = prefs.data?.digestAnchorDay ?? 1;
+
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <BellRing className="h-4 w-4 text-primary" /> Monthly digest
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium">One digest per month — that's the whole promise</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              One verdict, one new insight, one nudge — timed to your bill cycle so it lands when your bill does. Every
+              digest contains a dollar figure or it doesn't send. Off by default; nothing else emails you.
+            </p>
+          </div>
+          <Switch
+            checked={optIn}
+            disabled={prefs.isLoading || save.isPending}
+            onCheckedChange={(v) => save.mutate({ optIn: v, anchorDay: day })}
+          />
+        </div>
+        {optIn && (
+          <div className="mt-3 flex items-center gap-3">
+            <span className="text-xs text-muted-foreground">Bill-cycle day</span>
+            <Select value={String(day)} onValueChange={(v) => save.mutate({ optIn: true, anchorDay: Number(v) })}>
+              <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                  <SelectItem key={d} value={String(d)}>{d}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-xs text-muted-foreground">of each month (set it to the day your bill usually arrives)</span>
+          </div>
+        )}
+        <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground">
+          Digest delivery infrastructure ships after the beta — this setting is stored now and honored from the first
+          send. Event alerts beyond the digest (bill anomaly, demand spike, tariff change) follow the same rule: a
+          dollar figure or silence.
+        </p>
+      </CardContent>
+    </Card>
   );
 }

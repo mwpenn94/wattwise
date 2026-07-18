@@ -6,6 +6,7 @@ import {
   FREE_TIER_MAX_UPLOADS_PER_MONTH,
   FREE_TIER_SCENARIOS_PER_MONTH,
   MODELED_ESTIMATES_DISCLAIMER,
+  // (§3l reports engine imported separately below)
   LABEL_CP_ESTIMATED,
   LABEL_NORMAL_YEAR,
   LABEL_PROTOTYPE_ARCHETYPE,
@@ -32,11 +33,20 @@ import { extractBill } from "./ingest/billOcr";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
 import { archetypeBaseline, type BaselineFit } from "./analytics/baseline";
+import { assembleReportData, newReportToken, practitionerCsv } from "./reports";
+
+/** §3l report kinds → human feature names for tier-gate error copy. */
+const REPORT_FEATURE_NAME: Record<"energy_plan" | "verified_savings" | "practitioner", string> = {
+  energy_plan: "My Energy Plan report",
+  verified_savings: "Verified Savings Statement",
+  practitioner: "Practitioner export",
+};
 import { evaluateImplementation, buildMonthlyActuals } from "./analytics/proveIt";
+import { routeQuestion, ASK_ROUTE_EST_COST_USD, buildAskCard } from "./askWattwise";
 import { runScenario, hourlyToPoints, type ScenarioInput } from "./analytics/scenarios";
 import { composeMeasures, presetBaskets, type PlanMeasure } from "./analytics/composer";
 import { costOnTariff } from "./analytics/tariffEngine";
-import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend } from "./analytics/costModel";
+import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend, llmBudgetAllows } from "./analytics/costModel";
 import { storagePut } from "./storage";
 import { deriveFromAddress, cascadeProvenance } from "./cascade";
 import { placeAutocomplete, resolvePlace } from "./places";
@@ -788,20 +798,45 @@ export const appRouter = router({
               baseline?: { normalizedAnnualUsage?: number | null; confidenceLabel?: string } | null;
             } | null;
             const meterRows = await h.listMeters(s.id, ctx.user.id);
+            // §3i-2 exception-first inputs: biggest open $ opportunity (not yet
+            // marked implemented) and anomaly severity from the insight rows.
+            const [opps, impls] = await Promise.all([
+              h.listOpportunities(s.id, ctx.user.id),
+              h.listMeasureImplementations(s.id, ctx.user.id),
+            ]);
+            const implementedMeasures = new Set(impls.map((i) => i.measure));
+            const openOpps = opps.filter((o) => !implementedMeasures.has(o.measure));
+            const topOpp = openOpps.reduce<{ title: string; savings: number } | null>((acc, o) => {
+              const s$ = o.estCostSavingsPerYr ?? 0;
+              return acc == null || s$ > acc.savings ? { title: o.title, savings: s$ } : acc;
+            }, null);
+            const anomaly = ins.find((i) => i.kind === "anomaly");
+            const annualUsageKwh = m?.baseline?.normalizedAnnualUsage ?? null;
             return {
               siteId: s.id,
               name: s.name,
               entityId: s.entityId ?? null,
               state: s.state,
               buildingType: s.buildingType,
+              climateZone: s.climateZone ?? null,
+              sqft: s.sqft ?? null,
               meterCount: meterRows.length,
               analyzed: m != null,
               annualCostUsd: m?.currentCost?.breakdown?.total ?? null,
               demandCostUsd: m?.currentCost?.breakdown ? (m.currentCost.breakdown.demand ?? 0) + (m.currentCost.breakdown.cp ?? 0) : null,
               peakKw: m?.demand?.peakKw ?? null,
               loadFactor: m?.demand?.loadFactor ?? null,
-              annualUsageKwh: m?.baseline?.normalizedAnnualUsage ?? null,
+              annualUsageKwh,
               annualCo2eLb: m?.emissions?.annualCo2eLb ?? null,
+              // League-table basis: kWh/sqft/yr — only when BOTH inputs exist.
+              // Weather normalization: usage is already normal-year normalized
+              // by the baseline where a fit exists; chip carries the basis.
+              euiKwhPerSqft: annualUsageKwh != null && s.sqft ? annualUsageKwh / s.sqft : null,
+              euiBasis: m?.baseline?.confidenceLabel ?? null,
+              topOpportunityTitle: topOpp?.title ?? null,
+              topOpportunityUsd: topOpp?.savings ?? null,
+              hasAnomaly: anomaly != null,
+              anomalyTitle: anomaly?.title ?? null,
             };
           }),
         );
@@ -809,6 +844,15 @@ export const appRouter = router({
           const vals = siteRollups.map((r) => r[k]).filter((v): v is number => v != null);
           return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) : null;
         };
+        // §3i-2 roll-up KPI header: cumulative verified savings across ALL the
+        // user's implementations; portfolio load factor = usage-weighted mean
+        // of site load factors (disclosed as weighted mean, not a coincident
+        // portfolio-meter figure — we have no combined meter).
+        const verifiedSavingsUsd = await h.totalVerifiedSavings(ctx.user.id);
+        const lfRows = siteRollups.filter((r) => r.loadFactor != null && r.annualUsageKwh != null);
+        const lfWeight = lfRows.reduce((a, r) => a + (r.annualUsageKwh ?? 0), 0);
+        const portfolioLoadFactor =
+          lfWeight > 0 ? lfRows.reduce((a, r) => a + (r.loadFactor ?? 0) * ((r.annualUsageKwh ?? 0) / lfWeight), 0) : null;
         return {
           entities: allEntities,
           sites: siteRollups,
@@ -822,6 +866,9 @@ export const appRouter = router({
             // NOTE: site peaks are non-coincident — summing them overstates any
             // true coincident portfolio peak; label is explicit about this.
             sumOfSitePeaksKw: sum("peakKw"),
+            verifiedSavingsUsd,
+            portfolioLoadFactor,
+            openOpportunityUsd: siteRollups.reduce((a, r) => a + (r.topOpportunityUsd ?? 0), 0),
           },
         };
       }),
@@ -1178,6 +1225,19 @@ export const appRouter = router({
     latest: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
       return h.getLatestAnalysis(input.siteId, ctx.user.id);
     }),
+    /* §3h processing as proof-of-work — poll the running analysis and surface
+       the pipeline's real narration lines (written incrementally by narrate()).
+       No theatrical stages: this returns exactly what the engine has done. */
+    progress: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      const a = await h.getLatestAnalysis(input.siteId, ctx.user.id);
+      if (!a) return null;
+      return {
+        analysisId: a.id,
+        status: a.status,
+        narration: Array.isArray(a.stagesCompleted) ? (a.stagesCompleted as string[]) : [],
+        error: a.error ?? null,
+      };
+    }),
     baseline: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
       return h.getLatestBaseline(input.siteId, ctx.user.id);
     }),
@@ -1208,6 +1268,26 @@ export const appRouter = router({
 
   /* ================= tariffs ================= */
   tariffs: router({
+    /* §3i-2 "one address, three utilities" — per-commodity provider registry
+       derived from the seeded tariff snapshot for a state. Honesty: this lists
+       providers WE HAVE RATES FOR, not a claim of who actually serves the
+       address — the copy must say "rates loaded", not "your utility is". */
+    utilitiesForState: protectedProcedure.input(z.object({ state: z.string() })).query(async ({ input }) => {
+      await seeded();
+      const rows = await h.listTariffs(undefined, input.state.toUpperCase());
+      const byCommodity: Record<"electric" | "gas" | "water", string[]> = { electric: [], gas: [], water: [] };
+      for (const t of rows) {
+        const c = t.commodity as "electric" | "gas" | "water";
+        if (!byCommodity[c].includes(t.utilityName)) byCommodity[c].push(t.utilityName);
+      }
+      return {
+        state: input.state.toUpperCase(),
+        electric: byCommodity.electric,
+        gas: byCommodity.gas,
+        water: byCommodity.water,
+        rateCount: rows.length,
+      };
+    }),
     list: protectedProcedure.input(z.object({ state: z.string().optional() }).optional()).query(async ({ input }) => {
       await seeded();
       const rows = await h.listTariffs("electric", input?.state);
@@ -1604,6 +1684,43 @@ export const appRouter = router({
   }),
 
   /* ================= account: usage metering + data export ================= */
+  /* ================= §3k Ask WattWise — NL entrance to existing engines ================= */
+  ask: router({
+    question: protectedProcedure
+      .input(z.object({ siteId: z.number(), question: z.string().min(3).max(500) }))
+      .mutation(async ({ ctx, input }) => {
+        requireTier(tierOf(ctx.user), "plus", "Ask WattWise");
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+
+        // Budget pre-check: routing uses a tiny LLM call; over-budget or
+        // unavailable → deterministic keyword router (disclosed in provenance).
+        const allowLlm = await llmBudgetAllows(ctx.user.id, tierOf(ctx.user), ASK_ROUTE_EST_COST_USD);
+        const route = await routeQuestion(input.question, allowLlm);
+        if (route.routedBy === "llm") {
+          await recordMeterEvent({ userId: ctx.user.id, kind: "ask_wattwise_route", llmTokensIn: 200, llmTokensOut: 20, tier: tierOf(ctx.user) });
+        }
+        const routedNote =
+          route.routedBy === "llm"
+            ? "Question routed by LLM — all figures below come from your stored analysis, never generated text."
+            : "Question routed by keyword matching (LLM unavailable or over budget) — all figures come from your stored analysis.";
+
+        // Dispatch: every card's numbers come from stored engine rows.
+        const insights = await h.listInsights(input.siteId, ctx.user.id);
+        const summaryRow = insights.find((i) => i.kind === "summary");
+        const opps = await h.listOpportunities(input.siteId, ctx.user.id);
+        const card = await buildAskCard(route.intent, {
+          siteId: input.siteId,
+          siteName: site.name,
+          insights,
+          summaryMetrics: (summaryRow?.metrics ?? null) as Record<string, unknown> | null,
+          opportunities: opps,
+          verifiedTotalUsd: await h.totalVerifiedSavings(ctx.user.id),
+        });
+        await h.audit(ctx.user.id, "ask_wattwise", "site", String(input.siteId), { question: input.question.slice(0, 200), intent: route.intent, routedBy: route.routedBy });
+        return { intent: route.intent, routedBy: route.routedBy, card: { ...card, provenance: [routedNote, ...card.provenance] } };
+      }),
+  }),
   account: router({
     usage: protectedProcedure.query(async ({ ctx }) => {
       const llmSpend = await monthToDateLlmSpend(ctx.user.id);
@@ -1643,6 +1760,79 @@ export const appRouter = router({
       const data = await h.exportUserData(ctx.user.id);
       await h.audit(ctx.user.id, "data_export", "user", String(ctx.user.id), { tables: Object.keys(data) });
       return data;
+    }),
+    /** §3f lifecycle: digest settings — quiet by default (opt-in), anchored to
+     * the user's bill-cycle day. The digest itself (send infra) is future work;
+     * the setting is real and persisted so the contract is honest. */
+    digestPrefs: protectedProcedure.query(async ({ ctx }) => h.getDigestPrefs(ctx.user.id)),
+    setDigestPrefs: protectedProcedure
+      .input(z.object({ optIn: z.boolean(), anchorDay: z.number().int().min(1).max(28) }))
+      .mutation(async ({ ctx, input }) => {
+        await h.setDigestPrefs(ctx.user.id, input.optIn, input.anchorDay);
+        await h.audit(ctx.user.id, "digest_prefs", "user", String(ctx.user.id), input);
+        return h.getDigestPrefs(ctx.user.id);
+      }),
+  }),
+
+  /* §3l reports — three artifacts, one engine, verify tokens */
+  reports: router({
+    /** Assemble report data for preview/print. energy_plan = Plus+; the other two = Pro. */
+    data: protectedProcedure
+      .input(z.object({ siteId: z.number().int(), kind: z.enum(["energy_plan", "verified_savings", "practitioner"]) }))
+      .query(async ({ ctx, input }) => {
+        requireTier(tierOf(ctx.user), input.kind === "energy_plan" ? "plus" : "pro", REPORT_FEATURE_NAME[input.kind]);
+        return assembleReportData(input.siteId, ctx.user.id);
+      }),
+    /** Create a report artifact: persists the printed snapshot + verify token.
+     * Returns the token — the client renders the print view with the footer
+     * verification link (/verify/<token>). */
+    generate: protectedProcedure
+      .input(z.object({ siteId: z.number().int(), kind: z.enum(["energy_plan", "verified_savings", "practitioner"]) }))
+      .mutation(async ({ ctx, input }) => {
+        requireTier(tierOf(ctx.user), input.kind === "energy_plan" ? "plus" : "pro", REPORT_FEATURE_NAME[input.kind]);
+        const data = await assembleReportData(input.siteId, ctx.user.id);
+        const token = newReportToken();
+        await h.createReportArtifact({
+          userId: ctx.user.id,
+          siteId: input.siteId,
+          token,
+          kind: input.kind,
+          snapshot: {
+            annualCostUsd: data.annualCostUsd,
+            plannedTotalUsd: data.plannedTotalUsd,
+            verifiedTotalUsd: data.verifiedTotalUsd,
+            measureCount: data.measures.length,
+            siteName: data.site.name,
+            generatedAt: data.generatedAt,
+          },
+        });
+        await h.audit(ctx.user.id, "report_generate", "site", String(input.siteId), { kind: input.kind, token });
+        const csv = input.kind === "practitioner" ? practitionerCsv(data) : null;
+        return { token, data, csv };
+      }),
+    /** Public verify endpoint — the token is the capability. Shows the printed
+     * snapshot next to the CURRENT figures so a forwarded PDF is never silently
+     * stale. Only headline numbers, never account details. */
+    verify: publicProcedure.input(z.object({ token: z.string().min(8).max(64) })).query(async ({ input }) => {
+      const artifact = await h.getReportArtifactByToken(input.token);
+      if (!artifact) return { found: false as const };
+      const current = await assembleReportData(artifact.siteId, artifact.userId).catch(() => null);
+      return {
+        found: true as const,
+        kind: artifact.kind,
+        printedAt: artifact.createdAt.getTime(),
+        snapshot: artifact.snapshot as Record<string, unknown> | null,
+        current: current
+          ? {
+              annualCostUsd: current.annualCostUsd,
+              plannedTotalUsd: current.plannedTotalUsd,
+              verifiedTotalUsd: current.verifiedTotalUsd,
+              measureCount: current.measures.length,
+              siteName: current.site.name,
+            }
+          : null,
+        disclaimer: MODELED_ESTIMATES_DISCLAIMER,
+      };
     }),
   }),
 });

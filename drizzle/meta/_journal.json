@@ -50,6 +50,13 @@
       "when": 1784403078721,
       "tag": "0006_rapid_mach_iv",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1784405685202,
+      "tag": "0007_dapper_whizzer",
+      "breakpoints": true
     }
   ]
 }
