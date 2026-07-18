@@ -304,6 +304,15 @@ function DashboardLayoutContent({
           </div>
         )}
         <main className="flex-1 p-4">{children}</main>
+        {/* §5c-1b: privacy/terms/contact reachable from every page, console included */}
+        <footer className="border-t border-border/60 px-4 py-3">
+          <div className="flex flex-wrap items-center gap-4 text-[11px] text-muted-foreground">
+            <a href="/legal#privacy" className="hover:text-foreground">Privacy policy</a>
+            <a href="/legal#terms" className="hover:text-foreground">Terms of use</a>
+            <a href="/legal#contact" className="hover:text-foreground">Contact</a>
+            <a href="/convergence" className="hover:text-foreground">Methodology</a>
+          </div>
+        </footer>
       </SidebarInset>
     </>
   );

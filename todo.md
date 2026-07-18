@@ -241,3 +241,12 @@
 - [x] Persona-QA groundwork: persona fingerprint on dead-end events (PII-free) + at least one CI persona suite (renter zero-capex assertion) (v1.20 block E, AC18a)
 - [x] Finish in-flight: building-profile identity confirm chip panel
 - [x] Finish in-flight: EN/ES groundwork (string layer + missing-string check)
+
+## v2.13 intake Jul 18 (live homepage audit §5c — ranked fixes)
+- [x] §5c-1 Auth-state-aware hero: logged-out → estimate box is the hero; returning → dashboard CTA + "since your last visit" line
+- [x] §5c-1b Legal footer: privacy policy + terms + contact pages exist and are footer-linked on every page
+- [x] §5c-2 Live sample insight card on homepage: real-pipeline sample Tucson office dollar figure above the fold with confidence chip
+- [x] §5c-3 Consumer-voice copy pass: outcome-first feature cards; jargon stays in methodology layer; micro-fixes (seeded rates, ingests, confirm-what-it-is)
+- [x] §5c-4 Remove builder artifacts from public chrome: Open console CTA + Convergence log link off logged-out chrome (keep Methodology)
+- [x] §5c-5 Mobile header layout fix: ES toggle wrap/collision at phone width, touch targets
+- [x] §5c-6 Minor batch: Free-tier personalization box, muted-text contrast ≥4.5:1, header nav anchors (How it works / Pricing), annual-toggle note deferred with billing

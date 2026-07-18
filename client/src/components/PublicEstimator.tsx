@@ -258,9 +258,9 @@ export function PublicEstimator() {
               {locateError && <p className="mt-2 text-[11px] text-muted-foreground">{locateError}</p>}
               {sampleMut.error && <p className="mt-2 text-[11px] text-destructive">{sampleMut.error.message}</p>}
               <p className="mt-3 text-[11px] text-muted-foreground/80">
-                Type your address, pick it from the list, and confirm what it is. Estimated from real building archetypes,
-                local climate, and seeded utility rates — never your personal data. Location is only used when you tap the
-                button, and never stored.
+                Type your address, pick it from the list, and tell us what kind of building it is. Your estimate comes
+                from buildings like yours, your local climate, and your local utility's current rates — never your
+                personal data. Location is only used when you tap the button, and never stored.
               </p>
             </>
           )}

@@ -99,6 +99,19 @@ const siteInput = z.object({
   hasSolar: z.boolean().optional(),
 });
 
+/* §5c-2: module cache for the homepage live sample card — recomputed at most
+ * every 6h; the landing page hydrates one real-pipeline card without per-visitor cost. */
+let sampleCardCache: {
+  at: number;
+  value: {
+    estimatedAnnualCostUsd: number;
+    topOpportunity: { title: string; estimatedSavingsUsd: number; basis: string } | null;
+    percentileBand: string | null;
+    rung: string;
+    label: string;
+  };
+} | null = null;
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
@@ -167,6 +180,33 @@ export const appRouter = router({
         place: { formattedAddress: "Sample office · Tucson, AZ 85701 (demo building)", lat: 32.2217, lng: -110.9698, placeId: "sample-tucson-office" },
         isSample: true as const,
       };
+    }),
+    /* §5c-2 live sample insight card — the homepage embeds ONE real card
+     * ("show one, don't describe six"). Same real pipeline as `sample`, but a
+     * query (renders on page load) with a server-side cache so the landing
+     * page never pays recompute per visitor and never counts against the
+     * per-IP estimate budget. Clearly labeled a demo building downstream. */
+    sampleCard: publicProcedure.query(async () => {
+      const now = Date.now();
+      if (sampleCardCache && now - sampleCardCache.at < 6 * 60 * 60 * 1000) return sampleCardCache.value;
+      const est = await computeAddressEstimate({
+        formattedAddress: "Sample office · Tucson, AZ 85701",
+        city: "Tucson",
+        state: "AZ",
+        zip: "85701",
+        placeVerified: false,
+        buildingType: "office",
+        sqft: 12_000,
+      });
+      const value = {
+        estimatedAnnualCostUsd: est.estimatedAnnualCostUsd,
+        topOpportunity: est.topOpportunity,
+        percentileBand: est.percentileBand,
+        rung: est.accuracy.rung,
+        label: "Sample office · Tucson, AZ 85701 (demo building)",
+      };
+      sampleCardCache = { at: now, value };
+      return value;
     }),
     /* §1b use-my-location — tap-triggered reverse geocode. The coordinate is
      * used once for the lookup and never stored (GPS-never-stored rule). */
@@ -925,6 +965,9 @@ export const appRouter = router({
               // it actually knows).
               lat: s.lat ?? null,
               lng: s.lng ?? null,
+              // §5c-1 returning-user hero: watchdog status in the "since your
+              // last visit" line without an extra query.
+              awayMode: s.awayMode ?? false,
               climateZone: s.climateZone ?? null,
               // §3i-2 utility-exposure rollup input: which provider serves this site
               utilityName: s.utilityName ?? null,

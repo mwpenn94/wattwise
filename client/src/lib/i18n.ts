@@ -40,6 +40,13 @@ const EN = {
   // language switcher
   "lang.label": "Language",
   "lang.consoleNote": "Analysis pages are English-only for now — Spanish coverage is expanding.",
+  // §5c nav + footer
+  "nav.howItWorks": "How it works",
+  "nav.pricing": "Pricing",
+  "footer.privacy": "Privacy policy",
+  "footer.terms": "Terms of use",
+  "footer.contact": "Contact",
+  "footer.methodology": "Methodology",
 } as const;
 
 export type StringKey = keyof typeof EN;
@@ -60,6 +67,12 @@ const ES: Partial<Record<StringKey, string>> = {
   "estimator.disclaimer": "Estimado modelado — no es una garantía. Los rangos se ajustan al agregar datos reales.",
   "lang.label": "Idioma",
   "lang.consoleNote": "Las páginas de análisis están solo en inglés por ahora — la cobertura en español está creciendo.",
+  "nav.howItWorks": "Cómo funciona",
+  "nav.pricing": "Precios",
+  "footer.privacy": "Política de privacidad",
+  "footer.terms": "Términos de uso",
+  "footer.contact": "Contacto",
+  "footer.methodology": "Metodología",
 };
 
 const TABLES: Record<Lang, Partial<Record<StringKey, string>>> = { en: EN, es: ES };

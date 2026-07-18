@@ -7,6 +7,7 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
 import AppShell from "./pages/AppShell";
 import Convergence from "./pages/Convergence";
+import Legal from "./pages/Legal";
 import Verify from "./pages/Verify";
 
 function Router() {
@@ -14,6 +15,7 @@ function Router() {
     <Switch>
       <Route path={"/"} component={Home} />
       <Route path={"/convergence"} component={Convergence} />
+      <Route path={"/legal"} component={Legal} />
       <Route path={"/verify/:token"} component={Verify} />
       <Route path={"/app"} component={AppShell} />
       <Route path={"/app/:rest*"} component={AppShell} />

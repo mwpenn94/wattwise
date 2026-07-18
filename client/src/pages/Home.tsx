@@ -20,46 +20,49 @@ import { MODELED_ESTIMATES_DISCLAIMER } from "@shared/wattwise";
 import { PublicEstimator } from "@/components/PublicEstimator";
 import { useLang } from "@/lib/i18n";
 
+/* §5c-3 consumer-voice pass: cards are outcome-first, verbs first, no spec
+ * vocabulary. Methodology talk lives in "How we validate results" where it
+ * belongs — jargon only inside the provenance/methodology layer. */
 const FEATURES = [
   {
     icon: FileSpreadsheet,
-    title: "Interval file ingestion",
-    body: "Excel multi-sheet, CSV, and Green Button XML — parsed with footer-total validation and provenance tracking on every point.",
+    title: "Drop in your utility files",
+    body: "Spreadsheets, CSVs, or Green Button downloads — we check every file against its own printed totals and tell you exactly what we could and couldn't read.",
   },
   {
     icon: Gauge,
-    title: "Demand analytics",
-    body: "Monthly peaks with timestamps, load factor, ratchet exposure, demand heatmaps, and coincident-peak proxies with honest labels.",
+    title: "See the half-hour that set your bill",
+    body: "Find the exact moment your demand peaked, what it cost you, and whether it's a one-off spike you can clip or a pattern worth fixing.",
   },
   {
     icon: BarChart3,
-    title: "Tariff optimization",
-    body: "Re-price your full year of usage, hour by hour, against seeded AZ rate plans — time-of-use, demand, ratchets, export rates — ranked with eligibility disclosures.",
+    title: "Re-price your year on every plan",
+    body: "We run your whole year, hour by hour, through every rate plan you're allowed to take — and rank them by what you'd actually pay.",
   },
   {
     icon: Activity,
-    title: "Weather-normalized baselines",
-    body: "Industry-standard weather models separate what the weather did from what you did — reported on a normal-year basis with fit quality stated. (CalTRACK methods, named in the provenance.)",
+    title: "Know what the weather did vs. what you did",
+    body: "A hot July isn't your fault. We separate weather from behavior so changes you make get credited fairly — and false wins don't.",
   },
   {
     icon: Sun,
-    title: "What-if scenarios",
-    body: "Solar, battery, efficiency, EV charging — every scenario re-prices the full year and reports payback bands with confidence ranges.",
+    title: "Test solar, batteries, and schedules",
+    body: "Move the sliders — solar size, battery, shifted schedules — and watch your annual cost respond, with honest payback ranges.",
   },
   {
     icon: Building2,
-    title: "Hypothetical buildings",
-    body: "No data? Model a building from type, size, vintage, and climate zone using peer archetype load shapes — clearly labeled as synthetic.",
+    title: "Model a building you don't have data for",
+    body: "Considering a lease or purchase? Get a full analysis from just the building's type, size, and location — clearly labeled as an estimate.",
   },
   {
     icon: Leaf,
-    title: "Emissions & benchmarking",
-    body: "Regional grid emission factors and peer-building percentiles, with sources and vintages cited inline.",
+    title: "See how you compare",
+    body: "Your emissions and costs next to buildings like yours — with the sources for every comparison a tap away.",
   },
   {
     icon: ShieldCheck,
-    title: "Honest by construction",
-    body: "Every number carries provenance, confidence, and methodology labels. Estimates are never dressed up as measurements.",
+    title: "Every number shows its work",
+    body: "Estimates are labeled estimates, measurements are labeled measurements, and every figure can show you how it was calculated.",
   },
 ];
 
@@ -76,6 +79,33 @@ export default function Home() {
     return acc == null || usd > acc.usd ? { name: s.name, usd } : acc;
   }, null);
 
+  // §5c-1 "since your last visit" — built from the user's own portfolio, in
+  // priority order: anomalies (act now) > away watchdog (reassure) > open
+  // dollars (motivate) > verified savings (celebrate) > honest fallback.
+  const sinceLastVisit = (() => {
+    const d = portfolio.data;
+    if (!d) return "Your sites, opportunities, and alerts are waiting in the dashboard.";
+    const anomalySites = d.sites.filter((s) => s.hasAnomaly);
+    if (anomalySites.length > 0) {
+      return anomalySites.length === 1
+        ? `Heads up: ${anomalySites[0].name} has an open anomaly worth a look.`
+        : `Heads up: ${anomalySites.length} of your sites have open anomalies worth a look.`;
+    }
+    const awaySites = d.sites.filter((s) => s.awayMode);
+    if (awaySites.length > 0) {
+      return awaySites.length === 1
+        ? `All quiet at ${awaySites[0].name} — the away watchdog hasn't seen anything unusual.`
+        : `All quiet — the away watchdog is standing guard on ${awaySites.length} sites with nothing unusual to report.`;
+    }
+    const open = d.totals.openOpportunityUsd ?? 0;
+    if (open > 0) return `You still have ~$${Math.round(open).toLocaleString()}/yr in open opportunities across your sites.`;
+    const verified = d.totals.verifiedSavingsUsd ?? 0;
+    if (verified > 0) return `Your implemented changes have $${Math.round(verified).toLocaleString()} in verified savings so far.`;
+    return d.totals.siteCount > 0
+      ? "No new alerts since your last visit — your analysis is up to date."
+      : "Add your first site to start turning utility data into dollars.";
+  })();
+
   return (
     <div className="min-h-screen bg-background text-foreground dark">
       <div className="min-h-screen bg-background grid-texture">
@@ -91,87 +121,111 @@ export default function Home() {
                 utility data intelligence
               </span>
             </div>
-            <div className="flex items-center gap-3">
+            {/* §5c-4 chrome cleanup + §5c-5 mobile fix + §5c-6 nav anchors:
+                builder instruments (console CTA, convergence link) are gone from
+                the logged-out chrome; anchors make How-it-works/Pricing reachable
+                without blind scrolling; items get real touch targets and no-wrap
+                so "ES · Español" can't collide at phone width. */}
+            <nav className="flex items-center gap-1 sm:gap-2">
+              <a href="#how-it-works" className="hidden whitespace-nowrap rounded-md px-2 py-2 font-mono text-xs text-muted-foreground hover:text-foreground md:inline-block">
+                {t("nav.howItWorks")}
+              </a>
+              <a href="#pricing" className="hidden whitespace-nowrap rounded-md px-2 py-2 font-mono text-xs text-muted-foreground hover:text-foreground md:inline-block">
+                {t("nav.pricing")}
+              </a>
               {/* EN/ES groundwork: explicit choice, persisted; public funnel translates,
                   console honestly stays EN for now (disclosed in the switcher note). */}
               <button
                 type="button"
-                className="font-mono text-xs text-muted-foreground hover:text-foreground"
+                className="whitespace-nowrap rounded-md px-2 py-2 font-mono text-xs text-muted-foreground hover:text-foreground"
                 onClick={() => setLang(lang === "en" ? "es" : "en")}
                 aria-label={t("lang.label")}
                 title={t("lang.consoleNote")}
               >
-                {lang === "en" ? "ES · Español" : "EN · English"}
+                {lang === "en" ? "ES" : "EN"}
+                <span className="hidden sm:inline">{lang === "en" ? " · Español" : " · English"}</span>
               </button>
-              <Link href="/convergence" className="font-mono text-xs text-muted-foreground hover:text-foreground">
-                Methodology log
-              </Link>
               {isAuthenticated ? (
                 <Link href="/app">
                   <Button size="sm">
-                    Open console <ArrowRight className="ml-1 h-4 w-4" />
+                    Your dashboard <ArrowRight className="ml-1 h-4 w-4" />
                   </Button>
                 </Link>
               ) : (
-                <Button size="sm" onClick={() => startLogin()}>
-                  Sign in
+                <Button size="sm" variant="outline" onClick={() => startLogin()}>
+                  {t("cta.signIn")}
                 </Button>
               )}
-            </div>
+            </nav>
           </div>
         </header>
 
         {/* hero */}
-        <section className="container py-20 md:py-28">
-          <div className="grid items-center gap-12 lg:grid-cols-[1.2fr_1fr]">
-            <div>
-              <p className="rise-in mb-4 font-mono text-xs uppercase tracking-[0.25em] text-primary">
-                interval data · tariffs · scenarios
-              </p>
-              <h1 className="rise-in rise-in-1 max-w-2xl font-display text-4xl font-extrabold leading-[1.08] tracking-tight md:text-6xl">
-                {lang === "es" ? t("hero.tagline") : "Your meter already knows where the money is going."}
-              </h1>
-              <p className="rise-in rise-in-2 mt-6 max-w-xl text-lg text-muted-foreground">
-                {lang === "es"
-                  ? t("hero.sub")
-                  : "WattWise ingests your interval files and bills, rebuilds your rate from first principles, and shows you — with honest confidence ranges — what a rate switch, solar array, battery, or retrofit would actually change."}
-              </p>
-              <div className="rise-in rise-in-3 mt-8 flex flex-wrap gap-3">
-                {isAuthenticated ? (
+        {/* §5c-1 auth-state-aware hero: NEW visitors get the estimate box AS the
+            hero — headline, then the box, everything else below; the 60-second
+            clock starts at first paint. RETURNING users get their dashboard CTA
+            plus a "since your last visit" line built from their own portfolio. */}
+        {isAuthenticated ? (
+          <section className="container py-20 md:py-28">
+            <div className="grid items-center gap-12 lg:grid-cols-[1.2fr_1fr]">
+              <div>
+                <p className="rise-in mb-4 font-mono text-xs uppercase tracking-[0.25em] text-primary">
+                  interval data · tariffs · scenarios
+                </p>
+                <h1 className="rise-in rise-in-1 max-w-2xl font-display text-4xl font-extrabold leading-[1.08] tracking-tight md:text-6xl">
+                  Welcome back{user?.name ? `, ${user.name.split(" ")[0]}` : ""}.
+                </h1>
+                <p className="rise-in rise-in-2 mt-6 max-w-xl text-lg text-muted-foreground">{sinceLastVisit}</p>
+                <div className="rise-in rise-in-3 mt-8 flex flex-wrap gap-3">
                   <Link href="/app">
                     <Button size="lg" className="font-semibold">
                       Go to your dashboard <ArrowRight className="ml-2 h-4 w-4" />
                     </Button>
                   </Link>
-                ) : (
-                  <Button
-                    size="lg"
-                    className="font-semibold"
-                    onClick={() => document.querySelector<HTMLInputElement>('input[aria-label="Address for estimate"]')?.focus()}
-                  >
-                    {lang === "es" ? t("cta.seeEstimate") : "Estimate my costs — free, no sign-up"} <ArrowRight className="ml-2 h-4 w-4" />
-                  </Button>
-                )}
-                <Link href="/convergence">
-                  <Button size="lg" variant="outline">
-                    How we validate results
-                  </Button>
-                </Link>
+                  <Link href="/convergence">
+                    <Button size="lg" variant="outline">
+                      How we validate results
+                    </Button>
+                  </Link>
+                </div>
+                <p className="rise-in rise-in-4 mt-6 max-w-lg text-xs text-muted-foreground/80">
+                  {lang === "es" ? t("estimator.disclaimer") : MODELED_ESTIMATES_DISCLAIMER}
+                </p>
               </div>
-              <p className="rise-in rise-in-4 mt-6 max-w-lg text-xs text-muted-foreground/80">
-                {lang === "es" ? t("estimator.disclaimer") : MODELED_ESTIMATES_DISCLAIMER}
+              <div className="rise-in rise-in-2 relative">
+                <PublicEstimator />
+              </div>
+            </div>
+          </section>
+        ) : (
+          <section className="container py-14 md:py-20">
+            <div className="mx-auto max-w-3xl text-center">
+              <p className="rise-in mb-4 font-mono text-xs uppercase tracking-[0.25em] text-primary">
+                interval data · tariffs · scenarios
+              </p>
+              <h1 className="rise-in rise-in-1 font-display text-4xl font-extrabold leading-[1.08] tracking-tight md:text-6xl">
+                {lang === "es" ? t("hero.tagline") : "Your meter already knows where the money is going."}
+              </h1>
+              <p className="rise-in rise-in-2 mx-auto mt-5 max-w-xl text-lg text-muted-foreground">
+                {lang === "es"
+                  ? t("hero.sub")
+                  : "Type an address, get a real dollar estimate in under a minute — free, no sign-up. Every detail you add sharpens it."}
               </p>
             </div>
-
-            {/* estimate-first onboarding — the product IS the hero (UX v1.9) */}
-            <div className="rise-in rise-in-2 relative">
+            {/* the estimate box IS the hero — nothing between it and the headline */}
+            <div className="rise-in rise-in-2 relative mx-auto mt-8 max-w-xl">
               <PublicEstimator />
             </div>
-          </div>
-        </section>
+            {/* §5c-2 one real card beats six descriptions — a dollar above the fold */}
+            <SampleInsightCard />
+            <p className="rise-in rise-in-4 mx-auto mt-6 max-w-lg text-center text-xs text-muted-foreground/80">
+              {lang === "es" ? t("estimator.disclaimer") : MODELED_ESTIMATES_DISCLAIMER}
+            </p>
+          </section>
+        )}
 
         {/* features */}
-        <section className="border-t border-border/60 bg-card/40 py-16">
+        <section id="how-it-works" className="scroll-mt-16 border-t border-border/60 bg-card/40 py-16">
           <div className="container">
             <h2 className="font-display text-2xl font-bold tracking-tight md:text-3xl">
               One pipeline, actual <span className="text-primary">or hypothetical</span>.
@@ -195,7 +249,7 @@ export default function Home() {
         </section>
 
         {/* tiers */}
-        <section className="container py-16">
+        <section id="pricing" className="container scroll-mt-16 py-16">
           <h2 className="font-display text-2xl font-bold tracking-tight md:text-3xl">Tiers</h2>
           <div className="mt-8 grid gap-4 md:grid-cols-3">
             {[
@@ -245,7 +299,14 @@ export default function Home() {
                     <span className="font-mono text-sm text-primary">{t.price}</span>
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">{t.persona}</p>
-                  {/* §5b personalized upgrade copy — the user's own numbers, only when they exist */}
+                  {/* §5b + §5c-6 personalized copy — the user's own numbers on
+                      every tier they're eligible to reason about, only when real */}
+                  {isAuthenticated && t.name === "Free" && (portfolio.data?.totals.siteCount ?? 0) > 0 && (
+                    <p className="mt-2 rounded-md border border-border bg-muted/40 px-2 py-1.5 text-[11px] text-foreground">
+                      You're on Free with {portfolio.data!.totals.siteCount}{" "}
+                      {portfolio.data!.totals.siteCount === 1 ? "site" : "sites"} analyzed — everything below stays yours.
+                    </p>
+                  )}
                   {isAuthenticated && t.name === "Plus" && personalOppUsd > 0 && (
                     <p className="mt-2 rounded-md border border-primary/30 bg-primary/5 px-2 py-1.5 text-[11px] text-foreground">
                       Your analysis found <strong>~${Math.round(personalOppUsd).toLocaleString()}/yr</strong> in open opportunities
@@ -281,8 +342,10 @@ export default function Home() {
                       {t.cta}
                     </Button>
                   )}
+                  {/* §5c-6 contrast: was text-[10px] muted (sub-AA on near-black);
+                      annual-toggle note deferred until billing exists — no fake toggle. */}
                   {t.name !== "Free" && (
-                    <p className="mt-2 text-center text-[10px] text-muted-foreground">
+                    <p className="mt-2 text-center text-[11px] text-foreground/75">
                       Beta: no billing yet — switch plans free on the Account page.
                     </p>
                   )}
@@ -292,12 +355,24 @@ export default function Home() {
           </div>
         </section>
 
+        {/* §5c-1b legal footer + §5c-4 chrome cleanup: privacy/terms/contact on
+            every page; "Convergence log" renamed to plain Methodology; the
+            Console link stays auth-only. */}
         <footer className="border-t border-border/60 py-8">
           <div className="container flex flex-col items-center justify-between gap-3 text-xs text-muted-foreground md:flex-row">
             <span className="font-mono">WattWise · modeled estimates, honestly labeled</span>
-            <div className="flex gap-4">
+            <div className="flex flex-wrap items-center justify-center gap-4">
+              <Link href="/legal#privacy" className="hover:text-foreground">
+                {t("footer.privacy")}
+              </Link>
+              <Link href="/legal#terms" className="hover:text-foreground">
+                {t("footer.terms")}
+              </Link>
+              <Link href="/legal#contact" className="hover:text-foreground">
+                {t("footer.contact")}
+              </Link>
               <Link href="/convergence" className="hover:text-foreground">
-                Convergence log
+                {t("footer.methodology")}
               </Link>
               {isAuthenticated && (
                 <Link href="/app" className="hover:text-foreground">
@@ -308,6 +383,60 @@ export default function Home() {
           </div>
         </footer>
       </div>
+    </div>
+  );
+}
+
+/* §5c-2 live sample insight card — one REAL card from the real pipeline, not a
+ * mock. Hydrated from a server-cached query so it costs nothing per visitor,
+ * puts an actual dollar figure above the fold, and is honestly labeled a demo
+ * building with its confidence rung. Hidden entirely on error — never a broken
+ * or fabricated card. */
+function SampleInsightCard() {
+  const sample = trpc.estimate.sampleCard.useQuery(undefined, { staleTime: 6 * 60 * 60 * 1000, retry: 1 });
+  if (sample.isError) return null;
+  return (
+    <div className="rise-in rise-in-3 mx-auto mt-6 max-w-xl">
+      <Card className="border-border/70 bg-card/80 text-left">
+        <CardContent className="pt-5">
+          {sample.isLoading || !sample.data ? (
+            <div className="space-y-3" aria-hidden>
+              <div className="h-3 w-40 animate-pulse rounded bg-muted" />
+              <div className="h-7 w-56 animate-pulse rounded bg-muted" />
+              <div className="h-3 w-full animate-pulse rounded bg-muted" />
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Live example · what an insight looks like
+                </p>
+                <span className="rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-primary">
+                  Estimated
+                </span>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">{sample.data.label}</p>
+              <p className="mt-1 font-display text-2xl font-extrabold tracking-tight">
+                ~${Math.round(sample.data.estimatedAnnualCostUsd).toLocaleString()}
+                <span className="text-base font-semibold text-muted-foreground">/yr estimated energy cost</span>
+              </p>
+              {sample.data.topOpportunity && (
+                <p className="mt-2 text-sm text-foreground">
+                  Biggest opportunity: <strong>{sample.data.topOpportunity.title}</strong> — worth about{" "}
+                  <strong>${Math.round(sample.data.topOpportunity.estimatedSavingsUsd).toLocaleString()}/yr</strong>
+                  <span className="text-muted-foreground"> ({sample.data.topOpportunity.basis})</span>
+                </p>
+              )}
+              {sample.data.percentileBand && (
+                <p className="mt-1 text-xs text-muted-foreground">Peer comparison: {sample.data.percentileBand}</p>
+              )}
+              <p className="mt-3 text-xs text-muted-foreground">
+                This is a real analysis of a demo office in Tucson — type your address above to see yours.
+              </p>
+            </>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
