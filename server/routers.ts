@@ -449,6 +449,10 @@ export const appRouter = router({
             climateZone: cascade.climateZone.value,
             utilityName: cascade.utilityName.value ?? undefined,
             isHypothetical: false,
+            // §1b portfolio map: coordinates come only from the VERIFIED place
+            // geocode (user picked the address) — never from raw device GPS.
+            lat: verified?.lat ?? undefined,
+            lng: verified?.lng ?? undefined,
             attrSource: input.buildingType ? "user_entered" : "quick_start_defaults",
             // Batch-45 (pass 1959): per-field refinement record — grounded
             // intake counts a user-confirmed building type as refined from
@@ -916,6 +920,11 @@ export const appRouter = router({
               entityId: s.entityId ?? null,
               state: s.state,
               buildingType: s.buildingType,
+              // §1b portfolio map: pin coordinates (null when the site was
+              // created without a verified address — the map shows only what
+              // it actually knows).
+              lat: s.lat ?? null,
+              lng: s.lng ?? null,
               climateZone: s.climateZone ?? null,
               // §3i-2 utility-exposure rollup input: which provider serves this site
               utilityName: s.utilityName ?? null,

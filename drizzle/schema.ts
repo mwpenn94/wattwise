@@ -77,6 +77,10 @@ export const sites = mysqlTable(
     name: varchar("name", { length: 255 }).notNull(),
     address: text("address"),
     city: varchar("city", { length: 128 }),
+    /** §1b portfolio map: geocoded coordinates captured at create/refine when an
+     * address is chosen from the places list. Never populated from raw GPS. */
+    lat: double("lat"),
+    lng: double("lng"),
     state: varchar("state", { length: 8 }),
     zip: varchar("zip", { length: 16 }),
     buildingType: varchar("buildingType", { length: 64 }),

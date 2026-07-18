@@ -20,6 +20,8 @@ import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { fmtNum, fmtUsd } from "@/lib/wattwiseUi";
 import { DisclaimerBanner } from "@/components/Honesty";
+import { MapView } from "@/components/Map";
+import { MapPin } from "lucide-react";
 import { Link } from "wouter";
 
 export default function Portfolio() {
@@ -149,6 +151,11 @@ export default function Portfolio() {
             </Card>
           )}
 
+          {/* §1b portfolio map: saved sites pinned, colored by open opportunity
+              size. Only sites with a verified-address geocode get a pin — the
+              rest are counted honestly under the map, never guessed onto it. */}
+          <PortfolioMap rows={rows} />
+
           {/* §3i-2 league table: weather- and size-normalized — never raw kWh across climates */}
           <LeagueTable rows={rows} />
 
@@ -236,6 +243,88 @@ export default function Portfolio() {
         </>
       )}
     </div>
+  );
+}
+
+/** §1b portfolio map: pins colored by open opportunity size. Only sites with a
+ * verified-address geocode get a pin; the rest are counted honestly below the
+ * map. The whole card hides when no site has coordinates — an empty map that
+ * pretends to know locations would be a spec failure. */
+function PortfolioMap({
+  rows,
+}: {
+  rows: Array<{
+    siteId: number;
+    name: string;
+    lat: number | null;
+    lng: number | null;
+    analyzed: boolean;
+    topOpportunityUsd: number | null;
+    hasAnomaly: boolean;
+  }>;
+}) {
+  const pinned = rows.filter((r) => r.lat != null && r.lng != null);
+  const unpinned = rows.length - pinned.length;
+  if (pinned.length === 0) return null;
+
+  const center = {
+    lat: pinned.reduce((s, r) => s + (r.lat as number), 0) / pinned.length,
+    lng: pinned.reduce((s, r) => s + (r.lng as number), 0) / pinned.length,
+  };
+
+  // Opportunity-size color scale (matches the exception-first ranking bands).
+  const colorFor = (r: (typeof pinned)[number]) =>
+    r.hasAnomaly ? "#dc2626" : (r.topOpportunityUsd ?? 0) >= 500 ? "#ea580c" : (r.topOpportunityUsd ?? 0) >= 100 ? "#d97706" : (r.topOpportunityUsd ?? 0) > 0 ? "#16a34a" : "#64748b";
+
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <MapPin className="h-4 w-4 text-primary" /> Portfolio map
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Pins sized by what you could save — red means an anomaly needs attention. Click a pin to open that site.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-hidden rounded-md border border-border/70">
+          <MapView
+            className="h-72 w-full"
+            initialCenter={center}
+            initialZoom={pinned.length === 1 ? 13 : 5}
+            onMapReady={(map) => {
+              const bounds = new google.maps.LatLngBounds();
+              for (const r of pinned) {
+                const pos = { lat: r.lat as number, lng: r.lng as number };
+                bounds.extend(pos);
+                const dot = document.createElement("div");
+                const usd = r.topOpportunityUsd;
+                dot.style.cssText = `background:${colorFor(r)};color:#fff;border-radius:9999px;padding:4px 8px;font:600 11px/1.2 system-ui;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:pointer;white-space:nowrap`;
+                dot.textContent = usd != null && usd > 0 ? `${r.name} · $${Math.round(usd).toLocaleString()}/yr` : r.name;
+                dot.title = r.analyzed ? (usd != null && usd > 0 ? `Open opportunity ≈ $${Math.round(usd).toLocaleString()}/yr` : "Analyzed — no open opportunity sized yet") : "Not analyzed yet";
+                const marker = new google.maps.marker.AdvancedMarkerElement({ map, position: pos, title: r.name, content: dot });
+                marker.addListener("click", () => {
+                  window.location.href = `/app?site=${r.siteId}`;
+                });
+              }
+              if (pinned.length > 1) map.fitBounds(bounds, 48);
+            }}
+          />
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#dc2626" }} /> anomaly</span>
+          <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#ea580c" }} /> ≥$500/yr open</span>
+          <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#d97706" }} /> $100–500/yr</span>
+          <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#16a34a" }} /> under $100/yr</span>
+          <span className="inline-flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: "#64748b" }} /> not sized yet</span>
+          {unpinned > 0 && (
+            <span className="ml-auto">
+              {unpinned} site{unpinned === 1 ? "" : "s"} without a verified address {unpinned === 1 ? "isn’t" : "aren’t"} shown — re-add with an address suggestion to pin {unpinned === 1 ? "it" : "them"}.
+            </span>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

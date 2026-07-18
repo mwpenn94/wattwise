@@ -203,13 +203,13 @@
 - [x] §2.57 Sewer-on-winter-water linkage: water meters w/ ≥3 winter months (Dec–Feb) get a priced sewer opportunity — winter-average × municipal sewer volumetric template, "your Dec–Feb water use sets your sewer bill all year" story copy, honest gates (no winter data → no claim) — 2 vitest specs; also fixed latent varchar(32) weatherBasis crash on degenerate fits (widened to 64, migration 0010)
 - [x] §3i-2 Utility-exposure rollup on Portfolio: spend concentration by provider w/ bars, unanalyzed sites counted-not-priced, single-provider concentration note pointing at the rate check
 - [x] §3i-2 Bulk site screening: paste up to 40 addresses on Portfolio → Pro-gated entities.bulkScreen → batch estimates ranked by opportunity $, per-line failures named (never silently dropped), estimate chips throughout — 5 vitest specs
-- [ ] §3i-2 Portfolio basket: apply a measure across selected sites, per-site composition rolled up, weakest-chip inheritance
+- [x] §3i-2 Portfolio basket: apply a measure across selected sites, per-site composition rolled up, weakest-chip inheritance (scenariosApi.portfolioCompose + Portfolio.tsx card; portfolioBasket.test.ts 4 specs)
 - [x] §3i Alerts framework: alerts table (migration 0009) w/ $25 materiality floor + per-(site,kind) open-row batching; generated at analysis time (sustained anomaly × annual cost, top rate opportunity); alerts router + AlertsInbox bell in console layout; digest now backed by a REAL per-user Heartbeat cron (setDigestPrefs creates/removes the job, /api/scheduled/digest handler w/ taskUid-only lookup + orphan→2xx), buildDigest enforces dollar-figure-or-silence, digestPreview "if it ran today" on Account — 9 vitest specs
 - [x] §3i Demand review ritual: DemandReview card on Explore for demand-charge sites only — 90th-percentile set-point (proven-target copy), billed-vs-actual monthly table w/ ratchet-applied flags (amber when billed > actual), attribution recap line, exactly ONE priced demand action w/ add-to-plan deep link, honest no-action copy; demandReview block persisted in pipeline summary metrics
 - [x] §3 Hero 5 Energy Wrapped: shareable year-in-review card (EnergyWrapped.tsx, launched from HomeFeed)
 - [x] §4 EN/ES language toggle (AZ/NM market)
 - [x] §3 Hero 4 bill-scan overlay verification: uploaded bill image renders beside the review form (object URL, revoked on save/skip; PDFs skip preview honestly), per-field extraction-confidence chips (green ≥0.8 / amber ≥0.5 / red) on all five fields; manual-entry fields ungraded
-- [ ] §1b Portfolio map: saved sites pinned, colored by opportunity size
+- [x] §1b Portfolio map: saved sites pinned, colored by opportunity size
 - [x] Honest-gaps ledger: in-app + report disclosure of what is NOT built (Data Concierge rungs 1-4, continuous feeds, 3D extrusion, LiDAR/Solar API, GHL delivery, per-site roles) and why
 - [x] Coverage report deliverable: gap-by-gap docs-vs-build matrix with evidence
 
