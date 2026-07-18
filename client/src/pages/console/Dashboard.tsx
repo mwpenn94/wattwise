@@ -117,7 +117,12 @@ export default function Dashboard() {
   } | null;
   // Narrative rows exclude the machine-readable summary
   const insightRows = allInsightRows.filter((i) => i.kind !== "summary");
-  const oppRows = opps.data ?? [];
+  const allOppRows = opps.data ?? [];
+  // v1.18 tenure modes: the action feed shows only occupant-executable measures;
+  // owner-capex items (audience: landlord) render in their own "worth raising"
+  // card — never as a payback the renter is asked to buy.
+  const oppRows = allOppRows.filter((o) => ((o.provenance as Record<string, unknown> | null)?.audience ?? "occupant") !== "landlord");
+  const landlordRows = allOppRows.filter((o) => (o.provenance as Record<string, unknown> | null)?.audience === "landlord");
   const demand = summary?.demand ?? null;
   const benchmarkInsight = summary?.benchmark ?? null;
   const emissionsInsight = summary?.emissions ?? null;
@@ -717,6 +722,43 @@ export default function Dashboard() {
           )}
         </CardContent>
       </Card>
+
+      {/* v1.18 §5 stage 5: landlord-benefit measures live in a separate card with
+          an ask framing — the renter's feed above leads with in-control dollars. */}
+      {landlordRows.length > 0 && (
+        <Card className="mt-4 border-dashed border-border/70">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 font-display text-base">
+              <Lightbulb className="h-4 w-4 text-muted-foreground" /> Worth raising with your landlord
+            </CardTitle>
+            <p className="text-xs text-muted-foreground">
+              These building upgrades would save real money, but they are your landlord's (or HOA's) to make. Raise them at lease renewal — the numbers below are your talking points.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {landlordRows.map((o) => (
+                <InsightCard
+                  key={o.id}
+                  title={o.title}
+                  dollars={o.estCostSavingsPerYr}
+                  framing="Building saves"
+                  headlineFallback="No dollar figure yet (needs a priced rate)"
+                  why={o.description ?? ""}
+                  confidence={chipFromConfidence(o.confidence, o.disaggregationMethod === "nilmtk_1min_plus")}
+                  extraChips={["landlord pays · building benefits"]}
+                  metrics={[...(o.paybackBandYears ? [{ label: "payback (for owner)", value: o.paybackBandYears }] : [])]}
+                  provenance={[
+                    ((o.provenance as Record<string, unknown> | null)?.audienceNote as string | undefined) ??
+                      "Capital measure — the property owner pays and the building benefits.",
+                    ...(((o.provenance as Record<string, unknown> | null)?.disclosures as string[] | undefined) ?? []),
+                  ]}
+                />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* §3e prove-it: verification ledger for implemented measures */}
       {activeSiteId != null && <ProveItSection siteId={activeSiteId} />}

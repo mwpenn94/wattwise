@@ -19,7 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
-import { ArrowRight, BadgeCheck, Compass, Lightbulb, MessageCircleQuestion, Send, Sparkles } from "lucide-react";
+import { ArrowRight, BadgeCheck, Compass, Lightbulb, MessageCircleQuestion, Plane, Send, ShieldCheck, Sparkles } from "lucide-react";
 import { InsightCard, chipFromConfidence, type InsightConfidence } from "@/components/InsightCard";
 import EnergyWrapped from "@/components/EnergyWrapped";
 import { MarkImplementedDialog, ProveItStatusChip } from "@/components/ProveIt";
@@ -39,8 +39,24 @@ export default function HomeFeed() {
   const insights = trpc.insights.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const opps = trpc.insights.opportunities.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const usage = trpc.account.usage.useQuery();
+  const alerts = trpc.alerts.list.useQuery({ status: "open" }, { enabled: (sites.data ?? []).length > 0 });
 
   const [markTarget, setMarkTarget] = useState<{ id?: number; measure: string; title: string; expectedSavingsUsd: number | null } | null>(null);
+
+  /* ---------- v1.19 away mode: one toggle flips the product's voice ---------- */
+  const utils = trpc.useUtils();
+  const activeSite = (sites.data ?? []).find((s) => s.id === activeSiteId) ?? null;
+  const isAway = Boolean((activeSite as { awayMode?: boolean } | null)?.awayMode);
+  const setAway = trpc.sites.setAway.useMutation({
+    onSuccess: async (_d, vars) => {
+      toast.success(vars.awayMode ? "Away mode on — WattWise will stay quiet unless something needs you" : "Welcome back — full feed restored");
+      await utils.sites.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const awayAlert = (alerts.data ?? []).find(
+    (a) => a.siteId === activeSiteId && a.kind === "away_watchdog" && a.status === "open",
+  ) ?? null;
 
   /* ---------- greeting number: verified first, projected fallback ---------- */
   const projectedTotal = useMemo(
@@ -152,11 +168,56 @@ export default function HomeFeed() {
         </div>
       </div>
 
+      {/* ---------- v1.19 away toggle: small, persistent, honest ---------- */}
+      {activeSiteId != null && (
+        <div className="mt-3 flex items-center gap-2">
+          <Button
+            size="sm"
+            variant={isAway ? "default" : "outline"}
+            className="h-7 gap-1.5 text-xs"
+            disabled={setAway.isPending}
+            onClick={() => setAway.mutate({ siteId: activeSiteId, awayMode: !isAway })}
+          >
+            <Plane className="h-3.5 w-3.5" /> {isAway ? "Away mode on" : "I'm away"}
+          </Button>
+          {isAway && (
+            <span className="text-[11px] text-muted-foreground">Feed is quiet — only empty-home excess will reach you.</span>
+          )}
+        </div>
+      )}
+
       {/* ---------- Ask WattWise ---------- */}
       <AskWattwise siteId={activeSiteId} tier={usage.data?.tier ?? "free"} />
 
-      {/* ---------- the three stories ---------- */}
-      <div className="mt-6 space-y-4">
+      {/* ---------- away mode: the watchdog card replaces the feed's voice ---------- */}
+      {isAway && (
+        <div className="mt-6">
+          <StoryLabel icon={<ShieldCheck className="h-3.5 w-3.5" />} text="Away watchdog" />
+          {awayAlert ? (
+            <div className="mt-1.5 rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
+              <p className="text-sm font-semibold">{awayAlert.title}</p>
+              <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{awayAlert.body}</p>
+              {awayAlert.dollarImpactUsd > 0 && (
+                <p className="mt-2 font-display text-lg font-bold text-amber-500">
+                  ~${Math.round(awayAlert.dollarImpactUsd).toLocaleString()} of excess so far
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="mt-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-4">
+              <p className="text-sm font-semibold">All quiet at {activeSite?.name ?? "your site"}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                No usage above your empty-home baseline in the data on file. Checked as of your last upload — upload a
+                fresh interval file any time for a new sweep. Water gets leak-first framing: any sustained flow at an
+                empty home raises a hand immediately.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ---------- the three stories (quieted while away) ---------- */}
+      <div className={isAway ? "mt-6 space-y-4 opacity-60" : "mt-6 space-y-4"}>
         {!hasAnalysis && (
           <Card className="border-dashed">
             <CardContent className="flex flex-wrap items-center justify-between gap-3 py-6">

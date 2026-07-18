@@ -35,6 +35,7 @@ import { computePeakAttribution } from "./attribution";
 import { benchmarkPercentile, rankOpportunities, OpportunityCandidate } from "./scenarios";
 import * as h from "../dbHelpers";
 import { computeCostUsd, recordMeterEvent } from "./costModel";
+import { computeVacantBaseline, evaluateAwayWatchdog, tsInAwayWindow } from "../awayMode";
 import type { Site, Meter } from "../../drizzle/schema";
 
 /**
@@ -286,8 +287,14 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       if (rf != null) return !rf.includes("buildingType");
       return site.attrSource === "quick_start_defaults";
     })();
+    // v1.18 applicability: closed/tech-conditioned flags threaded through so a
+    // closed plan or an unlawful (solar-mismatched) plan never enters the sweep.
     const isElig = (t: (typeof allTariffs)[number]) =>
-      tariffEligible({ sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax }, { sectorClass }, peakKw).eligible;
+      tariffEligible(
+        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition },
+        { sectorClass, hasSolar: site.hasSolar ?? false },
+        peakKw,
+      ).eligible;
     // Sweep = same-utility rates plus any eligible rates statewide (a large site
     // may have no eligible rate at its own utility in the seeded snapshot).
     const eligibleAnywhere = allTariffs.filter(isElig);
@@ -353,8 +360,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     const currentTotal = currentCost?.breakdown.total ?? 0;
     for (const t of sweepRows.slice(0, 24)) {
       const elig = tariffEligible(
-        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax },
-        { sectorClass },
+        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition },
+        // v1.18: the current basis stays priceable even when closed to new
+        // customers — the customer is already on it; it is only barred as a
+        // SWITCH target for everyone else.
+        { sectorClass, hasSolar: site.hasSolar ?? false, isCurrentBasis: t.id === basisTariffId },
         peakKw,
       );
       const cost = elig.eligible ? costOnTariff(costPoints, t.structure as TariffStructure, { tz }) : null;
@@ -1037,7 +1047,56 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       disclosures: [MODELED_ESTIMATES_DISCLAIMER],
     });
   }
-  const ranked = rankOpportunities(oppCands);
+  /* v1.18 §5 stage 5 — tenure modes: opportunity generation must respect what
+     the occupant can actually DO. "A renter shown a solar payback is a spec
+     failure." Owner-capex measures (building retrofits the tenant cannot
+     execute: LED retrofit and any capexBand 'medium'+) are moved out of the
+     renter's action feed into a separate 'worth raising with your landlord'
+     bucket — never deleted (the dollars are real; the AUDIENCE differs).
+     In-control measures (rate switch, schedule/setpoint, behavioral, peak
+     management, water fixtures) stay. Condo/HOA keeps in-unit measures and
+     tags shared-system items the same way. Owners see everything unchanged. */
+  const OWNER_CAPEX_KEYS = new Set(["led_retrofit"]);
+  const tenure = (site as { tenure?: "own" | "rent" | "condo_hoa" }).tenure ?? "own";
+  const isOwnerCapex = (c: OpportunityCandidate) =>
+    OWNER_CAPEX_KEYS.has(c.key) || c.capexBand === "medium" || c.capexBand === "high";
+  const tenureFiltered = tenure === "own" ? oppCands : oppCands.filter((c) => !isOwnerCapex(c));
+  const landlordBucket = tenure === "own" ? [] : oppCands.filter(isOwnerCapex);
+  if (landlordBucket.length > 0) {
+    narrate(
+      `Tenure-aware feed (${tenure === "rent" ? "renter" : "condo/HOA"}): ${landlordBucket.length} owner-capex measure${landlordBucket.length === 1 ? "" : "s"} moved to 'worth raising with your landlord' — your feed leads with dollars in your control`,
+    );
+  }
+  const ranked = rankOpportunities(tenureFiltered);
+  // Landlord-bucket items are persisted AFTER the in-control ranking with a
+  // provenance audience marker so the UI renders them in a separate card and
+  // never as a payback the renter is asked to buy.
+  const landlordRows = landlordBucket.map((c, i) => ({
+    siteId: site.id,
+    analysisId,
+    measure: c.key,
+    title: c.title,
+    description: c.rationale,
+    estCostSavingsPerYr: (c.annualSavingsUsdLo + c.annualSavingsUsdHi) / 2,
+    estEnergySavingsPerYr: null,
+    energyUnit: COMMODITY_UNITS.electric.usageUnit,
+    estDemandSavingsKw: null,
+    paybackBandYears: c.capexBand === "none" ? "immediate" : c.capexBand === "low" ? "0.5–2 yr" : "2–6 yr",
+    confidence: c.confidence,
+    disaggregationMethod: disaggMethod,
+    ratchetAware: false,
+    rank: 1000 + i,
+    provenance: {
+      savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi],
+      category: c.category,
+      disclosures: c.disclosures,
+      audience: "landlord" as "occupant" | "landlord",
+      audienceNote:
+        tenure === "rent"
+          ? "Capital measure — your landlord pays, the building benefits. Pre-drafted ask available; worth raising at lease renewal."
+          : "Shared-system measure — raise with your HOA/board; savings accrue to the building.",
+    },
+  }));
   await h.replaceOpportunities(
     site.id,
     ranked.map((c, i) => ({
@@ -1059,8 +1118,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       disaggregationMethod: disaggMethod,
       ratchetAware: c.key === "peak_management",
       rank: i + 1,
-      provenance: { savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi], category: c.category, disclosures: c.disclosures },
-    })),
+      provenance: { savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi], category: c.category, disclosures: c.disclosures, audience: "occupant" as "occupant" | "landlord" },
+    })).concat(landlordRows),
   );
     narrate(`Ranked ${ranked.length} opportunit${ranked.length === 1 ? "y" : "ies"} by estimated annual dollar impact`);
   /* §3i alerts — generated here, because in a manual-upload world the analysis
@@ -1083,6 +1142,48 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
           dollarImpactUsd: annualUsdImpact,
           confidence: baseline && baseline.confidence === "high" ? "medium" : "low",
         });
+      }
+    }
+    /* v1.19 §5 stage 4 — away-mode watchdog: when the site is flagged away,
+       evaluate the away-window intervals against the vacant baseline. Sustained
+       excess (6h+) fires a safety alert (no $25 floor); quiet posts nothing here
+       (the reassurance card renders from site state in the feed). Evaluated at
+       analysis time — in a manual-upload world this is the only moment new
+       information appears, and the card copy says so. */
+    const away = site as { awayMode?: boolean; awayStart?: number | null; awayEnd?: number | null };
+    if (away.awayMode && hasIntervals && points.length > 0) {
+      const awayPts = points
+        .filter((p) => tsInAwayWindow(p.ts, { awayMode: true, awayStart: away.awayStart ?? null, awayEnd: away.awayEnd ?? null }))
+        .map((p) => ({ ts: p.ts, durationMin: p.durationMin, usage: p.usage }));
+      if (awayPts.length > 0) {
+        const commodity = (meter?.commodity ?? "electric") as "electric" | "gas" | "water";
+        const vacant = computeVacantBaseline(
+          points.map((p) => ({ ts: p.ts, durationMin: p.durationMin, usage: p.usage })),
+          commodity,
+          away.awayStart ?? null,
+          meter?.timezone ?? undefined,
+        );
+        const finding = evaluateAwayWatchdog(awayPts, vacant, commodity, {
+          ratePerUnit: kWhRate,
+          siteLabel: site.name,
+          tz: meter?.timezone ?? undefined,
+        });
+        narrate(
+          finding.kind === "quiet"
+            ? `Away watchdog: all quiet — usage holding at the empty-home baseline across ${awayPts.length} away-window readings`
+            : `Away watchdog: ${finding.kind.replace(/_/g, " ")} detected across ${awayPts.length} away-window readings`,
+        );
+        if (finding.kind === "excess_usage" || finding.kind === "sustained_water_flow") {
+          await h.upsertAlert({
+            userId,
+            siteId: site.id,
+            kind: "away_watchdog",
+            title: finding.title,
+            body: finding.body,
+            dollarImpactUsd: finding.dollarImpactUsd,
+            confidence: vacant?.basis === "overnight_floor" ? "medium" : "low",
+          });
+        }
       }
     }
     const top = ranked[0];

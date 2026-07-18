@@ -162,7 +162,7 @@ export async function createSite(data: typeof sites.$inferInsert) {
 export async function updateSite(
   siteId: number,
   userId: number,
-  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields">>,
+  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields" | "tenure" | "hasSolar" | "awayMode" | "awayStart" | "awayEnd">>,
 ) {
   await assertSiteOwner(siteId, userId);
   const db = await requireDb();
@@ -941,7 +941,7 @@ export async function deletePlanBasket(id: number, userId: number) {
 export async function upsertAlert(row: {
   userId: number;
   siteId: number;
-  kind: "anomaly" | "demand_spike" | "rate_opportunity" | "verdict" | "digest";
+  kind: "anomaly" | "demand_spike" | "rate_opportunity" | "verdict" | "digest" | "away_watchdog";
   title: string;
   body?: string;
   dollarImpactUsd: number;
@@ -949,7 +949,10 @@ export async function upsertAlert(row: {
 }): Promise<{ id: number; refreshed: boolean } | null> {
   // dollar-first honesty gate: conservative $25/yr materiality floor —
   // below that we stay quiet rather than nag (quiet-by-default rule).
-  if (!Number.isFinite(row.dollarImpactUsd) || Math.abs(row.dollarImpactUsd) < 25) return null;
+  // v1.19 exception: away-watchdog findings are SAFETY alerts (a running leak
+  // grows past any dollar floor); the 6h-sustained vacant-baseline gate
+  // upstream is the honesty filter for these, not dollars.
+  if (row.kind !== "away_watchdog" && (!Number.isFinite(row.dollarImpactUsd) || Math.abs(row.dollarImpactUsd) < 25)) return null;
   const db = await requireDb();
   const existing = await db
     .select()

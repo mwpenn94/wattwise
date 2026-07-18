@@ -103,10 +103,15 @@ export function composeMeasures(
     commodity: string;
     peakKwMin: number | null;
     peakKwMax: number | null;
+    /** v1.18 applicability conditions (optional — legacy callers omit them) */
+    closedToNew?: boolean;
+    techCondition?: "none" | "solar_only" | "non_solar_only";
     structure: TariffStructure;
     isCurrentBasis: boolean;
   }>,
   sectorClass: string,
+  /** v1.18: solar status of the site — gates technology-conditioned plans in the re-sweep */
+  siteHasSolar = false,
 ): ComposedResult {
   const disclosures: string[] = [
     `Composed plan modeled on ${LABEL_NORMAL_YEAR} hourly profile — measures compose on one profile; savings are never summed independently.`,
@@ -250,8 +255,10 @@ export function composeMeasures(
   /* ---- 5. rate re-sweep on the composed profile (§3c: rate last) ---- */
   const rateSweep = candidateTariffs.map((t) => {
     const elig = tariffEligible(
-      { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax },
-      { sectorClass },
+      { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition },
+      // v1.18: composing solar INTO the plan flips solar-conditioned eligibility —
+      // a basket containing a solar measure is priced as a solar customer.
+      { sectorClass, hasSolar: siteHasSolar || measures.some((m) => m.kind === "solar"), isCurrentBasis: t.isCurrentBasis },
       composedPeakKw > 0 ? composedPeakKw : null,
     );
     const cost = costOnTariff(composedPoints, t.structure);

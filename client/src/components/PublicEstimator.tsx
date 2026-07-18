@@ -311,17 +311,29 @@ export function PublicEstimator() {
           <div className="mt-4">
             <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">accuracy ladder</p>
             <div className="mt-1.5 space-y-1">
+              {/* v2.8 §1 ladder-as-contract: each rung names, in advance, the
+                  specific insights the next upload unlocks — generated from the
+                  capability matrix (v1.17 §5.0a), never vague encouragement. */}
               {est.accuracy.ladder.map((r, i) => (
-                <div key={r.rung} className="flex items-center gap-2 text-xs">
+                <div key={r.rung} className="flex gap-2 text-xs">
                   <span
-                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
+                    className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
                       r.current ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
                     }`}
                   >
                     {i + 1}
                   </span>
-                  <span className={r.current ? "font-semibold" : "text-muted-foreground"}>{r.label}</span>
-                  <span className="truncate text-[10px] text-muted-foreground/70">— {r.unlockedBy}</span>
+                  <div className="min-w-0">
+                    <p className="leading-tight">
+                      <span className={r.current ? "font-semibold" : "text-muted-foreground"}>{r.label}</span>
+                      <span className="text-[10px] text-muted-foreground/70"> — {r.unlockedBy}</span>
+                    </p>
+                    {"unlocks" in r && Array.isArray(r.unlocks) && r.unlocks.length > 0 && (
+                      <p className="text-[10px] leading-snug text-muted-foreground/60">
+                        Unlocks: {r.unlocks.join(" · ")}
+                      </p>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>

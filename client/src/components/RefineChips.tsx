@@ -51,16 +51,53 @@ interface Props {
 export default function RefineChips({ siteId, site, onRefined }: Props) {
   const utils = trpc.useUtils();
   const refine = trpc.sites.refine.useMutation();
+  const confirmIdentity = trpc.sites.confirmIdentity.useMutation();
   const [sqft, setSqft] = useState("");
   const [vintage, setVintage] = useState("");
   const [loc, setLoc] = useState({ state: "", zip: "" });
   const [openChip, setOpenChip] = useState<string | null>(null);
+  const [identityAnswered, setIdentityAnswered] = useState(false);
+
+  /* v2.11 identity-confirm moment: the profile is a QUESTION, never an
+   * assertion — "Looks like a ~12,000 sqft office in Phoenix — right?" with
+   * one-tap yes. A wrong guess phrased as a question costs nothing. Confirming
+   * upgrades attrSource so the imputed/estimate chips resolve. */
+  const identityPhrase = (() => {
+    if (!site) return null;
+    const parts: string[] = [];
+    if (site.sqft) parts.push(`~${site.sqft.toLocaleString()} sqft`);
+    if (site.buildingType) parts.push(site.buildingType.replace(/_/g, " "));
+    const where = [site.state, site.zip].filter(Boolean).join(" ");
+    if (parts.length === 0) return null;
+    return `Looks like a ${parts.join(" ")}${where ? ` in ${where}` : ""}${site.vintage ? `, built around ${site.vintage}` : ""}`;
+  })();
+
+  async function tapYes() {
+    try {
+      await confirmIdentity.mutateAsync({ siteId });
+      setIdentityAnswered(true);
+      await Promise.all([utils.sites.list.invalidate(), utils.sites.get.invalidate({ siteId })]);
+      toast.success("Profile confirmed — archetype match, operating-hours inference, and benchmark peers now run on a confirmed identity instead of a guess.");
+      onRefined();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not confirm");
+    }
+  }
 
   async function apply(patch: Record<string, unknown>, label: string) {
     try {
-      await refine.mutateAsync({ siteId, ...patch });
+      const res = await refine.mutateAsync({ siteId, ...patch });
       await Promise.all([utils.sites.list.invalidate(), utils.sites.get.invalidate({ siteId })]);
-      toast.success(`${label} saved — re-running analysis with your real value…`);
+      // v1.17 §5.0(c) recompute disclosure: the confirmation names exactly
+      // which insights this attribute change recomputes — never a silent
+      // number change ("pool confirmed → summer end-use split updated").
+      const deps = (res as { recomputes?: Array<{ field: string; updates: string[] }> }).recomputes ?? [];
+      const updates = Array.from(new Set(deps.flatMap((d) => d.updates)));
+      toast.success(
+        updates.length > 0
+          ? `${label} saved — recomputing: ${updates.join(", ")}.`
+          : `${label} saved — re-running analysis with your real value…`,
+      );
       setOpenChip(null);
       onRefined();
     } catch (e) {
@@ -79,6 +116,21 @@ export default function RefineChips({ siteId, site, onRefined }: Props) {
           Quick-start placeholders in effect — add detail only if you want to
         </p>
       </div>
+      {identityPhrase && !identityAnswered && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-background/60 px-3 py-2">
+          <p className="text-sm">
+            {identityPhrase} — <span className="font-semibold">right?</span>
+          </p>
+          <div className="flex gap-1.5">
+            <Button size="sm" className="h-7 px-3 text-xs" disabled={confirmIdentity.isPending} onClick={tapYes}>
+              Yes, that's it
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 px-3 text-xs" onClick={() => setOpenChip("type")}>
+              Not quite — fix it
+            </Button>
+          </div>
+        </div>
+      )}
       <p className="mt-1 text-xs text-muted-foreground">
         Everything derivable from your address was derived automatically
         {site?.climateZone ? ` — climate zone ${site.climateZone}` : ""}

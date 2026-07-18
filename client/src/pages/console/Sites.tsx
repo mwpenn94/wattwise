@@ -50,13 +50,13 @@ export default function Sites() {
   const [, navigate] = useLocation();
   const sites = trpc.sites.list.useQuery();
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ name: "", city: "", state: "AZ", zip: "", buildingType: "", sqft: "", vintage: "", utilityName: "" });
+  const [form, setForm] = useState({ name: "", city: "", state: "AZ", zip: "", buildingType: "", sqft: "", vintage: "", utilityName: "", tenure: "own", hasSolar: false });
 
   const create = trpc.sites.create.useMutation({
     onSuccess: async () => {
       toast.success("Site created");
       setOpen(false);
-      setForm({ name: "", city: "", state: "AZ", zip: "", buildingType: "", sqft: "", vintage: "", utilityName: "" });
+      setForm({ name: "", city: "", state: "AZ", zip: "", buildingType: "", sqft: "", vintage: "", utilityName: "", tenure: "own", hasSolar: false });
       await utils.sites.list.invalidate();
     },
     onError: (e) => toast.error(e.message),
@@ -123,6 +123,36 @@ export default function Sites() {
                 <Label htmlFor="s-util">Utility</Label>
                 <Input id="s-util" value={form.utilityName} onChange={(e) => setForm({ ...form, utilityName: e.target.value })} placeholder="APS / SRP / TEP…" />
               </div>
+              {/* v1.18 tenure modes — recommendations are filtered to what you can actually do */}
+              <div>
+                <Label>Do you own or rent?</Label>
+                <Select value={form.tenure} onValueChange={(v) => setForm({ ...form, tenure: v })}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="own">Own</SelectItem>
+                    <SelectItem value="rent">Rent</SelectItem>
+                    <SelectItem value="condo_hoa">Condo / HOA</SelectItem>
+                  </SelectContent>
+                </Select>
+                {form.tenure !== "own" && (
+                  <p className="mt-1 text-xs text-muted-foreground">Your feed will lead with savings in your control; building upgrades go to a separate “worth raising” list.</p>
+                )}
+              </div>
+              <div>
+                <Label>Solar panels on site?</Label>
+                <Select value={form.hasSolar ? "yes" : "no"} onValueChange={(v) => setForm({ ...form, hasSolar: v === "yes" })}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="no">No</SelectItem>
+                    <SelectItem value="yes">Yes</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-xs text-muted-foreground">Some rate plans are solar-only or closed to solar customers — this keeps your rate comparison lawful.</p>
+              </div>
             </div>
             <Button
               className="mt-2 w-full"
@@ -137,6 +167,8 @@ export default function Sites() {
                   sqft: form.sqft ? Number(form.sqft) : undefined,
                   vintage: form.vintage ? Number(form.vintage) : undefined,
                   utilityName: form.utilityName || undefined,
+                  tenure: form.tenure as "own" | "rent" | "condo_hoa",
+                  hasSolar: form.hasSolar,
                 })
               }
             >

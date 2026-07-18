@@ -75,11 +75,19 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [buildingType, setBuildingType] = useState<string | null>(null);
   const [showAllChips, setShowAllChips] = useState(false);
+  // v1.18/v2.9 §1b a11y confirm path: the candidate list is an ordered, keyboard-
+  // navigable listbox (↑↓ to move, Enter to confirm, Esc to dismiss) with ARIA
+  // wiring — tap-to-confirm has a full keyboard/screen-reader equivalent; the
+  // visual dropdown is progressive enhancement, not the only path.
+  const [highlightIdx, setHighlightIdx] = useState(-1);
   const [utilityOverride, setUtilityOverride] = useState<string | null>(null);
   const suggestBoxRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(address.trim()), 250);
+    const t = setTimeout(() => {
+      setDebounced(address.trim());
+      setHighlightIdx(-1); // new query → new candidate ordering; stale highlight would confirm the wrong address
+    }, 250);
     return () => clearTimeout(t);
   }, [address]);
 
@@ -293,22 +301,67 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
                 setSuggestOpen(true);
               }}
               onFocus={() => setSuggestOpen(true)}
-              onKeyDown={(e) => e.key === "Enter" && !busy && !billDraft && startFromAddress()}
+              onKeyDown={(e) => {
+                const list = suggestions.data ?? [];
+                const listVisible = suggestOpen && selectedPlace == null && debounced.length >= 3 && list.length > 0;
+                if (listVisible && e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setHighlightIdx((i) => Math.min(i + 1, list.length - 1));
+                  return;
+                }
+                if (listVisible && e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setHighlightIdx((i) => Math.max(i - 1, 0));
+                  return;
+                }
+                if (listVisible && e.key === "Escape") {
+                  setSuggestOpen(false);
+                  setHighlightIdx(-1);
+                  return;
+                }
+                if (e.key === "Enter") {
+                  if (listVisible && highlightIdx >= 0 && highlightIdx < list.length) {
+                    e.preventDefault();
+                    const s = list[highlightIdx];
+                    setSelectedPlace({ placeId: s.placeId, description: s.description });
+                    setAddress(s.description);
+                    setSuggestOpen(false);
+                    setHighlightIdx(-1);
+                    return;
+                  }
+                  if (!busy && !billDraft) startFromAddress();
+                }
+              }}
               disabled={busy}
               aria-label="Building address"
+              role="combobox"
+              aria-expanded={suggestOpen && selectedPlace == null && (suggestions.data?.length ?? 0) > 0}
+              aria-controls="address-candidate-listbox"
+              aria-activedescendant={highlightIdx >= 0 ? `address-candidate-${highlightIdx}` : undefined}
+              aria-autocomplete="list"
               autoComplete="off"
             />
             {suggestOpen && selectedPlace == null && debounced.length >= 3 && (suggestions.data?.length ?? 0) > 0 && (
-              <div className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
-                {suggestions.data!.map((s) => (
+              <div
+                id="address-candidate-listbox"
+                role="listbox"
+                aria-label="Address candidates, ordered by match — use arrow keys and Enter to confirm"
+                className="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md"
+              >
+                {suggestions.data!.map((s, idx) => (
                   <button
                     key={s.placeId}
+                    id={`address-candidate-${idx}`}
                     type="button"
-                    className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground"
+                    role="option"
+                    aria-selected={idx === highlightIdx}
+                    className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground ${idx === highlightIdx ? "bg-accent text-accent-foreground" : ""}`}
+                    onMouseEnter={() => setHighlightIdx(idx)}
                     onClick={() => {
                       setSelectedPlace({ placeId: s.placeId, description: s.description });
                       setAddress(s.description);
                       setSuggestOpen(false);
+                      setHighlightIdx(-1);
                     }}
                   >
                     <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />

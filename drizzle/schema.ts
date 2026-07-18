@@ -89,6 +89,20 @@ export const sites = mysqlTable(
     isHypothetical: boolean("isHypothetical").default(false).notNull(),
     /** provenance for attribute values: user_entered | assessor | archetype_default */
     attrSource: varchar("attrSource", { length: 32 }).default("user_entered"),
+    /** v1.18 tenure modes: opportunity generation filters by what the occupant
+     * can actually do — a renter shown a solar payback is a spec failure. */
+    tenure: mysqlEnum("tenure", ["own", "rent", "condo_hoa"]).default("own").notNull(),
+    /** v1.18 technology-conditioned tariff applicability: solar customers may be
+     * RESTRICTED to solar plans (SRP pattern) and non-solar users must never see
+     * solar-only plans. Confirmed by the user (or PV detection downstream). */
+    hasSolar: boolean("hasSolar").default(false).notNull(),
+    /** v1.19 away mode / occupancy calendar: one toggle flips the product's
+     * voice — the feed quiets to a watchdog card and the only proactive message
+     * is usage above the vacant baseline (leak-first for water). */
+    awayMode: boolean("awayMode").default(false).notNull(),
+    /** optional away window (ms epoch); null = indefinite while awayMode on */
+    awayStart: bigint("awayStart", { mode: "number" }),
+    awayEnd: bigint("awayEnd", { mode: "number" }),
     /** Batch-45 (pass 1959): per-field refinement record for quick-start sites —
      * JSON array of core field names (buildingType/sqft/vintage) the user has
      * explicitly provided. Site-level attrSource flips on the FIRST refinement,
@@ -233,6 +247,12 @@ export const tariffs = mysqlTable(
      * cpCharges {method: cp_proxy_top_n_customer_peaks | cp_omitted_no_interval_data} */
     structure: json("structure").notNull(),
     freshness: mysqlEnum("freshness", ["urdb_refreshed_150", "urdb_stale", "manual", "verified"]).default("urdb_stale").notNull(),
+    /** v1.18 applicability conditions beyond sector/size: a closed/grandfathered
+     * tariff can be a customer's CURRENT basis but never a switch target. */
+    closedToNew: boolean("closedToNew").default(false).notNull(),
+    /** Technology-conditioned plans, both directions: solar_only plans hidden
+     * from non-solar sites; non_solar_only plans hidden from solar sites. */
+    techCondition: mysqlEnum("techCondition", ["none", "solar_only", "non_solar_only"]).default("none").notNull(),
     effectiveDate: date("effectiveDate"),
     source: varchar("source", { length: 64 }).default("urdb_snapshot").notNull(),
     sourceVersion: varchar("sourceVersion", { length: 32 }),
@@ -730,7 +750,7 @@ export const alerts = mysqlTable(
     id: int("id").autoincrement().primaryKey(),
     userId: int("userId").notNull(),
     siteId: int("siteId").notNull(),
-    kind: mysqlEnum("kind", ["anomaly", "demand_spike", "rate_opportunity", "verdict", "digest"]).notNull(),
+    kind: mysqlEnum("kind", ["anomaly", "demand_spike", "rate_opportunity", "verdict", "digest", "away_watchdog"]).notNull(),
     title: varchar("title", { length: 255 }).notNull(),
     body: text("body"),
     /** the dollar figure that justifies this alert's existence */

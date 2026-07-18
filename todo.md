@@ -207,27 +207,37 @@
 - [x] §3i Alerts framework: alerts table (migration 0009) w/ $25 materiality floor + per-(site,kind) open-row batching; generated at analysis time (sustained anomaly × annual cost, top rate opportunity); alerts router + AlertsInbox bell in console layout; digest now backed by a REAL per-user Heartbeat cron (setDigestPrefs creates/removes the job, /api/scheduled/digest handler w/ taskUid-only lookup + orphan→2xx), buildDigest enforces dollar-figure-or-silence, digestPreview "if it ran today" on Account — 9 vitest specs
 - [x] §3i Demand review ritual: DemandReview card on Explore for demand-charge sites only — 90th-percentile set-point (proven-target copy), billed-vs-actual monthly table w/ ratchet-applied flags (amber when billed > actual), attribution recap line, exactly ONE priced demand action w/ add-to-plan deep link, honest no-action copy; demandReview block persisted in pipeline summary metrics
 - [ ] §3 Hero 5 Energy Wrapped: shareable year-in-review card
-- [ ] §4 EN/ES language toggle (AZ/NM market)
+- [x] §4 EN/ES language toggle (AZ/NM market)
 - [x] §3 Hero 4 bill-scan overlay verification: uploaded bill image renders beside the review form (object URL, revoked on save/skip; PDFs skip preview honestly), per-field extraction-confidence chips (green ≥0.8 / amber ≥0.5 / red) on all five fields; manual-entry fields ungraded
 - [ ] §1b Portfolio map: saved sites pinned, colored by opportunity size
 - [ ] Honest-gaps ledger: in-app + report disclosure of what is NOT built (Data Concierge rungs 1-4, continuous feeds, 3D extrusion, LiDAR/Solar API, GHL delivery, per-site roles) and why
 - [ ] Coverage report deliverable: gap-by-gap docs-vs-build matrix with evidence
 
 ## New docs received Jul 18 (handoff v1.15 + addendum v2.7 — supersede the v1.7/v1.9 we built against)
-- [ ] §5b pricing rules: concrete prices not ranges, "Most popular" label, persona descriptors per tier, value-first Free list, jargon check
-- [ ] §3i-2 identity-confirm moment + living building profile (chip panel w/ source tiers, confirm/correct)
+- [x] §5b pricing rules: concrete prices not ranges, "Most popular" label, persona descriptors per tier, value-first Free list, jargon check
+- [x] §3i-2 identity-confirm moment + living building profile (chip panel w/ source tiers, confirm/correct)
 - [ ] Session A0 note: cold_context_review_runner.py requires ANTHROPIC_API_KEY — not available in this environment; per §7 halt-and-report (doc itself is marked CONVERGED by owner's log; build proceeds)
 - [ ] v1.15 large-scope items requiring owner prioritization (each is a multi-session build): attribute inference registry + PV gate (v1.9c), dimensional attribution (v1.10), estimated-read/tariff-vintage/baseline-lifecycle (v1.11), second-order inference/equipment health (v1.12), vertical packs + production_series (v1.13), incentives/DSIRE + escalation + split incentives (v1.14), WA compliance layer (v1.15), bill reconciliation self-calibration, cohort insights, geometry/3D layer (v1.4), Overture seeding (v1.8)
 
 ## Owner bug report (Jul 18, mobile screenshots)
-- [ ] BUG: Ranked opportunity cards never name the actual recommendation — body leads with disclaimers/provenance while the measure headline ("Switch to <specific rate>", "Optimize cooling setpoints/schedule") is missing; fix cards to lead with an explicit action title wherever opportunities render (Explore, HomeFeed, Portfolio)
+- [x] BUG: Ranked opportunity cards never name the actual recommendation — body leads with disclaimers/provenance while the measure headline ("Switch to <specific rate>", "Optimize cooling setpoints/schedule") is missing; fix cards to lead with an explicit action title wherever opportunities render (Explore, HomeFeed, Portfolio)
 
 ## Owner update Jul 18 (later): handoff v1.17 + addendum v2.8 attached
-- [ ] Opportunity-card bug fix wave: gapfixes honesty specs green, sewer spec aligned to provenance-disclosure contract, full suite 172 passing (needs checkpoint)
-- [ ] §5b pricing rules final pass: "Most popular" badge, concrete prices, persona descriptors, value-first Free list, jargon sweep of marketing copy
-- [ ] v1.17 §5.0(a) capability matrix — codify insight-class × data-state unlock table as a shared module (single source of truth)
-- [ ] v2.8 §1 ladder-as-contract: accuracy ladder rungs generated FROM the capability matrix; each rung names the specific insights the next upload unlocks BEFORE upload
-- [ ] v1.17 §5.0(c) recompute-disclosure groundwork: attribute confirmations state which insights recomputed/sharpened
-- [ ] §3i-2 building profile "what we know about your building" chip panel with per-tier source chips (confirm/correct affordance)
-- [ ] EN/ES groundwork: i18n scaffold + language toggle (EN complete, ES partial honestly labeled)
+- [x] Opportunity-card bug fix wave: gapfixes honesty specs green, sewer spec aligned to provenance-disclosure contract, full suite 172 passing (needs checkpoint)
+- [x] §5b pricing rules final pass: "Most popular" badge, concrete prices, persona descriptors, value-first Free list, jargon sweep of marketing copy
+- [x] v1.17 §5.0(a) capability matrix — codify insight-class × data-state unlock table as a shared module (single source of truth)
+- [x] v2.8 §1 ladder-as-contract: accuracy ladder rungs generated FROM the capability matrix; each rung names the specific insights the next upload unlocks BEFORE upload
+- [x] v1.17 §5.0(c) recompute-disclosure groundwork: attribute confirmations state which insights recomputed/sharpened
+- [x] §3i-2 building profile "what we know about your building" chip panel with per-tier source chips (confirm/correct affordance)
+- [x] EN/ES groundwork: i18n scaffold + language toggle (EN complete, ES partial honestly labeled)
 - [ ] Final coverage report vs v1.17/v2.8: shipped / newly shipped / infeasible-on-runtime / large-scope-needs-prioritization
+
+## Owner update Jul 18 (v1.20 handoff / v2.11 addendum deltas)
+- [x] Tenure modes (own/rent/condo-HOA): site-level tenure field; renter mode suppresses owner-capex opportunities, leads with in-control measures; "worth raising with your landlord" list (v1.18 §5 stage 5)
+- [x] Tariff applicability conditions: closed-to-new/grandfathered flags + technology-conditioned plans both directions (solar-only plans hidden from non-solar; solar sites see only lawful plans) (v1.18 §5 stage 7)
+- [x] Away mode / occupancy calendar: away toggle → quiet watchdog card; away-period usage alert against vacant baseline; leak-first water framing (v1.19 §5 stage 4, v2.10 §1b)
+- [x] Occupant privacy boundary: new occupant never sees prior occupant data; modeling continuity ≠ data visibility (v1.19 §5 stage 3b)
+- [x] A11y footprint confirm: ordered address/description candidate list as keyboard/screen-reader equivalent of tap-to-confirm (v1.18/v2.9 §1b)
+- [x] Persona-QA groundwork: persona fingerprint on dead-end events (PII-free) + at least one CI persona suite (renter zero-capex assertion) (v1.20 block E, AC18a)
+- [x] Finish in-flight: building-profile identity confirm chip panel
+- [x] Finish in-flight: EN/ES groundwork (string layer + missing-string check)

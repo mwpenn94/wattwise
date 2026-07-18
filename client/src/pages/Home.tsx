@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { MODELED_ESTIMATES_DISCLAIMER } from "@shared/wattwise";
 import { PublicEstimator } from "@/components/PublicEstimator";
+import { useLang } from "@/lib/i18n";
 
 const FEATURES = [
   {
@@ -64,6 +65,7 @@ const FEATURES = [
 
 export default function Home() {
   const { user, isAuthenticated } = useAuth();
+  const { lang, t, setLang } = useLang();
   // §5b personalized upgrade moment: when signed in, the pricing section
   // speaks with the user's own numbers instead of generic copy. Query is
   // auth-gated; anonymous visitors see the standard cards untouched.
@@ -90,6 +92,17 @@ export default function Home() {
               </span>
             </div>
             <div className="flex items-center gap-3">
+              {/* EN/ES groundwork: explicit choice, persisted; public funnel translates,
+                  console honestly stays EN for now (disclosed in the switcher note). */}
+              <button
+                type="button"
+                className="font-mono text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => setLang(lang === "en" ? "es" : "en")}
+                aria-label={t("lang.label")}
+                title={t("lang.consoleNote")}
+              >
+                {lang === "en" ? "ES · Español" : "EN · English"}
+              </button>
               <Link href="/convergence" className="font-mono text-xs text-muted-foreground hover:text-foreground">
                 Methodology log
               </Link>
@@ -116,11 +129,12 @@ export default function Home() {
                 interval data · tariffs · scenarios
               </p>
               <h1 className="rise-in rise-in-1 max-w-2xl font-display text-4xl font-extrabold leading-[1.08] tracking-tight md:text-6xl">
-                Your meter already knows where the money is going.
+                {lang === "es" ? t("hero.tagline") : "Your meter already knows where the money is going."}
               </h1>
               <p className="rise-in rise-in-2 mt-6 max-w-xl text-lg text-muted-foreground">
-                WattWise ingests your interval files and bills, rebuilds your rate from first principles, and shows you — with
-                honest confidence ranges — what a rate switch, solar array, battery, or retrofit would actually change.
+                {lang === "es"
+                  ? t("hero.sub")
+                  : "WattWise ingests your interval files and bills, rebuilds your rate from first principles, and shows you — with honest confidence ranges — what a rate switch, solar array, battery, or retrofit would actually change."}
               </p>
               <div className="rise-in rise-in-3 mt-8 flex flex-wrap gap-3">
                 {isAuthenticated ? (
@@ -135,7 +149,7 @@ export default function Home() {
                     className="font-semibold"
                     onClick={() => document.querySelector<HTMLInputElement>('input[aria-label="Address for estimate"]')?.focus()}
                   >
-                    Estimate my costs — free, no sign-up <ArrowRight className="ml-2 h-4 w-4" />
+                    {lang === "es" ? t("cta.seeEstimate") : "Estimate my costs — free, no sign-up"} <ArrowRight className="ml-2 h-4 w-4" />
                   </Button>
                 )}
                 <Link href="/convergence">
@@ -144,7 +158,9 @@ export default function Home() {
                   </Button>
                 </Link>
               </div>
-              <p className="rise-in rise-in-4 mt-6 max-w-lg text-xs text-muted-foreground/80">{MODELED_ESTIMATES_DISCLAIMER}</p>
+              <p className="rise-in rise-in-4 mt-6 max-w-lg text-xs text-muted-foreground/80">
+                {lang === "es" ? t("estimator.disclaimer") : MODELED_ESTIMATES_DISCLAIMER}
+              </p>
             </div>
 
             {/* estimate-first onboarding — the product IS the hero (UX v1.9) */}

@@ -18,6 +18,7 @@ import { archetypeBaseline } from "./analytics/baseline";
 import * as h from "./dbHelpers";
 import { costOnTariff, tariffEligible } from "./analytics/tariffEngine";
 import type { TariffStructure } from "../shared/wattwise";
+import { buildAccuracyLadder } from "../shared/capabilityMatrix";
 
 /* ---------------- IP rate limiting (public endpoint guard) ---------------- */
 const BUCKET_MAX = 12; // estimates per window per IP
@@ -73,17 +74,15 @@ export interface PublicEstimate {
   accuracy: {
     rung: "estimate";
     label: string;
-    ladder: Array<{ rung: string; label: string; unlockedBy: string; current: boolean }>;
+    ladder: Array<{ rung: string; label: string; unlockedBy: string; unlocks: string[]; current: boolean }>;
   };
   disclosure: string;
 }
 
-export const ACCURACY_LADDER = [
-  { rung: "estimate", label: "Estimate", unlockedBy: "Address + building type (buildings like yours)" },
-  { rung: "good", label: "Good", unlockedBy: "One utility bill (your actual costs and tariff)" },
-  { rung: "great", label: "Great", unlockedBy: "12 months of bills (weather-normalized baseline)" },
-  { rung: "measured", label: "Measured", unlockedBy: "Interval data — Green Button or utility CSV (hour-by-hour truth)" },
-] as const;
+/** v1.17 §5.0(a) + v2.8 §1: the ladder is GENERATED from the capability
+ * matrix — every rung names the specific insights it unlocks, in advance.
+ * The matrix (shared/capabilityMatrix.ts) is the single source of truth. */
+export const ACCURACY_LADDER = buildAccuracyLadder();
 
 export async function computeAddressEstimate(input: {
   /** verified components from places.resolve, or raw address fallback */
@@ -135,8 +134,11 @@ export async function computeAddressEstimate(input: {
   const eligible = allTariffs.filter(
     (t) =>
       tariffEligible(
-        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin ?? null, peakKwMax: t.peakKwMax ?? null },
-        { sectorClass: sector },
+        // v1.18 applicability: an anonymous estimate assumes no solar and no
+        // grandfathered status — closed and solar-only plans are excluded so the
+        // public number is one the visitor could actually sign up for.
+        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin ?? null, peakKwMax: t.peakKwMax ?? null, closedToNew: t.closedToNew, techCondition: t.techCondition },
+        { sectorClass: sector, hasSolar: false },
         peakKw,
       ).eligible,
   );

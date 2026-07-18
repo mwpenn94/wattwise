@@ -25,6 +25,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import * as h from "./dbHelpers";
+import { emitDeadEndPersona } from "./personaFingerprint";
 import { ensureSeeded } from "./seed/runSeeders";
 import { preParseGate, rejectXxe, withParseTimeout } from "./ingest/hardening";
 import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, type ParsedMeterSeries } from "./ingest/parsers";
@@ -92,6 +93,10 @@ const siteInput = z.object({
   occupancyHours: z.record(z.string(), z.unknown()).optional(),
   utilityName: z.string().max(128).optional(),
   isHypothetical: z.boolean().optional(),
+  /** v1.18 tenure modes — gates opportunity generation to what the occupant can execute */
+  tenure: z.enum(["own", "rent", "condo_hoa"]).optional(),
+  /** v1.18 technology-conditioned tariff applicability — solar sites see only lawful plans */
+  hasSolar: z.boolean().optional(),
 });
 
 export const appRouter = router({
@@ -635,7 +640,24 @@ export const appRouter = router({
           }
         }
         await h.audit(ctx.user.id, "site_refined", "site", String(siteId), { fields: Object.keys(provided) });
-        return { ok: true as const, updated: Object.keys(provided) };
+        // v1.17 §5.0(c) recompute disclosure: a confirmation/correction states
+        // WHICH dependent insights it recomputes — "pool confirmed → summer
+        // end-use split updated", never a silent number change. The mapping is
+        // deterministic (attribute → dependent insight classes in this build);
+        // the next analysis run applies it, and the UI announces it now.
+        const RECOMPUTE_DEPENDENTS: Record<string, string[]> = {
+          buildingType: ["peer archetype load shape", "end-use breakdown prior", "peer-building benchmark"],
+          sqft: ["synthetic baseline scale", "peer-building benchmark percentile"],
+          vintage: ["archetype efficiency band", "end-use breakdown prior"],
+          state: ["climate zone", "tariffs swept in the rate check", "emissions factors", "meter timezone"],
+          zip: ["climate zone precision", "emissions subregion"],
+          utilityName: ["tariffs swept in the rate check"],
+          occupancyHours: ["operating-hours assumptions in scenarios"],
+        };
+        const recomputes = Object.keys(provided)
+          .filter((k) => k in RECOMPUTE_DEPENDENTS)
+          .map((k) => ({ field: k, updates: RECOMPUTE_DEPENDENTS[k] }));
+        return { ok: true as const, updated: Object.keys(provided), recomputes };
       }),
     /** Direct site edit: rename + core attributes. Distinct from `refine` (which
      * runs the derivation cascade); this is a plain CRUD update for user control. */
@@ -648,6 +670,9 @@ export const appRouter = router({
           city: z.string().max(128).nullable().optional(),
           occupancyHours: z.string().max(64).nullable().optional(),
           utilityName: z.string().max(255).nullable().optional(),
+          /** v1.18: tenure + solar status are first-class, editable site facts */
+          tenure: z.enum(["own", "rent", "condo_hoa"]).optional(),
+          hasSolar: z.boolean().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -656,6 +681,42 @@ export const appRouter = router({
         if (Object.keys(clean).length === 0) return { ok: true as const };
         await h.updateSite(siteId, ctx.user.id, clean);
         await h.audit(ctx.user.id, "site_update", "site", String(siteId), { fields: Object.keys(clean) });
+        return { ok: true as const };
+      }),
+    /** v2.11 identity-confirm moment — one-tap "yes, that's it": the derived
+     * profile was a QUESTION; answering yes upgrades attrSource so the
+     * imputed/estimate chips resolve to confirmed, and downstream inference
+     * (archetype match, hours, benchmark peers) runs on a confirmed identity.
+     * No attribute values change — only their provenance does. */
+    confirmIdentity: protectedProcedure
+      .input(z.object({ siteId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        await h.updateSite(input.siteId, ctx.user.id, { attrSource: "user_confirmed" });
+        await h.audit(ctx.user.id, "site_identity_confirm", "site", String(input.siteId), {});
+        return { ok: true as const };
+      }),
+    /** v1.19 §5 stage 4 — away mode as a promise: one toggle (with optional
+     * dates) flips the product's voice. The watchdog itself runs inside the
+     * analysis pipeline; this mutation just records the window and audits it. */
+    setAway: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          awayMode: z.boolean(),
+          awayStart: z.number().nullable().optional(),
+          awayEnd: z.number().nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (input.awayStart != null && input.awayEnd != null && input.awayEnd <= input.awayStart) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Away end date must be after the start date." });
+        }
+        await h.updateSite(input.siteId, ctx.user.id, {
+          awayMode: input.awayMode,
+          awayStart: input.awayMode ? (input.awayStart ?? null) : null,
+          awayEnd: input.awayMode ? (input.awayEnd ?? null) : null,
+        });
+        await h.audit(ctx.user.id, "site_away_mode", "site", String(input.siteId), { awayMode: input.awayMode });
         return { ok: true as const };
       }),
     /** Full site removal (cascade: meters, intervals, bills, analytics, geometry,
@@ -1030,14 +1091,17 @@ export const appRouter = router({
             if (verifiedFormat === "csv") return parseCsvIntervals(buf.toString("utf8"), input.filename);
             return parseEspiXml(buf.toString("utf8"));
           }, `parse_${verifiedFormat}`);
-        } catch (e) {
+                } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           await h.updateUpload(uploadId, { status: "failed", error: msg });
+          // v1.20 block E: the user this failed for becomes a coverage-matrix
+          // candidate — situation fingerprint only, no PII, userId not stored.
+          await emitDeadEndPersona({ deadEnd: `parse_failed_${verifiedFormat}` });
           throw new TRPCError({ code: "BAD_REQUEST", message: `Parse failed: ${msg}` });
         }
-
         if (series.length === 0 || series.every((s) => s.points.length === 0)) {
           await h.updateUpload(uploadId, { status: "failed", error: "No interval data found in file" });
+          await emitDeadEndPersona({ deadEnd: `empty_file_${verifiedFormat}` });
           throw new TRPCError({ code: "BAD_REQUEST", message: "No interval data recognized in this file." });
         }
 
@@ -1697,10 +1761,13 @@ export const appRouter = router({
             commodity: t.commodity,
             peakKwMin: t.peakKwMin,
             peakKwMax: t.peakKwMax,
+            closedToNew: t.closedToNew,
+            techCondition: t.techCondition,
             structure: t.structure as TariffStructure,
             isCurrentBasis: t.id === basis.chosenTariffId,
           })),
           sectorClass,
+          site.hasSolar ?? false,
         );
         if (basis.tariffBasisDisclosure) result.disclosures.push(basis.tariffBasisDisclosure);
         if (basis.archetypeZoneDisclosure) result.disclosures.push(basis.archetypeZoneDisclosure);
@@ -1781,10 +1848,13 @@ export const appRouter = router({
                 commodity: t.commodity,
                 peakKwMin: t.peakKwMin,
                 peakKwMax: t.peakKwMax,
+                closedToNew: t.closedToNew,
+                techCondition: t.techCondition,
                 structure: t.structure as TariffStructure,
                 isCurrentBasis: t.id === basis.chosenTariffId,
               })),
               sectorClass,
+              site.hasSolar ?? false,
             );
             perSite.push({
               siteId,

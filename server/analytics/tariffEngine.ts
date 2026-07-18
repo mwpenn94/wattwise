@@ -562,10 +562,34 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
 
 /* ---------------- eligibility ---------------- */
 export function tariffEligible(
-  t: { sector: string; commodity: string; peakKwMin: number | null; peakKwMax: number | null },
-  site: { sectorClass: string },
+  t: {
+    sector: string;
+    commodity: string;
+    peakKwMin: number | null;
+    peakKwMax: number | null;
+    /** v1.18 applicability conditions (optional — legacy callers omit them) */
+    closedToNew?: boolean;
+    techCondition?: "none" | "solar_only" | "non_solar_only";
+  },
+  site: { sectorClass: string; hasSolar?: boolean; isCurrentBasis?: boolean },
   peakKw: number | null,
 ): { eligible: boolean; reason?: string } {
+  // v1.18 §5 stage 7: applicability conditions beyond sector/size.
+  // (a) Closed/grandfathered plans may be the customer's CURRENT basis (they
+  //     are already on it) but must never appear as a switch target.
+  if (t.closedToNew && !site.isCurrentBasis) {
+    return { eligible: false, reason: "Closed to new customers (grandfathered plan)" };
+  }
+  // (b) Technology-conditioned plans, both directions: a solar-only plan is
+  //     hidden from non-solar sites; solar sites see ONLY plans they may
+  //     lawfully take (SRP pattern: solar customers restricted to solar plans).
+  const tech = t.techCondition ?? "none";
+  if (tech === "solar_only" && !site.hasSolar) {
+    return { eligible: false, reason: "Solar-customer-only plan; this site has no solar on record" };
+  }
+  if (tech === "non_solar_only" && site.hasSolar) {
+    return { eligible: false, reason: "Not open to solar customers — solar sites are restricted to solar price plans" };
+  }
   // Cycle 3, pass 62: industrial sites must match industrial AND commercial
   // tariffs (industrial rates are a subset of C&I offerings).
   const sectorMap: Record<string, string[]> = {
