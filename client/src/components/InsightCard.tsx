@@ -52,6 +52,8 @@ export interface InsightCardProps {
   extraChips?: string[];
   /** One-tap action. Omit when the card is purely informational. */
   action?: { label: string; onClick: () => void; disabled?: boolean };
+  /** Optional secondary action (e.g. §3e "I did this" prove-it entry point). */
+  secondaryAction?: { label: string; onClick: () => void; disabled?: boolean };
   /** Provenance lines shown in the collapsed-by-default expander. */
   provenance?: string[];
   /** Secondary metrics rendered small, below the fold (kWh, kW, payback). */
@@ -116,10 +118,19 @@ export function InsightCard(p: InsightCardProps) {
 
       {/* 4 — one-tap action + 5 — provenance expander */}
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-        {p.action ? (
-          <Button size="sm" variant="outline" className="h-7 text-xs" disabled={p.action.disabled} onClick={p.action.onClick}>
-            {p.action.label}
-          </Button>
+        {p.action || p.secondaryAction ? (
+          <span className="flex flex-wrap items-center gap-1.5">
+            {p.action && (
+              <Button size="sm" variant="outline" className="h-7 text-xs" disabled={p.action.disabled} onClick={p.action.onClick}>
+                {p.action.label}
+              </Button>
+            )}
+            {p.secondaryAction && (
+              <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground hover:text-foreground" disabled={p.secondaryAction.disabled} onClick={p.secondaryAction.onClick}>
+                {p.secondaryAction.label}
+              </Button>
+            )}
+          </span>
         ) : (
           <span />
         )}

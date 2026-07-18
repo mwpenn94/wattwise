@@ -168,8 +168,8 @@
 - [x] Tests for new schema helpers, estimate endpoint, composition engine (composer.test.ts 8 specs; suite 103 passing)
 
 ## Remaining v1.7/v1.9 scope (full absorption — Jul 18 continuation)
-- [ ] §3b Peak Attribution Module: weather split, schedule split, coincidence residual, spike/plateau triage, counterfactual re-pricing, sufficiency gates; attribution card on Dashboard
-- [ ] §3e Prove-It loop: measure_implementations table, "I did this" action, monthly verdict card w/ honesty gates, cumulative verified-savings counter, miss-handling copy
+- [x] §3b Peak Attribution Module: weather split, schedule split, coincidence residual, spike/plateau triage, counterfactual re-pricing, sufficiency gates; attribution card on Dashboard
+- [x] §3e Prove-It loop: measure_implementations table (migration 0006), "I did this" action on opportunity cards, monthly verdict ledger w/ honesty gates (no verdict <1 month, early read <3, CVRMSE band, inconclusive-inside-band), cumulative verified-savings counter, miss-handling copy (11 vitest specs)
 - [ ] §3k Anti-dashboard home feed: 3-item story feed, verified/projected greeting number, charts inside stories w/ Explore surface, Ask WattWise (Plus) NL → engine dispatch cards
 - [ ] §3g Persona fork: residential/commercial vocabulary + hero rotation + measure library filter (detected from building type, not asked)
 - [ ] §3h Processing proof-of-work: real pipeline stage narration during analysis runs (no theatrical delays)
@@ -183,13 +183,13 @@
 - [ ] Verification deliverable: per-claim URL + screenshot walkthrough so the owner can verify every shipped claim
 
 ## Core usability — CRUD + navigation (owner feedback Jul 18, PRIORITY)
-- [ ] Audit: CRUD coverage matrix for sites, meters, tariffs, scenarios, site groups, uploads, implementations
-- [ ] Sites: edit (rename, address/attrs), delete with cascade + confirm, from both Sites list and site context
-- [ ] Meters: create on a site, edit (name, role, parent, timezone, utility), delete with cascade + confirm — visible in UI
-- [ ] Scenarios: delete/rename saved runs
-- [ ] Site groups: manage UI (create/rename/delete, assign sites)
-- [ ] Uploads: delete an upload / clear bad data path
-- [ ] Nav: console ↔ public site escape routes (logo → home, back links everywhere)
-- [ ] Nav: site selector consistency across console pages; no dead-end pages
+- [x] Audit: CRUD coverage matrix for sites, meters, tariffs, scenarios, site groups, uploads, implementations
+- [x] Sites: edit (rename, address/attrs), delete with cascade + confirm, from both Sites list and site context
+- [x] Meters: create on a site, edit (name, role, parent, timezone, utility), delete with cascade + confirm — visible in UI
+- [x] Scenarios: delete/rename saved runs
+- [x] Site groups: manage UI (create/delete, assign sites) on Portfolio page
+- [x] Uploads: delete an upload / clear bad data path
+- [x] Nav: console ↔ public site escape routes (logo → home, back links everywhere)
+- [x] Nav: site selector consistency across console pages; no dead-end pages
 - [ ] Nav: breadcrumbs or back affordance on detail views; mobile nav check
 - [ ] Click-through validation of every CRUD flow and nav path (screenshots)

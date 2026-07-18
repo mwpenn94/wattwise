@@ -13,11 +13,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Activity, BarChart3, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown } from "lucide-react";
+import { Activity, BarChart3, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown, Zap } from "lucide-react";
 import { decimateForChart, fmtNum, fmtUsd, type ChartPoint } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
 import { InsightCard, chipFromConfidence } from "@/components/InsightCard";
 import QuickStart from "@/components/QuickStart";
+import { MarkImplementedDialog, ProveItSection } from "@/components/ProveIt";
 import RefineChips from "@/components/RefineChips";
 import { Link, useSearch } from "wouter";
 
@@ -66,6 +67,8 @@ export default function Dashboard() {
   // replace the old hardcoded 30-day slice. "all" spans minTs→maxTs so long
   // histories are fully visible (peak-preserving decimation keeps it fast).
   const [rangeDays, setRangeDays] = useState<30 | 90 | 365 | "all">(30);
+  // §3e prove-it: which opportunity the "I did this" dialog is marking
+  const [markTarget, setMarkTarget] = useState<{ id?: number; measure: string; title: string; expectedSavingsUsd: number | null } | null>(null);
   const windowRange = useMemo(() => {
     if (!stats.data?.maxTs) return null;
     const from = rangeDays === "all" ? (stats.data.minTs ?? 0) : stats.data.maxTs - rangeDays * 86_400_000;
@@ -538,6 +541,74 @@ export default function Dashboard() {
       )}
 
       {/* Opportunities */}
+      {/* §3b Peak attribution story — what made the peak happen. Rendered as its
+          own card with a visual split bar; falls back silently when the
+          pipeline had insufficient data to attribute. */}
+      {(() => {
+        const attr = allInsightRows.find((i) => i.kind === "peak_attribution");
+        if (!attr) return null;
+        const m = (attr.metrics ?? {}) as {
+          peakKw?: number;
+          shape?: string;
+          weatherKw?: number | null;
+          scheduleKw?: number;
+          coincidenceKw?: number;
+          counterfactualSavingsUsd?: number | null;
+        };
+        const peak = m.peakKw ?? 0;
+        const segs = [
+          { label: "Schedule", kw: m.scheduleKw ?? 0, cls: "bg-primary/70" },
+          ...(m.weatherKw != null ? [{ label: "Weather", kw: m.weatherKw, cls: "bg-chart-2/70" }] : []),
+          { label: "Coincidence", kw: m.coincidenceKw ?? 0, cls: "bg-chart-4/80" },
+        ].filter((s) => s.kw > 0.05);
+        return (
+          <Card className="mt-4 border-border/70">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 font-display text-base">
+                <Zap className="h-4 w-4 text-primary" /> What made your peak happen
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <InsightCard
+                dollars={m.counterfactualSavingsUsd ?? null}
+                framing="Save"
+                headlineFallback={attr.title}
+                why={attr.body ?? attr.title}
+                confidence={chipFromConfidence(attr.confidence)}
+                extraChips={[m.shape === "spike" ? "short spike" : "sustained plateau", "modeled split"]}
+                metrics={segs.map((s) => ({ label: s.label.toLowerCase(), value: `${s.kw.toFixed(1)} kW` }))}
+                action={{
+                  label: "Model peak shaving in Scenarios",
+                  onClick: () => {
+                    window.location.href = `/app/scenarios?site=${activeSiteId}&measure=battery_peak_shave`;
+                  },
+                }}
+                provenance={[
+                  `Peak: ${peak.toFixed(1)} kW. Split method: median same-day-of-week/hour load = schedule share; monthly weather fit scaled to the peak hour = weather share (modeled); remainder = coincidence.`,
+                  "Counterfactual dollars come from a full-year re-price on your assigned rate with the peak window shaved — same engine that prices your bills.",
+                ]}
+              />
+              {peak > 0 && segs.length > 0 && (
+                <div className="mt-3">
+                  <div className="flex h-3 w-full overflow-hidden rounded-full border border-border/60">
+                    {segs.map((s) => (
+                      <div key={s.label} className={s.cls} style={{ width: `${Math.min((s.kw / peak) * 100, 100)}%` }} title={`${s.label}: ${s.kw.toFixed(1)} kW`} />
+                    ))}
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+                    {segs.map((s) => (
+                      <span key={s.label} className="flex items-center gap-1">
+                        <span className={`inline-block h-2 w-2 rounded-sm ${s.cls}`} /> {s.label} {s.kw.toFixed(1)} kW
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })()}
+
       <Card className="mt-4 border-border/70">
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 font-display text-base">
@@ -577,8 +648,13 @@ export default function Dashboard() {
                   action={{
                     label: "Model this in Scenarios",
                     onClick: () => {
-                      window.location.href = `/app/scenarios?site=${activeSiteId}`;
+                      window.location.href = `/app/scenarios?site=${activeSiteId}&measure=${o.measure}`;
                     },
+                  }}
+                  secondaryAction={{
+                    label: "I did this",
+                    onClick: () =>
+                      setMarkTarget({ id: o.id, measure: o.measure, title: o.title, expectedSavingsUsd: o.estCostSavingsPerYr ?? null }),
                   }}
                   provenance={[
                     `Measure: ${o.measure.replace(/_/g, " ")} · ranked #${o.rank} by estimated annual dollar impact.`,
@@ -594,8 +670,19 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
+      {/* §3e prove-it: verification ledger for implemented measures */}
+      {activeSiteId != null && <ProveItSection siteId={activeSiteId} />}
+      {activeSiteId != null && (
+        <MarkImplementedDialog
+          open={markTarget != null}
+          onOpenChange={(v) => !v && setMarkTarget(null)}
+          siteId={activeSiteId}
+          opportunity={markTarget}
+        />
+      )}
+
       {/* Other insights */}
-      {insightRows.filter((i) => !["demand", "benchmark", "emissions", "cost", "tariff_comparison", "cp_proxy"].includes(i.kind)).length > 0 && (
+      {insightRows.filter((i) => !["demand", "benchmark", "emissions", "cost", "tariff_comparison", "cp_proxy", "peak_attribution"].includes(i.kind)).length > 0 && (
         <Card className="mt-4 border-border/70">
           <CardHeader className="pb-2">
             <CardTitle className="font-display text-base">Additional insights</CardTitle>
@@ -605,7 +692,7 @@ export default function Dashboard() {
                 rarely carry a dollar figure, so the headline is the honest
                 title and the why-line carries the substance. */}
             {insightRows
-              .filter((i) => !["demand", "benchmark", "emissions", "cost", "tariff_comparison", "cp_proxy"].includes(i.kind))
+              .filter((i) => !["demand", "benchmark", "emissions", "cost", "tariff_comparison", "cp_proxy", "peak_attribution"].includes(i.kind))
               .map((i) => (
                 <InsightCard
                   key={i.id}

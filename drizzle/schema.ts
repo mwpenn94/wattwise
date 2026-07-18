@@ -361,6 +361,38 @@ export const opportunities = mysqlTable(
   (t) => [index("opps_site_idx").on(t.siteId)],
 );
 
+/** 10b. measure_implementations — prove-it loop (§3e): user marks a measure as
+ * done; monthly verdicts compare counterfactual baseline vs actuals. Honesty
+ * gates: no verdict before one full billing cycle; wide bands are named. */
+export const measureImplementations = mysqlTable(
+  "measure_implementations",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    siteId: int("siteId").notNull(),
+    /** nullable — an implementation may reference a ranked opportunity or be free-form */
+    opportunityId: int("opportunityId"),
+    measure: varchar("measure", { length: 128 }).notNull(),
+    title: varchar("title", { length: 512 }).notNull(),
+    /** ms epoch: when the user says the change went in */
+    implementedAt: bigint("implementedAt", { mode: "number" }).notNull(),
+    /** expected annual $ savings at mark time (from the opportunity), for comparison */
+    expectedSavingsUsd: double("expectedSavingsUsd"),
+    status: mysqlEnum("status", ["awaiting_data", "on_track", "verified", "underperforming", "inconclusive"])
+      .default("awaiting_data")
+      .notNull(),
+    /** verdict history: [{month, expectedUsd, actualDeltaUsd, bandUsd, verdict, note}] */
+    verdicts: json("verdicts"),
+    /** cumulative verified savings to date (recomputed on each verdict pass) */
+    verifiedSavingsUsd: double("verifiedSavingsUsd"),
+    lastEvaluatedAt: bigint("lastEvaluatedAt", { mode: "number" }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [index("mi_site_idx").on(t.siteId), index("mi_user_idx").on(t.userId)],
+);
+
+export type MeasureImplementation = typeof measureImplementations.$inferSelect;
+
 /** 11. scenarios — what-if runs; actual & hypothetical share this path. */
 export const scenarios = mysqlTable(
   "scenarios",

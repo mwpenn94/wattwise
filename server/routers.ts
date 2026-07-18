@@ -31,7 +31,8 @@ import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
-import { archetypeBaseline } from "./analytics/baseline";
+import { archetypeBaseline, type BaselineFit } from "./analytics/baseline";
+import { evaluateImplementation, buildMonthlyActuals } from "./analytics/proveIt";
 import { runScenario, hourlyToPoints, type ScenarioInput } from "./analytics/scenarios";
 import { composeMeasures, presetBaskets, type PlanMeasure } from "./analytics/composer";
 import { costOnTariff } from "./analytics/tariffEngine";
@@ -1232,6 +1233,170 @@ export const appRouter = router({
     opportunities: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => h.listOpportunities(input.siteId, ctx.user.id)),
   }),
 
+  /* ================= §3e prove-it loop ================= */
+  proveIt: router({
+    /** Mark a measure as implemented — the "I did this" action. */
+    mark: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          opportunityId: z.number().optional(),
+          measure: z.string().min(1).max(128),
+          title: z.string().min(1).max(512),
+          implementedAt: z.number(), // ms epoch, user-declared
+          expectedSavingsUsd: z.number().nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (input.implementedAt > Date.now() + 86_400_000) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Implementation date cannot be in the future" });
+        }
+        const id = await h.createMeasureImplementation({
+          userId: ctx.user.id,
+          siteId: input.siteId,
+          opportunityId: input.opportunityId ?? null,
+          measure: input.measure,
+          title: input.title,
+          implementedAt: input.implementedAt,
+          expectedSavingsUsd: input.expectedSavingsUsd ?? null,
+          status: "awaiting_data",
+        });
+        await h.audit(ctx.user.id, "measure_marked_implemented", "measure_implementation", String(id), {
+          siteId: input.siteId,
+          measure: input.measure,
+          implementedAt: input.implementedAt,
+        });
+        return { id };
+      }),
+
+    list: protectedProcedure
+      .input(z.object({ siteId: z.number() }))
+      .query(async ({ ctx, input }) => h.listMeasureImplementations(input.siteId, ctx.user.id)),
+
+    /** Total verified savings across all the user's implementations (greeting counter). */
+    verifiedTotal: protectedProcedure.query(async ({ ctx }) => ({
+      totalUsd: await h.totalVerifiedSavings(ctx.user.id),
+    })),
+
+    remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
+      await h.deleteMeasureImplementation(input.id, ctx.user.id);
+      return { ok: true };
+    }),
+
+    /** Re-evaluate one implementation against post-date actuals vs counterfactual baseline. */
+    evaluate: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
+      const impl = await h.getMeasureImplementation(input.id, ctx.user.id);
+      const site = await h.getSite(impl.siteId, ctx.user.id);
+      if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+
+      // main electric meter (aggregation physics — submeters would double-count)
+      const siteMeters = await h.listMeters(impl.siteId, ctx.user.id);
+      const meter = siteMeters.find((m) => m.commodity === "electric" && m.meterRole === "main") ?? siteMeters.find((m) => m.commodity === "electric") ?? null;
+
+      const evaluatedAt = Date.now();
+      const persistAndReturn = async (result: ReturnType<typeof evaluateImplementation>) => {
+        await h.updateMeasureVerdicts(input.id, ctx.user.id, {
+          status: result.status,
+          verdicts: result.monthVerdicts,
+          verifiedSavingsUsd: result.verifiedSavingsUsd,
+          lastEvaluatedAt: evaluatedAt,
+        });
+        return { ...result, lastEvaluatedAt: evaluatedAt };
+      };
+
+      if (!meter) {
+        const empty = evaluateImplementation([], null, 0.12, impl.expectedSavingsUsd ?? null);
+        empty.disclosures.push("No electric meter with interval data exists on this site yet — add data to start the verification clock.");
+        return persistAndReturn(empty);
+      }
+
+      // post-implementation actuals
+      const points = await h.getIntervalPoints(meter.id, ctx.user.id, impl.implementedAt - 40 * 86_400_000);
+      // counterfactual: latest fitted baseline coefficients + climate-zone normals
+      const baselineRow = await h.getLatestBaseline(impl.siteId, ctx.user.id);
+      const coeffs = (baselineRow?.params ?? null) as {
+        baseloadPerDay: number;
+        coolingSlope: number;
+        heatingSlope: number;
+        coolingBalanceF: number;
+        heatingBalanceF: number;
+      } | null;
+      const climateZone = site.climateZone ?? "4A";
+      const station = await h.getWeatherStation(climateZone);
+      const normals = (station?.monthlyNormals ?? []) as Array<{ month: number; hddBase65: number; cddBase65: number; avgTempF: number }>;
+      const daysInMonth = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+      const expectedKwhByMonth = (monthKey: string): number | null => {
+        if (!coeffs || normals.length === 0) return null;
+        const mi = parseInt(monthKey.split("-")[1], 10) - 1;
+        const nrm = normals[mi];
+        if (!nrm) return null;
+        const days = daysInMonth[mi];
+        const cddPerDay = Math.max(0, nrm.avgTempF - coeffs.coolingBalanceF);
+        const hddPerDay = Math.max(0, coeffs.heatingBalanceF - nrm.avgTempF);
+        const perDay = coeffs.baseloadPerDay + coeffs.coolingSlope * cddPerDay + coeffs.heatingSlope * hddPerDay;
+        return Math.max(0, perDay * days);
+      };
+
+      const fit = baselineRow
+        ? ({
+            method: "caltrack_monthly",
+            coefficients: coeffs!,
+            rSquared: baselineRow.rSquared,
+            cvrmse: baselineRow.cvrmse,
+            monthsCoverage: 0,
+            confidence: "medium",
+            confidenceLabel: "",
+            weatherBasis: "",
+            normalizedAnnualUsage: 0,
+            disclosures: [],
+          } as BaselineFit)
+        : null;
+
+      // blended rate from the latest analysis summary insight (all-in $/kWh)
+      let blendedRate = 0.12;
+      let rateDisclosure = "Priced at a $0.12/kWh national-average assumption — run an analysis with a tariff to use your real blended rate.";
+      const siteInsights = await h.listInsights(impl.siteId, ctx.user.id);
+      const summary = [...siteInsights].reverse().find((i) => i.kind === "summary");
+      const summaryMetrics = (summary?.metrics ?? null) as { currentCost?: { breakdown?: { total?: number; energyKwh?: number } } } | null;
+      const cc = summaryMetrics?.currentCost as { breakdown?: { total?: number }; monthlyCosts?: Array<{ total: number }> } | undefined;
+      const intervalKwh = points.filter((p) => p.usage > 0).reduce((s, p) => s + p.usage, 0);
+      if (cc?.breakdown?.total && intervalKwh > 0) {
+        // window totals: use total cost over the full-history import kWh where available
+        const allPoints = await h.getIntervalPoints(meter.id, ctx.user.id);
+        const allImportKwh = allPoints.filter((p) => p.usage > 0).reduce((s, p) => s + p.usage, 0);
+        if (allImportKwh > 0) {
+          const r = cc.breakdown.total / allImportKwh;
+          if (Number.isFinite(r) && r > 0) {
+            blendedRate = r;
+            rateDisclosure = `Priced at your blended all-in rate ($${r.toFixed(3)}/kWh) from the latest analysis — not a bill-exact re-price.`;
+          }
+        }
+      }
+
+      const tz = meter.timezone ?? "America/Phoenix";
+      const months = buildMonthlyActuals(
+        points.map((p) => ({ ts: p.ts, usage: p.usage })),
+        impl.implementedAt,
+        expectedKwhByMonth,
+        tz,
+        evaluatedAt,
+      );
+      const result = evaluateImplementation(months, fit, blendedRate, impl.expectedSavingsUsd ?? null);
+      result.disclosures.push(rateDisclosure);
+      if (!coeffs || normals.length === 0) {
+        result.disclosures.push(
+          "No fitted counterfactual baseline exists for this site — months cannot be evaluated until an analysis with ≥4 months of usage history has run.",
+        );
+      }
+      await h.audit(ctx.user.id, "measure_evaluated", "measure_implementation", String(input.id), {
+        status: result.status,
+        months: result.monthVerdicts.length,
+        verifiedSavingsUsd: result.verifiedSavingsUsd,
+      });
+      return persistAndReturn(result);
+    }),
+  }),
   /* ================= scenarios ================= */
   scenariosApi: router({
     list: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => h.listScenarios(input.siteId, ctx.user.id)),

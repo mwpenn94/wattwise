@@ -31,6 +31,7 @@ import {
   siteGroups,
   siteGroupMembers,
   siteGeometry,
+  measureImplementations,
 } from "../drizzle/schema";
 
 export class TenancyError extends Error {
@@ -184,6 +185,7 @@ export async function deleteSite(siteId: number, userId: number) {
   }
   await db.delete(siteGeometry).where(eq(siteGeometry.siteId, siteId));
   await db.delete(siteGroupMembers).where(eq(siteGroupMembers.siteId, siteId));
+  await db.delete(measureImplementations).where(eq(measureImplementations.siteId, siteId));
   await db.delete(meters).where(eq(meters.siteId, siteId));
   // uploads keep their file provenance but detach from the deleted site
   await db.update(uploads).set({ siteId: null }).where(eq(uploads.siteId, siteId));
@@ -582,6 +584,64 @@ export async function listOpportunities(siteId: number, userId: number) {
   await assertSiteOwner(siteId, userId);
   const db = await requireDb();
   return db.select().from(opportunities).where(eq(opportunities.siteId, siteId)).orderBy(asc(opportunities.rank));
+}
+
+/* ---------- §3e prove-it loop: measure implementations ---------- */
+
+export async function createMeasureImplementation(data: typeof measureImplementations.$inferInsert) {
+  await assertSiteOwner(data.siteId, data.userId);
+  const db = await requireDb();
+  const res = await db.insert(measureImplementations).values(data);
+  return Number((res as unknown as [{ insertId: number }])[0].insertId);
+}
+
+export async function listMeasureImplementations(siteId: number, userId: number) {
+  await assertSiteOwner(siteId, userId);
+  const db = await requireDb();
+  return db
+    .select()
+    .from(measureImplementations)
+    .where(eq(measureImplementations.siteId, siteId))
+    .orderBy(desc(measureImplementations.implementedAt));
+}
+
+export async function getMeasureImplementation(id: number, userId: number) {
+  const db = await requireDb();
+  const rows = await db.select().from(measureImplementations).where(eq(measureImplementations.id, id)).limit(1);
+  const row = rows[0];
+  if (!row || row.userId !== userId) throw new TenancyError();
+  return row;
+}
+
+export async function updateMeasureVerdicts(
+  id: number,
+  userId: number,
+  patch: {
+    status: "awaiting_data" | "on_track" | "verified" | "underperforming" | "inconclusive";
+    verdicts: unknown;
+    verifiedSavingsUsd: number;
+    lastEvaluatedAt: number;
+  },
+) {
+  await getMeasureImplementation(id, userId); // tenancy assert
+  const db = await requireDb();
+  await db.update(measureImplementations).set(patch).where(eq(measureImplementations.id, id));
+}
+
+export async function deleteMeasureImplementation(id: number, userId: number) {
+  await getMeasureImplementation(id, userId); // tenancy assert
+  const db = await requireDb();
+  await db.delete(measureImplementations).where(eq(measureImplementations.id, id));
+}
+
+/** Sum of verified savings across all of a user's implementations (home-feed greeting). */
+export async function totalVerifiedSavings(userId: number): Promise<number> {
+  const db = await requireDb();
+  const rows = await db
+    .select({ s: sql<number>`COALESCE(SUM(${measureImplementations.verifiedSavingsUsd}), 0)` })
+    .from(measureImplementations)
+    .where(eq(measureImplementations.userId, userId));
+  return Number(rows[0]?.s ?? 0);
 }
 
 export async function saveScenario(data: typeof scenarios.$inferInsert) {

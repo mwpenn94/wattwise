@@ -31,6 +31,7 @@ import {
   MonthNormalRow,
 } from "./baseline";
 import { computeDemandAnalytics, costOnTariff, tariffEligible, DemandAnalytics, CostResult } from "./tariffEngine";
+import { computePeakAttribution } from "./attribution";
 import { benchmarkPercentile, rankOpportunities, OpportunityCandidate } from "./scenarios";
 import * as h from "../dbHelpers";
 import { computeCostUsd, recordMeterEvent } from "./costModel";
@@ -230,6 +231,9 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // (archetype-only or unpriced sites), so the UI must branch on the structure,
   // not the priced dollars.
   let basisStructureHasDemandCharges: boolean | null = null;
+  // §3b: keep the priced basis STRUCTURE around for peak attribution's
+  // counterfactual re-price (same engine, same rate as the current-cost figure).
+  let basisStructureForAttribution: TariffStructure | null = null;
   const comparisons: TariffComparison[] = [];
   if (costPoints.length > 0) {
     // Commodity-aware sweep: a water/gas meter must never be costed on electric
@@ -285,6 +289,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     if (basis) {
       const bs = basis.structure as TariffStructure;
       basisStructureHasDemandCharges = (bs.demand?.length ?? 0) > 0 || bs.cp != null;
+      basisStructureForAttribution = bs;
     }
     // Batch-13 (pass 60): when the LAST-RESORT basis (first same-utility rate,
     // possibly ineligible) is used, every downstream dollar figure is priced on
@@ -558,6 +563,49 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         confidence: "medium",
         provenance: { method: "cp_proxy_top_n_customer_peaks", topN: demand.cpProxy.topN },
         metrics: { events: demand.cpProxy.events },
+      });
+    }
+    // §3b Peak attribution — "what made my peak happen": weather / schedule /
+    // coincidence split, spike-vs-plateau triage, and a counterfactual $ figure
+    // priced by the SAME tariff engine that prices bills. Sufficiency gates
+    // (≥90 days span, ≥4 same-slot samples) live inside the module; it returns
+    // null rather than guessing when data is thin.
+    const peakBasisStructure = currentCost ? basisStructureForAttribution : null;
+    const attribution = hasIntervals ? computePeakAttribution(points, demand, baseline, peakBasisStructure, tz) : null;
+    if (attribution) {
+      const parts: string[] = [];
+      if (attribution.weatherKw !== null && attribution.weatherKw > 0.05)
+        parts.push(`~${attribution.weatherKw.toFixed(1)} kW tracks weather response (modeled)`);
+      parts.push(`~${attribution.scheduleKw.toFixed(1)} kW is your typical load for that day-of-week and hour`);
+      if (attribution.coincidenceKw > 0.05)
+        parts.push(`~${attribution.coincidenceKw.toFixed(1)} kW is coincidence — loads that happened to run simultaneously`);
+      const cfLine = attribution.counterfactual
+        ? ` Shaving ${attribution.counterfactual.shavedKw.toFixed(1)} kW off events like this is worth ~$${Math.round(attribution.counterfactual.annualSavingsUsd).toLocaleString()}/yr on your assigned rate.`
+        : "";
+      insightRows.push({
+        siteId: site.id,
+        meterId: meter?.id ?? null,
+        analysisId,
+        kind: "peak_attribution",
+        title: `Your ${attribution.peakKw.toFixed(1)} kW peak (${attribution.peakLocal}) was ${attribution.shape === "spike" ? "a short spike" : "a sustained plateau"}`,
+        body: `${parts.join("; ")}. ${attribution.shapeDetail}${cfLine}`,
+        severity: attribution.counterfactual ? "opportunity" : "info",
+        disaggregationMethod: disaggMethod,
+        confidence: attribution.confidence,
+        provenance: {
+          method: "peak_attribution_v1",
+          disclosures: attribution.disclosures,
+          counterfactualMethod: attribution.counterfactual?.method ?? null,
+        },
+        metrics: {
+          peakKw: attribution.peakKw,
+          peakTs: attribution.peakTs,
+          shape: attribution.shape,
+          weatherKw: attribution.weatherKw,
+          scheduleKw: attribution.scheduleKw,
+          coincidenceKw: attribution.coincidenceKw,
+          counterfactualSavingsUsd: attribution.counterfactual?.annualSavingsUsd ?? null,
+        },
       });
     }
   }
