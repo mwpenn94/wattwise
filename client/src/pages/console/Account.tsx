@@ -174,12 +174,16 @@ function DigestCard() {
   const prefs = trpc.account.digestPrefs.useQuery();
   const utils = trpc.useUtils();
   const save = trpc.account.setDigestPrefs.useMutation({
-    onSuccess: async () => {
+    onSuccess: async (r) => {
       await utils.account.digestPrefs.invalidate();
-      toast.success("Digest settings saved");
+      if (r.cronState === "scheduled") toast.success("Digest scheduled — it runs on your bill-cycle day");
+      else if (r.cronState === "removed") toast.success("Digest turned off — the schedule was removed");
+      else if (r.cronState === "error") toast.warning("Setting saved, but the schedule couldn't be updated — try toggling again");
+      else toast.success("Digest settings saved");
     },
     onError: (e) => toast.error(e.message),
   });
+  const preview = trpc.account.digestPreview.useQuery(undefined, { enabled: prefs.data?.digestOptIn === true });
   const optIn = prefs.data?.digestOptIn ?? false;
   const day = prefs.data?.digestAnchorDay ?? 1;
 
@@ -219,10 +223,23 @@ function DigestCard() {
             <span className="text-xs text-muted-foreground">of each month (set it to the day your bill usually arrives)</span>
           </div>
         )}
+        {optIn && preview.data && (
+          <div className="mt-3 rounded-md border border-border/70 bg-muted/40 p-2">
+            <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">If it ran today</p>
+            {"headline" in preview.data && preview.data.headline ? (
+              <p className="mt-1 text-xs">{preview.data.headline}</p>
+            ) : (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Nothing would send — no material dollar figure exists yet. That's the rule working, not a bug.
+              </p>
+            )}
+          </div>
+        )}
         <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground">
-          Digest delivery infrastructure ships after the beta — this setting is stored now and honored from the first
-          send. Event alerts beyond the digest (bill anomaly, demand spike, tariff change) follow the same rule: a
-          dollar figure or silence.
+          The digest runs on a real monthly schedule and lands in your in-app alerts inbox. Every digest contains a
+          dollar figure or it doesn't send at all. Email delivery ships after the beta — in-app is the channel today,
+          and this card will say so when that changes. Event alerts beyond the digest (bill anomaly, rate opportunity)
+          follow the same rule: a dollar figure or silence.
         </p>
       </CardContent>
     </Card>

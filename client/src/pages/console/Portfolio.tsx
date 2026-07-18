@@ -155,6 +155,9 @@ export default function Portfolio() {
           {/* §3i-2 utility-exposure rollup: spend concentration by provider */}
           <UtilityExposure rows={rows} />
 
+          {/* §3i-2 bulk site screening (Pro): paste addresses → ranked estimate screen */}
+          <BulkScreen />
+
           {/* Per-site table */}
           <Card className="mt-4 border-border/70">
             <CardHeader className="pb-2">
@@ -575,6 +578,115 @@ function UtilityExposure({ rows }: { rows: PortfolioRow[] }) {
             All priced spend sits with one provider — their next rate filing affects your whole portfolio. The rate
             check on each site's Explore page re-prices you against every eligible plan we have on file.
           </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** §3i-2 Bulk site screening (Pro) — paste one address per line (optionally
+    "address, building_type"), get a ranked estimate screen. Every row is an
+    archetype ESTIMATE priced on seeded rates; failures are named per row,
+    never silently dropped. Server enforces the Pro gate and the 50-row cap. */
+function BulkScreen() {
+  const [text, setText] = useState("");
+  const [defaultType, setDefaultType] = useState("office");
+  const screen = trpc.entities.bulkScreen.useMutation({
+    onError: (e) => toast.error(e.message),
+  });
+  const res = screen.data;
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <Zap className="h-4 w-4 text-primary" /> Bulk site screening
+          <Badge variant="outline" className="ml-1 text-[10px]">
+            Pro
+          </Badge>
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Paste up to 50 addresses (one per line, optionally &ldquo;address, building_type&rdquo;) to rank where to look
+          first. Archetype estimates on seeded rates — a screen, not a measurement.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <textarea
+          className="min-h-24 w-full rounded-md border border-border bg-background p-2 font-mono text-xs"
+          placeholder={"1200 W Main St, Mesa, AZ 85201\n455 N Central Ave, Phoenix, AZ, warehouse\n88 E Broadway Blvd, Tucson, AZ 85701, retail"}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <Select value={defaultType} onValueChange={setDefaultType}>
+            <SelectTrigger className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {["office", "retail", "warehouse", "restaurant", "single_family", "multifamily", "school", "hotel"].map((t) => (
+                <SelectItem key={t} value={t}>
+                  default: {t.replace(/_/g, " ")}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button size="sm" onClick={() => screen.mutate({ text, defaultBuildingType: defaultType })} disabled={text.trim().length < 3 || screen.isPending}>
+            {screen.isPending ? "Screening…" : "Screen addresses"}
+          </Button>
+          {res && (
+            <span className="text-[11px] text-muted-foreground">
+              {res.estimated} estimated · {res.failed} failed{res.truncated ? " · list truncated to 50" : ""}
+            </span>
+          )}
+        </div>
+        {res && res.rows.length > 0 && (
+          <>
+            <div className="mt-3 overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-10">#</TableHead>
+                    <TableHead>Address</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead className="text-right">Est. annual cost</TableHead>
+                    <TableHead>Top opportunity</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {res.rows.map((r, i) => (
+                    <TableRow key={`${r.input}-${i}`} className={r.status === "failed" ? "opacity-60" : ""}>
+                      <TableCell className="font-mono text-xs">{r.rank ?? "—"}</TableCell>
+                      <TableCell className="max-w-64 truncate text-xs" title={r.address}>
+                        {r.address}
+                      </TableCell>
+                      <TableCell className="text-xs">{r.buildingType.replace(/_/g, " ")}</TableCell>
+                      <TableCell className="text-right text-xs">
+                        {r.status === "failed" ? (
+                          <span className="text-destructive" title={r.error ?? undefined}>
+                            {r.error ?? "failed"}
+                          </span>
+                        ) : (
+                          fmtUsd(r.estimatedAnnualCostUsd ?? 0)
+                        )}
+                      </TableCell>
+                      <TableCell className="max-w-56 truncate text-xs" title={r.topOpportunity?.title}>
+                        {r.topOpportunity ? (
+                          <>
+                            {r.topOpportunity.title}{" "}
+                            <span className="text-muted-foreground">(~{fmtUsd(r.topOpportunity.estimatedSavingsUsd)}/yr)</span>
+                          </>
+                        ) : r.status === "estimated" ? (
+                          <span className="text-muted-foreground">none priced</span>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <p className="mt-2 text-[10px] text-muted-foreground">{res.disclosure}</p>
+          </>
         )}
       </CardContent>
     </Card>

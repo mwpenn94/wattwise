@@ -34,7 +34,9 @@ import {
   measureImplementations,
   reportArtifacts,
   planBaskets,
+  alerts,
 } from "../drizzle/schema";
+import type { Alert } from "../drizzle/schema";
 
 export class TenancyError extends Error {
   constructor(msg = "Access denied: resource does not belong to this account") {
@@ -189,6 +191,7 @@ export async function deleteSite(siteId: number, userId: number) {
   await db.delete(siteGroupMembers).where(eq(siteGroupMembers.siteId, siteId));
   await db.delete(measureImplementations).where(eq(measureImplementations.siteId, siteId));
   await db.delete(planBaskets).where(eq(planBaskets.siteId, siteId));
+  await db.delete(alerts).where(eq(alerts.siteId, siteId));
   await db.delete(meters).where(eq(meters.siteId, siteId));
   // uploads keep their file provenance but detach from the deleted site
   await db.update(uploads).set({ siteId: null }).where(eq(uploads.siteId, siteId));
@@ -883,11 +886,11 @@ export async function setDigestPrefs(userId: number, optIn: boolean, anchorDay: 
 export async function getDigestPrefs(userId: number) {
   const db = await requireDb();
   const rows = await db
-    .select({ digestOptIn: users.digestOptIn, digestAnchorDay: users.digestAnchorDay })
+    .select({ digestOptIn: users.digestOptIn, digestAnchorDay: users.digestAnchorDay, digestCronTaskUid: users.digestCronTaskUid })
     .from(users)
     .where(eq(users.id, userId))
     .limit(1);
-  return rows[0] ?? { digestOptIn: false, digestAnchorDay: 1 };
+  return rows[0] ?? { digestOptIn: false, digestAnchorDay: 1, digestCronTaskUid: null };
 }
 
 /* ------------------------------------------------------------------ */
@@ -928,4 +931,77 @@ export async function getPlanBasket(id: number, userId: number) {
 export async function deletePlanBasket(id: number, userId: number) {
   const db = await requireDb();
   await db.delete(planBaskets).where(and(eq(planBaskets.id, id), eq(planBaskets.userId, userId)));
+}
+
+/* ================= §3i alerts framework ================= */
+/** Upsert an alert with daily batching: at most one OPEN alert per
+ * (site, kind). If an open one exists, refresh its figures instead of
+ * creating a duplicate — persisted conditions update in place. Alerts
+ * without a material dollar figure are refused here (dollar-first rule). */
+export async function upsertAlert(row: {
+  userId: number;
+  siteId: number;
+  kind: "anomaly" | "demand_spike" | "rate_opportunity" | "verdict" | "digest";
+  title: string;
+  body?: string;
+  dollarImpactUsd: number;
+  confidence?: string;
+}): Promise<{ id: number; refreshed: boolean } | null> {
+  // dollar-first honesty gate: conservative $25/yr materiality floor —
+  // below that we stay quiet rather than nag (quiet-by-default rule).
+  if (!Number.isFinite(row.dollarImpactUsd) || Math.abs(row.dollarImpactUsd) < 25) return null;
+  const db = await requireDb();
+  const existing = await db
+    .select()
+    .from(alerts)
+    .where(and(eq(alerts.siteId, row.siteId), eq(alerts.kind, row.kind), eq(alerts.status, "open")));
+  if (existing.length > 0) {
+    await db
+      .update(alerts)
+      .set({
+        title: row.title,
+        body: row.body ?? null,
+        dollarImpactUsd: row.dollarImpactUsd,
+        confidence: row.confidence ?? null,
+      })
+      .where(eq(alerts.id, existing[0]!.id));
+    return { id: existing[0]!.id, refreshed: true };
+  }
+  const res = await db.insert(alerts).values({
+    userId: row.userId,
+    siteId: row.siteId,
+    kind: row.kind,
+    title: row.title,
+    body: row.body ?? null,
+    dollarImpactUsd: row.dollarImpactUsd,
+    confidence: row.confidence ?? null,
+  });
+  return { id: Number((res as unknown as [{ insertId: number }])[0].insertId), refreshed: false };
+}
+
+export async function listAlerts(userId: number, status?: "open" | "read" | "dismissed"): Promise<Alert[]> {
+  const db = await requireDb();
+  const cond = status ? and(eq(alerts.userId, userId), eq(alerts.status, status)) : eq(alerts.userId, userId);
+  return db.select().from(alerts).where(cond).orderBy(desc(alerts.createdAt)).limit(100);
+}
+
+export async function setAlertStatus(id: number, userId: number, status: "read" | "dismissed"): Promise<boolean> {
+  const db = await requireDb();
+  const rows = await db.select().from(alerts).where(and(eq(alerts.id, id), eq(alerts.userId, userId)));
+  if (rows.length === 0) return false;
+  await db.update(alerts).set({ status }).where(eq(alerts.id, id));
+  return true;
+}
+
+/* ------------- digest cron bookkeeping (Heartbeat) ------------- */
+/** Look up by taskUid ONLY — never by request-body fields (cron security rule). */
+export async function getUserByDigestTaskUid(taskUid: string) {
+  const db = await requireDb();
+  const rows = await db.select().from(users).where(eq(users.digestCronTaskUid, taskUid));
+  return rows[0] ?? null;
+}
+
+export async function setDigestCronTaskUid(userId: number, taskUid: string | null): Promise<void> {
+  const db = await requireDb();
+  await db.update(users).set({ digestCronTaskUid: taskUid }).where(eq(users.id, userId));
 }

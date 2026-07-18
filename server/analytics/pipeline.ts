@@ -839,6 +839,30 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       // "your rate has no demand charges" ONLY when the structure truly has
       // none — never inferred from a $0 priced breakdown.
       basisStructureHasDemandCharges,
+      // §3i demand review ritual: the per-cycle review needs billed-vs-actual
+      // demand by month (ratchet watch) and a suggested set-point — the 90th-
+      // percentile of monthly peaks, a target the building already proved it
+      // can hit in most months. Analysis-derived, never a guarantee.
+      demandReview:
+        demand && currentCost && currentCost.monthlyDetails.length > 0
+          ? {
+              months: currentCost.monthlyDetails.map((m) => ({
+                month: m.month,
+                actualPeakKw: m.actualPeakKw,
+                billedDemandKw: m.billedDemandKw,
+                ratchetApplied: m.ratchetApplied,
+                peakTimestamp: m.peakTimestamp,
+              })),
+              setPointKw: (() => {
+                const peaks = currentCost.monthlyDetails.map((m) => m.actualPeakKw).sort((a, b) => a - b);
+                const idx = Math.min(peaks.length - 1, Math.floor(peaks.length * 0.9));
+                return peaks[Math.max(0, idx - 1)] ?? peaks[0];
+              })(),
+              demandRateUsdPerKwMo:
+                currentCost.breakdown.demand > 0 && demand.peakKw > 0 ? currentCost.breakdown.demand / 12 / demand.peakKw : null,
+              anyRatchet: currentCost.monthlyDetails.some((m) => m.ratchetApplied),
+            }
+          : null,
       tariffComparisons: comparisons,
       baseline: baseline
         ? {
@@ -858,6 +882,47 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
 
   /* ---------- stage 7: opportunities ---------- */
   const oppCands: OpportunityCandidate[] = [];
+  // §2.57 sewer-on-winter-water linkage (water meters only): most municipal
+  // sewer charges are set from WINTER water usage (winter-quarter-average
+  // convention — winter use ≈ indoor-only, proxying what actually reaches the
+  // sewer). Cutting winter indoor use therefore pays twice: on the water bill
+  // now AND on 12 months of sewer billing set by that winter window. Applies
+  // only with ≥2 winter months of real data; the sewer rate itself is NOT
+  // seeded, so the sewer-side figure is labeled a convention-based estimate.
+  if ((meter?.commodity ?? "electric") === "water" && hasIntervals && points.length > 0) {
+    const monthlyW = intervalsToMonthly(points);
+    const winter = monthlyW.filter((m) => {
+      const mm = Number(String(m.month).slice(5, 7));
+      return mm === 12 || mm === 1 || mm === 2;
+    });
+    if (winter.length >= 2) {
+      const winterAvg = winter.reduce((a, m) => a + m.usage, 0) / winter.length;
+      const annualWater = monthlyW.reduce((a, m) => a + m.usage, 0);
+      // volumetric rate from the priced basis (total minus fixed, per unit)
+      const volRate = currentCost && annualWater > 0 ? Math.max(0, (currentCost.breakdown.total - currentCost.breakdown.fixed) / annualWater) : 0;
+      if (volRate > 0 && winterAvg > 0) {
+        // Indoor-reduction screening band: 10–20% of winter average (leak
+        // repair, fixture efficiency). Water-side: reduction × 12 × volumetric
+        // rate. Sewer-side: same volume re-billed all year at an ASSUMED sewer
+        // rate of 0.8–1.0× the water volumetric rate (typical municipal ratio
+        // is 0.8–1.4×; we take the conservative end and disclose it).
+        oppCands.push({
+          key: "winter_water_sewer",
+          title: "Cut winter indoor water use — it sets your sewer bill all year",
+          category: "efficiency",
+          annualSavingsUsdLo: winterAvg * 0.1 * 12 * volRate * 1.8,
+          annualSavingsUsdHi: winterAvg * 0.2 * 12 * volRate * 2.0,
+          capexBand: "low",
+          confidence: "low",
+          rationale: `Your winter monthly average (${winterAvg.toFixed(0)} ${COMMODITY_UNITS.water.usageUnit}/mo over ${winter.length} winter months) is what most municipal utilities use to set sewer charges for the entire following year (winter-quarter-average convention). Reducing winter indoor use 10–20% — leak repair, fixture efficiency — saves on the water bill now AND on 12 months of sewer billing set by that window.`,
+          disclosures: [
+            "Sewer-side savings assume your municipality sets sewer charges from winter water usage and bills sewer volume at 0.8–1.0× your water volumetric rate — WattWise does not have your sewer tariff on file; verify the convention on your sewer bill before counting these dollars.",
+            MODELED_ESTIMATES_DISCLAIMER,
+          ],
+        });
+      }
+    }
+  }
   // Batch-18 (pass 419): pass the raw window total so short-history sites (<25
   // days, annualUsage null) still get their real blended rate instead of the
   // $0.12 fallback — the rate is window-invariant even when annualization isn't.
@@ -993,8 +1058,45 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       provenance: { savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi], category: c.category },
     })),
   );
-  narrate(`Ranked ${ranked.length} opportunit${ranked.length === 1 ? "y" : "ies"} by estimated annual dollar impact`);
-
+    narrate(`Ranked ${ranked.length} opportunit${ranked.length === 1 ? "y" : "ies"} by estimated annual dollar impact`);
+  /* §3i alerts — generated here, because in a manual-upload world the analysis
+     run is the only moment new information appears. Dollar-first + batched:
+     upsertAlert refuses rows under the $25 materiality floor and refreshes the
+     open (site, kind) row instead of duplicating. Alert failures never fail
+     the analysis. */
+  try {
+    if (anomalyResult && anomalyResult.changePointMonth && currentCost && currentCost.breakdown.total > 0) {
+      const shiftMonths = anomalyResult.anomalies.filter((a) => a.kind === "sustained_shift");
+      if (shiftMonths.length > 0) {
+        const avgResidual = shiftMonths.reduce((s, a) => s + a.residualPct, 0) / shiftMonths.length;
+        const annualUsdImpact = Math.abs(avgResidual) * currentCost.breakdown.total;
+        await h.upsertAlert({
+          userId,
+          siteId: site.id,
+          kind: "anomaly",
+          title: `Usage shifted ${avgResidual > 0 ? "up" : "down"} ~${Math.abs(avgResidual * 100).toFixed(0)}% vs. weather model since ${anomalyResult.changePointMonth}`,
+          body: `Sustained ${shiftMonths.length}-month deviation from the weather-normalized baseline — consistent with an operational or equipment change rather than weather. At your current annual cost this is roughly $${Math.round(annualUsdImpact).toLocaleString()}/yr if it persists. Modeled estimate.`,
+          dollarImpactUsd: annualUsdImpact,
+          confidence: baseline && baseline.confidence === "high" ? "medium" : "low",
+        });
+      }
+    }
+    const top = ranked[0];
+    if (top) {
+      const mid = (top.annualSavingsUsdLo + top.annualSavingsUsdHi) / 2;
+      await h.upsertAlert({
+        userId,
+        siteId: site.id,
+        kind: "rate_opportunity",
+        title: `${top.title} — ~$${Math.round(mid).toLocaleString()}/yr modeled`,
+        body: `${top.rationale} Range $${Math.round(top.annualSavingsUsdLo).toLocaleString()}–$${Math.round(top.annualSavingsUsdHi).toLocaleString()}/yr. Modeled estimate — not a guarantee.`,
+        dollarImpactUsd: mid,
+        confidence: top.confidence,
+      });
+    }
+  } catch {
+    /* alerts must never fail the analysis */
+  }
   return {
     analysisId,
     demand,

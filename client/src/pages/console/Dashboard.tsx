@@ -8,6 +8,7 @@ import { useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { detectPersona, personaVocab } from "@/lib/persona";
 import AnalysisProgress from "@/components/AnalysisProgress";
+import DemandReview, { type DemandReviewData } from "@/components/DemandReview";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -101,6 +102,7 @@ export default function Dashboard() {
     emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number; mapped?: boolean } | null;
     currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
     basisStructureHasDemandCharges?: boolean | null;
+    demandReview?: DemandReviewData | null;
     tariffComparisons?: Array<{
       tariffName: string;
       utilityName: string;
@@ -632,6 +634,26 @@ export default function Dashboard() {
           </Card>
         );
       })()}
+
+      {/* §3i demand review ritual — per-cycle set-point + ratchet watch + one
+          priced action. Only for sites whose rate actually has demand charges
+          (structure flag or priced demand $); residential rate-check sites
+          never see a demand ritual. */}
+      {summary?.demandReview &&
+        activeSiteId != null &&
+        ((costInsight?.breakdown?.demand ?? 0) > 0 || summary?.basisStructureHasDemandCharges === true) && (
+          <div className="mt-4">
+            <DemandReview
+              data={summary.demandReview as DemandReviewData}
+              siteId={activeSiteId}
+              attributionSummary={allInsightRows.find((i) => i.kind === "peak_attribution")?.title ?? null}
+              topDemandAction={(() => {
+                const d = oppRows.find((o) => /peak|demand|battery|load/i.test(o.measure) || /demand|peak/i.test(o.title));
+                return d ? { title: d.title, estUsdPerYr: d.estCostSavingsPerYr, measure: d.measure } : null;
+              })()}
+            />
+          </div>
+        )}
 
       <Card className="mt-4 border-border/70">
         <CardHeader className="pb-2">

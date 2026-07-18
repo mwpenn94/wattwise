@@ -19,6 +19,13 @@ import { Link, useLocation } from "wouter";
 import { fileToBase64 } from "@/lib/wattwiseUi";
 import AnalysisProgress from "@/components/AnalysisProgress";
 
+interface FieldConf {
+  periodStart?: number;
+  periodEnd?: number;
+  totalUsage?: number;
+  totalCost?: number;
+  billedDemandKw?: number;
+}
 interface BillDraft {
   siteId: number;
   reason: string;
@@ -28,6 +35,11 @@ interface BillDraft {
   totalUsage: string;
   totalCost: string;
   billedDemandKw: string;
+  /** §3 Hero 4 bill-scan overlay: object URL of the uploaded bill image so the
+      user verifies extracted fields AGAINST the document, plus per-field
+      confidence so low-confidence values are visibly flagged, not hidden. */
+  imageUrl: string | null;
+  fieldConf: FieldConf;
 }
 
 /** One-tap building-type confirmation (grounded intake, Jul 17): the intake
@@ -151,6 +163,9 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
       });
       await utils.sites.list.invalidate();
       const mime = f.type === "application/pdf" ? "application/pdf" : f.type === "image/png" ? "image/png" : "image/jpeg";
+      // §3 Hero 4 overlay: keep a local preview so extracted fields are verified
+      // against the document itself (images only — PDFs have no inline preview).
+      const imageUrl = mime === "application/pdf" ? null : URL.createObjectURL(f);
       const b64 = await fileToBase64(f);
       const ocr = await billOcr.mutateAsync({ siteId: res.id, filename: f.name, contentBase64: b64, mime });
       if (ocr.status === "manual_entry_required") {
@@ -163,6 +178,8 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
           totalUsage: "",
           totalCost: "",
           billedDemandKw: "",
+          imageUrl,
+          fieldConf: {},
         });
         toast.warning("Automatic bill parsing unavailable — review the form below (your site was still created).");
       } else {
@@ -178,6 +195,14 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
           totalUsage: b.totalUsage.value != null ? String(b.totalUsage.value) : "",
           totalCost: b.totalCostUsd.value != null ? String(b.totalCostUsd.value) : "",
           billedDemandKw: b.billedDemandKw.value != null ? String(b.billedDemandKw.value) : "",
+          imageUrl,
+          fieldConf: {
+            periodStart: b.periodStart.confidence,
+            periodEnd: b.periodEnd.confidence,
+            totalUsage: b.totalUsage.confidence,
+            totalCost: b.totalCostUsd.confidence,
+            billedDemandKw: b.billedDemandKw.confidence,
+          },
         });
         toast.success("Bill read — confirm the extracted values below to attach it to your site.");
       }
@@ -189,8 +214,13 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
     }
   }
 
+  function releaseBillImage() {
+    if (billDraft?.imageUrl) URL.revokeObjectURL(billDraft.imageUrl);
+  }
+
   async function saveBillAndAnalyze() {
     if (!billDraft) return;
+    releaseBillImage();
     setPhase("saving");
     try {
       await billSave.mutateAsync({
@@ -218,6 +248,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
 
   async function skipBillAndAnalyze() {
     if (!billDraft) return;
+    releaseBillImage();
     const siteId = billDraft.siteId;
     setBillDraft(null);
     setPhase("analyzing");
@@ -392,12 +423,20 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
 
         {billDraft && (
           <div className="mt-4 rounded-md border border-amber-500/40 bg-amber-500/[0.04] p-3">
-            <p className="text-xs font-medium">Confirm your bill</p>
+            <p className="text-xs font-medium">Confirm your bill — check each value against the document</p>
             <p className="mt-0.5 text-[11px] text-muted-foreground">{billDraft.reason}</p>
+            {billDraft.imageUrl && (
+              /* §3 Hero 4 bill-scan overlay: the uploaded bill renders beside the
+                 extracted fields so verification happens against the source, and
+                 each field carries its extraction-confidence chip. */
+              <div className="mt-2 max-h-64 overflow-auto rounded-md border border-border/70 bg-background">
+                <img src={billDraft.imageUrl} alt="Your uploaded bill — verify the extracted values against it" className="w-full object-contain" />
+              </div>
+            )}
             <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
               <div>
                 <Label htmlFor="qs-b-start" className="text-[11px]">
-                  Period start
+                  Period start <ConfChip conf={billDraft.fieldConf.periodStart} />
                 </Label>
                 <Input
                   id="qs-b-start"
@@ -408,13 +447,13 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
               </div>
               <div>
                 <Label htmlFor="qs-b-end" className="text-[11px]">
-                  Period end
+                  Period end <ConfChip conf={billDraft.fieldConf.periodEnd} />
                 </Label>
                 <Input id="qs-b-end" type="date" value={billDraft.periodEnd} onChange={(e) => setBillDraft({ ...billDraft, periodEnd: e.target.value })} />
               </div>
               <div>
                 <Label htmlFor="qs-b-usage" className="text-[11px]">
-                  Usage (kWh)
+                  Usage (kWh) <ConfChip conf={billDraft.fieldConf.totalUsage} />
                 </Label>
                 <Input
                   id="qs-b-usage"
@@ -425,7 +464,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
               </div>
               <div>
                 <Label htmlFor="qs-b-cost" className="text-[11px]">
-                  Total cost ($)
+                  Total cost ($) <ConfChip conf={billDraft.fieldConf.totalCost} />
                 </Label>
                 <Input
                   id="qs-b-cost"
@@ -436,7 +475,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
               </div>
               <div>
                 <Label htmlFor="qs-b-demand" className="text-[11px]">
-                  Billed demand (kW)
+                  Billed demand (kW) <ConfChip conf={billDraft.fieldConf.billedDemandKw} />
                 </Label>
                 <Input
                   id="qs-b-demand"
@@ -480,5 +519,27 @@ function UtilitiesMoment({ state }: { state: string }) {
       {reg.data.rateCount} seeded rate{reg.data.rateCount === 1 ? "" : "s"}. We compare against these; confirm your actual
       provider on your bill.
     </p>
+  );
+}
+
+/** Per-field extraction-confidence chip for the bill-scan overlay. Renders
+    nothing when no confidence exists (manual entry) — a manual field is the
+    user's own value, not an extraction to grade. */
+function ConfChip({ conf }: { conf?: number }) {
+  if (conf == null) return null;
+  const pct = Math.round(conf * 100);
+  const tone =
+    conf >= 0.8
+      ? "border-emerald-500/50 text-emerald-600 dark:text-emerald-400"
+      : conf >= 0.5
+        ? "border-amber-500/50 text-amber-600 dark:text-amber-400"
+        : "border-red-500/50 text-red-600 dark:text-red-400";
+  return (
+    <span
+      className={`ml-1 inline-block rounded border px-1 text-[9px] font-mono leading-4 ${tone}`}
+      title={`Extraction confidence ${pct}% — verify against the bill image`}
+    >
+      {pct}%
+    </span>
   );
 }

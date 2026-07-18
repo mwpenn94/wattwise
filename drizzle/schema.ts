@@ -31,6 +31,9 @@ export const users = mysqlTable("users", {
    * or it doesn't send — enforced at send time, not here. */
   digestOptIn: boolean("digestOptIn").default(false).notNull(),
   digestAnchorDay: int("digestAnchorDay").default(1).notNull(),
+  /** Heartbeat cron uid backing this user's digest schedule — lifecycle rule:
+   * look up/update/delete by task_uid, never by name (periodic-updates skill) */
+  digestCronTaskUid: varchar("digestCronTaskUid", { length: 65 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -302,7 +305,10 @@ export const baselines = mysqlTable(
     trainStart: bigint("trainStart", { mode: "number" }),
     trainEnd: bigint("trainEnd", { mode: "number" }),
     /** weather basis: actual | normal-year basis */
-    weatherBasis: varchar("weatherBasis", { length: 32 }).notNull(),
+    /** Batch-audit (Jul 18): widened 32→64 — the flat-mean fallback fit writes
+     * "observed-period basis (not weather-normalized)" (46 chars), which
+     * crashed ANY analysis whose weather regression degenerated. */
+    weatherBasis: varchar("weatherBasis", { length: 64 }).notNull(),
     confidenceLabel: varchar("confidenceLabel", { length: 128 }).notNull(),
     source: varchar("source", { length: 64 }).notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -708,3 +714,38 @@ export const reportArtifacts = mysqlTable(
   },
   (t) => [index("report_artifacts_user_idx").on(t.userId), index("report_artifacts_token_idx").on(t.token)],
 );
+
+/** §3i alerts framework — dollar-first alert records, quiet by default.
+ * Alerts are GENERATED at analysis time (post-upload) and by the digest cron;
+ * they live in-app on the home feed + a bell entry. Delivery beyond in-app is
+ * honestly labeled post-beta. Rules:
+ *  - every alert carries a dollar figure or it isn't created
+ *  - conservative default thresholds (material $ only), user-tunable later
+ *  - daily batching: at most one open alert per (site, kind) — refreshed, not
+ *    duplicated, when the same condition persists across uploads
+ */
+export const alerts = mysqlTable(
+  "alerts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    siteId: int("siteId").notNull(),
+    kind: mysqlEnum("kind", ["anomaly", "demand_spike", "rate_opportunity", "verdict", "digest"]).notNull(),
+    title: varchar("title", { length: 255 }).notNull(),
+    body: text("body"),
+    /** the dollar figure that justifies this alert's existence */
+    dollarImpactUsd: double("dollarImpactUsd").notNull(),
+    /** provenance/confidence chip carried into the UI */
+    confidence: varchar("confidence", { length: 32 }),
+    status: mysqlEnum("status", ["open", "read", "dismissed"]).default("open").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    index("alerts_user_idx").on(t.userId),
+    index("alerts_site_kind_idx").on(t.siteId, t.kind),
+    index("alerts_status_idx").on(t.userId, t.status),
+  ],
+);
+
+export type Alert = typeof alerts.$inferSelect;

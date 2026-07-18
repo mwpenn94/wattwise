@@ -1,0 +1,1 @@
+ALTER TABLE `baselines` MODIFY COLUMN `weatherBasis` varchar(64) NOT NULL;

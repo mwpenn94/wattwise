@@ -1,5 +1,6 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import AlertsInbox from "@/components/AlertsInbox";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -291,6 +292,14 @@ function DashboardLayoutContent({
                   </span>
                 </div>
               </div>
+            </div>
+            <AlertsInbox />
+          </div>
+        )}
+        {!isMobile && (
+          <div className="pointer-events-none sticky top-0 z-40 flex h-0 justify-end">
+            <div className="pointer-events-auto mr-4 mt-3">
+              <AlertsInbox />
             </div>
           </div>
         )}

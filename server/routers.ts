@@ -30,6 +30,7 @@ import { preParseGate, rejectXxe, withParseTimeout } from "./ingest/hardening";
 import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, type ParsedMeterSeries } from "./ingest/parsers";
 import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
+import { runBulkScreen } from "./bulkScreen";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
 import { archetypeBaseline, type BaselineFit } from "./analytics/baseline";
@@ -47,6 +48,9 @@ import { runScenario, hourlyToPoints, type ScenarioInput } from "./analytics/sce
 import { composeMeasures, presetBaskets, type PlanMeasure } from "./analytics/composer";
 import { costOnTariff } from "./analytics/tariffEngine";
 import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend, llmBudgetAllows } from "./analytics/costModel";
+import { parse as parseCookieHeader } from "cookie";
+import { createHeartbeatJob, deleteHeartbeatJob } from "./_core/heartbeat";
+import { buildDigest } from "./digest";
 import { storagePut } from "./storage";
 import { deriveFromAddress, cascadeProvenance } from "./cascade";
 import { placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
@@ -902,12 +906,28 @@ export const appRouter = router({
             sumOfSitePeaksKw: sum("peakKw"),
             verifiedSavingsUsd,
             portfolioLoadFactor,
-            openOpportunityUsd: siteRollups.reduce((a, r) => a + (r.topOpportunityUsd ?? 0), 0),
+                        openOpportunityUsd: siteRollups.reduce((a, r) => a + (r.topOpportunityUsd ?? 0), 0),
           },
         };
       }),
+    /** §3i-2 Bulk site screening (Pro): paste a list of addresses → ranked
+     *  archetype-estimate screen. Deterministic (no LLM), hard 50-row cap,
+     *  failures named per row. Estimates only — never presented as measured. */
+    bulkScreen: protectedProcedure
+      .input(
+        z.object({
+          text: z.string().min(3).max(20_000),
+          defaultBuildingType: z.string().min(1).max(64).default("office"),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        await seeded();
+        requireTier(tierOf(ctx.user), "pro", "Bulk site screening");
+        const res = await runBulkScreen(input.text, input.defaultBuildingType);
+        await h.audit(ctx.user.id, "bulk_screen", "portfolio", "batch", { requested: res.requested, estimated: res.estimated, failed: res.failed });
+        return res;
+      }),
   }),
-
   /* ================= uploads / ingestion ================= */
   uploads: router({
     list: protectedProcedure.query(async ({ ctx }) => h.listUploads(ctx.user.id)),
@@ -1839,7 +1859,61 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         await h.setDigestPrefs(ctx.user.id, input.optIn, input.anchorDay);
         await h.audit(ctx.user.id, "digest_prefs", "user", String(ctx.user.id), input);
-        return h.getDigestPrefs(ctx.user.id);
+        // §3f: back the setting with a real Heartbeat cron — monthly on the
+        // user's bill-cycle anchor day, 15:00 UTC (morning US time). Cron
+        // create/delete failures must not corrupt the saved preference: the
+        // pref persists; cron state is reported back for honest UI copy.
+        const sessionToken = parseCookieHeader(ctx.req.headers.cookie ?? "")[COOKIE_NAME] ?? "";
+        const current = await h.getDigestPrefs(ctx.user.id);
+        let cronState: "scheduled" | "removed" | "unchanged" | "error" = "unchanged";
+        try {
+          if (input.optIn) {
+            if (current?.digestCronTaskUid) {
+              // re-anchor: drop the old cron, create the new one
+              await deleteHeartbeatJob(current.digestCronTaskUid, sessionToken).catch(() => undefined);
+            }
+            const job = await createHeartbeatJob(
+              {
+                name: `digest-u${ctx.user.id}`,
+                cron: `0 0 15 ${input.anchorDay} * *`,
+                path: "/api/scheduled/digest",
+                description: `Monthly WattWise digest (bill-cycle day ${input.anchorDay}) — sends only when a material dollar figure exists`,
+              },
+              sessionToken,
+            );
+            await h.setDigestCronTaskUid(ctx.user.id, job.taskUid);
+            cronState = "scheduled";
+          } else if (current?.digestCronTaskUid) {
+            await deleteHeartbeatJob(current.digestCronTaskUid, sessionToken).catch(() => undefined);
+            await h.setDigestCronTaskUid(ctx.user.id, null);
+            cronState = "removed";
+          }
+        } catch {
+          cronState = "error";
+        }
+        return { ...(await h.getDigestPrefs(ctx.user.id)), cronState };
+      }),
+    /** Preview what this month's digest WOULD contain — or the honest reason
+     * nothing would send (the dollar-figure-or-silence rule, testable). */
+    digestPreview: protectedProcedure.query(async ({ ctx }) => {
+      const content = await buildDigest(ctx.user.id);
+      return content ?? { headlineUsd: 0, headline: "", lines: [], wouldSend: false as const };
+    }),
+  }),
+
+  /* §3i alerts — dollar-first, quiet-by-default, batched per (site, kind).
+   * Generated at analysis time + by the digest cron; in-app only today
+   * (external delivery honestly labeled post-beta in the UI). */
+  alerts: router({
+    list: protectedProcedure
+      .input(z.object({ status: z.enum(["open", "read", "dismissed"]).optional() }).optional())
+      .query(async ({ ctx, input }) => h.listAlerts(ctx.user.id, input?.status)),
+    setStatus: protectedProcedure
+      .input(z.object({ id: z.number().int(), status: z.enum(["read", "dismissed"]) }))
+      .mutation(async ({ ctx, input }) => {
+        const ok = await h.setAlertStatus(input.id, ctx.user.id, input.status);
+        if (!ok) throw new TRPCError({ code: "NOT_FOUND", message: "Alert not found" });
+        return { ok };
       }),
   }),
 

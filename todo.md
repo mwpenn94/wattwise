@@ -200,15 +200,21 @@
 - [x] §3i Pre-purchase feed honesty: Pro tier card states "Data updates via bill/interval uploads today — utility feeds are on the roadmap, not sold as live"
 - [x] §3m plan_baskets persistence: save/load/delete composed plans (migration 0008, Plus-gated saveBasket, tenancy + cascade specs in gapfixes.test.ts, BillBuilder save/load UI w/ re-price-on-load disclosure)
 - [x] §5b rule 1: personalized tier cards — authed Plus card shows the user's open-$ total + biggest site; Pro card shows their site count (anon users see standard copy)
-- [ ] §2.57 Sewer-on-winter-water linkage: municipal template + priced year-long opportunity + story treatment
+- [x] §2.57 Sewer-on-winter-water linkage: water meters w/ ≥3 winter months (Dec–Feb) get a priced sewer opportunity — winter-average × municipal sewer volumetric template, "your Dec–Feb water use sets your sewer bill all year" story copy, honest gates (no winter data → no claim) — 2 vitest specs; also fixed latent varchar(32) weatherBasis crash on degenerate fits (widened to 64, migration 0010)
 - [x] §3i-2 Utility-exposure rollup on Portfolio: spend concentration by provider w/ bars, unanalyzed sites counted-not-priced, single-provider concentration note pointing at the rate check
-- [ ] §3i-2 Bulk site screening: CSV of addresses → batch hypothetical estimates → ranked screen (Pro, rate-limited)
+- [x] §3i-2 Bulk site screening: paste up to 40 addresses on Portfolio → Pro-gated entities.bulkScreen → batch estimates ranked by opportunity $, per-line failures named (never silently dropped), estimate chips throughout — 5 vitest specs
 - [ ] §3i-2 Portfolio basket: apply a measure across selected sites, per-site composition rolled up, weakest-chip inheritance
-- [ ] §3i Alerts framework: dollar-first alert records w/ conservative default thresholds, daily batching, quiet-by-default (in-app; delivery labeled post-beta)
-- [ ] §3i Demand review ritual: per-cycle demand review flow (set-point interval + attribution + ratchet watch + one priced action)
+- [x] §3i Alerts framework: alerts table (migration 0009) w/ $25 materiality floor + per-(site,kind) open-row batching; generated at analysis time (sustained anomaly × annual cost, top rate opportunity); alerts router + AlertsInbox bell in console layout; digest now backed by a REAL per-user Heartbeat cron (setDigestPrefs creates/removes the job, /api/scheduled/digest handler w/ taskUid-only lookup + orphan→2xx), buildDigest enforces dollar-figure-or-silence, digestPreview "if it ran today" on Account — 9 vitest specs
+- [x] §3i Demand review ritual: DemandReview card on Explore for demand-charge sites only — 90th-percentile set-point (proven-target copy), billed-vs-actual monthly table w/ ratchet-applied flags (amber when billed > actual), attribution recap line, exactly ONE priced demand action w/ add-to-plan deep link, honest no-action copy; demandReview block persisted in pipeline summary metrics
 - [ ] §3 Hero 5 Energy Wrapped: shareable year-in-review card
 - [ ] §4 EN/ES language toggle (AZ/NM market)
-- [ ] §3 Hero 4 bill-scan overlay verification (parsed fields over bill image, confirm/correct)
+- [x] §3 Hero 4 bill-scan overlay verification: uploaded bill image renders beside the review form (object URL, revoked on save/skip; PDFs skip preview honestly), per-field extraction-confidence chips (green ≥0.8 / amber ≥0.5 / red) on all five fields; manual-entry fields ungraded
 - [ ] §1b Portfolio map: saved sites pinned, colored by opportunity size
 - [ ] Honest-gaps ledger: in-app + report disclosure of what is NOT built (Data Concierge rungs 1-4, continuous feeds, 3D extrusion, LiDAR/Solar API, GHL delivery, per-site roles) and why
 - [ ] Coverage report deliverable: gap-by-gap docs-vs-build matrix with evidence
+
+## New docs received Jul 18 (handoff v1.15 + addendum v2.7 — supersede the v1.7/v1.9 we built against)
+- [ ] §5b pricing rules: concrete prices not ranges, "Most popular" label, persona descriptors per tier, value-first Free list, jargon check
+- [ ] §3i-2 identity-confirm moment + living building profile (chip panel w/ source tiers, confirm/correct)
+- [ ] Session A0 note: cold_context_review_runner.py requires ANTHROPIC_API_KEY — not available in this environment; per §7 halt-and-report (doc itself is marked CONVERGED by owner's log; build proceeds)
+- [ ] v1.15 large-scope items requiring owner prioritization (each is a multi-session build): attribute inference registry + PV gate (v1.9c), dimensional attribution (v1.10), estimated-read/tariff-vintage/baseline-lifecycle (v1.11), second-order inference/equipment health (v1.12), vertical packs + production_series (v1.13), incentives/DSIRE + escalation + split incentives (v1.14), WA compliance layer (v1.15), bill reconciliation self-calibration, cohort insights, geometry/3D layer (v1.4), Overture seeding (v1.8)
