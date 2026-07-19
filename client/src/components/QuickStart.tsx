@@ -458,7 +458,8 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
             for in this state. Copy says "rates loaded", never "your utility is" —
             the registry is our seeded snapshot, not a service-territory lookup. */}
         {selectedPlace && resolved.data?.place.state && <UtilitiesMoment state={resolved.data.place.state} />}
-        {address.trim().length >= 3 && !billDraft && (
+        {/* When pin mode is open the pin panel renders its own chips — don't show two competing selectors (they share the same buildingType state either way). */}
+        {address.trim().length >= 3 && !billDraft && !pinMode && (
           <div className="mt-3">
             <p className="text-[11px] font-medium text-muted-foreground">
               What is this address? <span className="font-normal">(required — the archetype, size prior, and rate eligibility all depend on it)</span>
@@ -578,6 +579,47 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
                 });
               }}
             />
+            {/* Bug fix (owner report Jul 18): the building-type chips only rendered
+                when ≥3 chars were typed in the address box, so pure pin-mode users
+                were told to "pick a building type above" with nothing to pick.
+                The chips now render inside the pin panel itself. */}
+            <div className="mt-3">
+              <p className="text-[11px] font-medium text-muted-foreground">
+                What kind of building is at this pin?{" "}
+                <span className="font-normal">(required — the archetype, size prior, and rate eligibility all depend on it)</span>
+              </p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {(showAllChips ? BUILDING_CHIPS : BUILDING_CHIPS.slice(0, PRIMARY_CHIPS)).map((c) => {
+                  const Icon = c.icon;
+                  const active = buildingType === c.value;
+                  return (
+                    <button
+                      key={c.value}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setBuildingType(active ? null : c.value)}
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                        active
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-transparent text-foreground hover:border-primary/50 hover:bg-primary/5"
+                      }`}
+                      aria-pressed={active}
+                    >
+                      <Icon className="h-3 w-3" /> {c.label}
+                    </button>
+                  );
+                })}
+                {!showAllChips && (
+                  <button
+                    type="button"
+                    className="rounded-full border border-dashed px-2.5 py-1 text-xs text-muted-foreground hover:border-primary/50"
+                    onClick={() => setShowAllChips(true)}
+                  >
+                    more types…
+                  </button>
+                )}
+              </div>
+            </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               {pin ? (
                 <p className="flex-1 text-[11px] text-muted-foreground">
@@ -592,7 +634,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
               </Button>
             </div>
             {pin && !buildingType && (
-              <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">Pick a building type above so the modeled estimate has a real archetype.</p>
+              <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">Pick a building type just above so the modeled estimate has a real archetype.</p>
             )}
           </div>
         )}

@@ -279,3 +279,6 @@
 - [x] Unknown-tariff crowd discovery: N≥3 unmatched tariff_name_raw at one utility → create-template task
 - [x] Parser-drift monitor: per-template parse success tracked; drop raises template-update task
 - [x] Config-not-constant: external numeric limits readable from config table (seeded), not hardcoded
+
+## Owner bug report (Jul 18 PM, mobile screenshot)
+- [x] BUG: Pin-drop mode says "Pick a building type above so the modeled estimate has a real archetype" but no building-type selector is visible in pin mode — FIXED: chips now render inside the pin panel (address-block chips hidden while pin mode open to avoid duplicates); verified via authenticated Playwright on 375px viewport (chips visible, selectable, aria-pressed works)
