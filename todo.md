@@ -438,3 +438,16 @@
 - [x] ING-4: "auto" format for unknown/missing extensions; client accepts .zip and passes anything through with server-side content verification
 - [x] ING-5: uploads.format enum extended (zip, auto) in schema + DB; migration 0014
 - [x] ING-6: 18 new vitest specs (detection, gate, extraction, per-format round-trips incl. CSV-as-xlsx)
+
+## LG&E/KU CSV support (owner report Jul 19 PM)
+- [x] LGE-1: Research LG&E/KU "Usage (1).csv" Green Button CSV layout (electric + gas variants)
+- [x] LGE-2: CSV parser handles metadata-preamble Green Button CSVs (header row not at top, skip preamble)
+- [x] LGE-3: Gas CCF and water gallon variants parse with correct commodity + units
+- [x] LGE-4: Improve "No interval data found" error to say WHAT columns were seen (diagnosability)
+- [x] LGE-5: Fixture tests for all variants + full suite + checkpoint
+
+## Structural column inference (Jul 19 PM — owner follow-up)
+- [x] INFER-1: Value-shape column classifier (datetime, numeric usage, currency, direction enum, meter id, date-only + time-only pairs) as fallback when header regexes fail
+- [x] INFER-2: Inferred mapping disclosed in validation notes (which column was used for what, and why)
+- [x] INFER-3: Currency/cost columns never selectable as usage regardless of header name
+- [x] INFER-4: Tests across diverse layouts (uppercase/underscore headers, unnamed columns, unit-in-parens, separate date+time, ISO timestamps) + full-suite regression

@@ -17,6 +17,7 @@ import {
   rowsToFile,
 } from "../../shared/build0103";
 import { rejectXxe, scrubCell } from "./hardening";
+import { inferColumns } from "./columnInference";
 
 export const PARSER_VERSION = "BUILD-010.3-ww1";
 
@@ -105,6 +106,40 @@ function inferDurationMin(tss: number[]): number {
 }
 
 /* ---------------- core table → series ---------------- */
+/**
+ * LGE-2: multi-series wrapper — when the table carries a per-meter column
+ * (MyMeter multi-meter downloads interleave rows for several meters), split
+ * rows by meter value and emit one series per meter. Otherwise delegate to
+ * the single-series path unchanged.
+ */
+function tableToSeriesMulti(name: string, rows: Row[]): ParsedMeterSeries[] {
+  const probe = rowsToFile(name, rows);
+  const meterCol = findHeader(probe.headers, [/^meter\s*(#|number|id)?$/i], [/read/i]);
+  if (meterCol) {
+    const meterValues = new Set<string>();
+    for (const r of probe.data) {
+      const v = String(r[meterCol] ?? "").trim();
+      if (v) meterValues.add(v);
+    }
+    if (meterValues.size > 1) {
+      const out: ParsedMeterSeries[] = [];
+      const headerRows = rows.slice(0, probe.headerRowIndex + 1);
+      const meterIdx = probe.headers.indexOf(meterCol);
+      for (const mv of Array.from(meterValues)) {
+        const subset = [
+          ...headerRows,
+          ...rows.slice(probe.headerRowIndex + 1).filter((r) => String(r?.[meterIdx] ?? "").trim() === mv),
+        ];
+        const s = tableToSeries(`${name} · meter ${mv}`, subset);
+        if (s) out.push(s);
+      }
+      if (out.length > 0) return out;
+    }
+  }
+  const single = tableToSeries(name, rows);
+  return single ? [single] : [];
+}
+
 function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
   const table = rowsToFile(name, rows);
   if (table.data.length < 3) return null;
@@ -118,22 +153,97 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
   // ONLY a datetime column exists; it never overrides dtCol's priority in the
   // row loop (`dtCol ? … : combineDateTime(…)`).
   const dateCol = findHeader(headers, [/^date$/i, /^date[^a-z]/i, /date/i], [/time/i]) ?? findHeader(headers, [/date.?time|timestamp/i]);
-  const dtCol = findHeader(headers, [/date.?time|timestamp/i]);
+  // LGE-2 (owner report Jul 19 PM): utility portal CSVs (MyMeter platform —
+  // LG&E/KU and others) name the single datetime column "Start", "Read Date",
+  // or "End" with values like "03/30/2025 7:00:00 PM". Treat those as combined
+  // datetime columns — but ONLY when the values actually carry a time component
+  // (checked below), so a date-only "Read Date" monthly export still routes
+  // through the date+time combiner.
+  const dtCol =
+    findHeader(headers, [/date.?time|timestamp/i]) ??
+    findHeader(headers, [/^start$/i, /^read\s*date/i, /^start\s*date/i, /^end$/i, /^interval\s*start/i], [/direction/i]);
   const timeCol = findHeader(headers, [/^time$/i, /interval.?time|^end.?time|^start.?time/i], [/date/i]);
   const kwhCol = findHeader(headers, [/kwh/i], [/cost|charge|\$/i]);
   const kwCol = findHeader(headers, [/(^|[^a-z])kw([^a-z]|$)/i, /demand/i], [/kwh/i]);
-  const usageCol =
+  // Unit-named usage headers: MyMeter names the usage column after the UNIT
+  // itself ("kWh", "CCF", "Mcf", "Therms", "Gallons", "HCF") — exact-match
+  // these FIRST so a literal "$" cost column can never be picked as usage.
+  const unitCol = findHeader(headers, [/^kwh$/i, /^ccf$/i, /^mcf$/i, /^therms?$/i, /^gallons?$/i, /^gal$/i, /^hcf$/i, /^cubic\s*feet$/i, /^m3$/i, /^wh$/i]);
+  let usageCol =
     kwhCol ??
-    findHeader(headers, [/usage|consumption|energy|therms?|ccf|mcf|gallons?|gal\b|hcf|volume|flow/i], [/cost|charge|\$/i]);
+    unitCol ??
+    findHeader(headers, [/usage|consumption|energy|therms?|ccf|mcf|gallons?|gal\b|hcf|volume|flow/i], [/cost|charge|\$|direction/i]);
+
+  // MyMeter "Usage Direction" column: "Delivered" rows are consumption;
+  // "Received" rows are export (net-metering) and must not be summed into
+  // usage. Keep only Delivered (or blank) rows; count the rest as skipped.
+  let directionCol = findHeader(headers, [/usage\s*direction|^direction$/i]);
+
+  // INFER-1/2 (owner follow-up Jul 19 PM): header names vary wildly across
+  // utility portals. When name-based matching leaves a required role (timestamp
+  // or usage) unfilled, classify columns by VALUE SHAPE and fill the gaps.
+  // Every structural inference is disclosed in validation notes (INFER-2), and
+  // currency-shaped columns are hard-blocked from the usage role (INFER-3) —
+  // even a header literally named "Usage" whose values are "$0.20" is cost.
+  const inferenceNotes: string[] = [];
+  let dtColFinal = dtCol;
+  let dateColFinal = dateCol;
+  let timeColFinal = timeCol;
+  // A name-matched usage column whose values are NOT numeric (e.g. a "FLOW"
+  // header holding Delivered/Received text) is a false positive — drop it so
+  // structural inference can find the real usage column.
+  if (usageCol) {
+    const vals = table.data.slice(0, 50).map((r) => String(r[usageCol!] ?? "").trim()).filter(Boolean);
+    const numericish = vals.filter((v) => /^-?[\d,]+(\.\d+)?$/.test(v.replace(/,/g, ""))).length;
+    if (vals.length >= 3 && numericish < vals.length * 0.5) {
+      inferenceNotes.push(`Column "${usageCol}" matched a usage-like name but its values are not numeric — not used as usage`);
+      usageCol = null;
+    }
+  }
+  if ((!usageCol && !kwCol) || (!dateColFinal && !dtColFinal)) {
+    const inf = inferColumns(headers, table.data);
+    if (!dtColFinal && !dateColFinal) {
+      if (inf.dtCol) dtColFinal = inf.dtCol;
+      else if (inf.dateCol) {
+        dateColFinal = inf.dateCol;
+        if (!timeColFinal && inf.timeCol) timeColFinal = inf.timeCol;
+      }
+    }
+    if (!usageCol && !kwCol && inf.usageCol) usageCol = inf.usageCol;
+    if (!directionCol && inf.directionCol) directionCol = inf.directionCol;
+    inferenceNotes.push(...inf.disclosures);
+  }
+  // INFER-3 hard block: whatever path selected the usage column, currency-
+  // shaped values must never be summed as consumption.
+  if (usageCol) {
+    const sampleVals = table.data.slice(0, 50).map((r) => String(r[usageCol!] ?? "").trim()).filter(Boolean);
+    const currencyLike = sampleVals.filter((v) => /^-?\s*[$€£]/.test(v) || /^\(\s*[$€£]/.test(v)).length;
+    if (sampleVals.length >= 3 && currencyLike >= sampleVals.length * 0.8) {
+      inferenceNotes.push(`Column "${usageCol}" rejected as usage — values are currency-shaped (cost, not consumption)`);
+      usageCol = null;
+    }
+  }
 
   if (!usageCol && !kwCol) return null;
-  if (!dateCol && !dtCol) return null;
+  if (!dateColFinal && !dtColFinal) return null;
 
   let commodity: "electric" | "gas" | "water" = "electric";
   const headerBlob = headers.join(" ").toLowerCase();
   if (/therm|ccf|mcf|gas/.test(headerBlob)) commodity = "gas";
   else if (/gallon|gal\b|hcf|water/.test(headerBlob)) commodity = "water";
-  const usageUnit = commodity === "electric" ? "kWh" : commodity === "gas" ? "therms" : "gal";
+  // LGE-2: report the unit the file ACTUALLY carries — a CCF column must not
+  // be silently relabeled therms (×1.037 error), nor HCF relabeled gallons
+  // (×748 error). Derive from the matched usage column when it is unit-named.
+  const usageColLower = (usageCol ?? "").toLowerCase();
+  let usageUnit: string;
+  if (/ccf/.test(usageColLower)) usageUnit = "CCF";
+  else if (/mcf/.test(usageColLower)) usageUnit = "Mcf";
+  else if (/therm/.test(usageColLower)) usageUnit = "therms";
+  else if (/hcf/.test(usageColLower)) usageUnit = "HCF";
+  else if (/gallon|^gal$|gal\b/.test(usageColLower)) usageUnit = "gal";
+  else if (/cubic\s*feet/.test(usageColLower)) usageUnit = "cf";
+  else if (/m3/.test(usageColLower)) usageUnit = "m3";
+  else usageUnit = commodity === "electric" ? "kWh" : commodity === "gas" ? "therms" : "gal";
   // Batch-15 (pass 144): a bare "Wh" usage header (matched by the generic
   // usage/energy regex, NOT the kwh regex) would be ingested as-is yet labeled
   // kWh — a 1000× unit error. Detect Watt-hour headers and convert to kWh.
@@ -142,10 +252,21 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
 
   const points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }> = [];
   let skipped = 0;
+  let receivedRows = 0;
   for (const r of table.data) {
-    const ts = dtCol
-      ? (dateFromValue(r[dtCol] as never)?.getTime() ?? null)
-      : combineDateTime(r[dateCol!], timeCol ? r[timeCol] : null);
+    // LGE-2: "Usage Direction" — only Delivered (or blank) rows are consumption;
+    // Received rows are net-metering export and are excluded with disclosure.
+    if (directionCol) {
+      const dir = String(r[directionCol] ?? "").trim().toLowerCase();
+      if (dir && dir !== "delivered") {
+        receivedRows++;
+        skipped++;
+        continue;
+      }
+    }
+    const ts = dtColFinal
+      ? (dateFromValue(r[dtColFinal] as never)?.getTime() ?? null)
+      : combineDateTime(r[dateColFinal!], timeColFinal ? r[timeColFinal] : null);
     if (ts == null || !Number.isFinite(ts)) {
       skipped++;
       continue;
@@ -174,7 +295,10 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
     if (p.demand != null && (ingestedMaxDemand == null || p.demand > ingestedMaxDemand)) ingestedMaxDemand = p.demand;
   }
 
-  const notes: string[] = [];
+  const notes: string[] = [...inferenceNotes];
+  if (receivedRows > 0) {
+    notes.push(`${receivedRows} "Received" (export) rows excluded from consumption — net-metering export is not usage`);
+  }
   let pass = true;
   let footerUsageDelta: number | undefined;
   let footerUsageDeltaPct: number | undefined;
@@ -228,8 +352,7 @@ export function parseExcelIntervals(buf: Buffer): ParsedMeterSeries[] {
     const rows = XLSX.utils.sheet_to_json<Row>(ws, { header: 1, raw: true, defval: "" });
     if (!rows || rows.length < 4) continue;
     const scrubbed = rows.map((r) => r.map((c) => (typeof c === "string" ? scrubCell(c) : c)));
-    const series = tableToSeries(sheetName, scrubbed);
-    if (series) out.push(series);
+    out.push(...tableToSeriesMulti(sheetName, scrubbed));
   }
   return out;
 }
@@ -238,8 +361,7 @@ export function parseExcelIntervals(buf: Buffer): ParsedMeterSeries[] {
 export function parseCsvIntervals(text: string, filename: string): ParsedMeterSeries[] {
   const rows = parseCSV(text).map((r) => r.map((c) => scrubCell(c)));
   if (rows.length < 4) return [];
-  const series = tableToSeries(filename.replace(/\.[^.]+$/, ""), rows as Row[]);
-  return series ? [series] : [];
+  return tableToSeriesMulti(filename.replace(/\.[^.]+$/, ""), rows as Row[]);
 }
 
 /* ---------------- ESPI Green Button XML ---------------- */

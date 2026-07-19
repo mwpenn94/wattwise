@@ -1621,7 +1621,15 @@ export const appRouter = router({
           throw new TRPCError({ code: "BAD_REQUEST", message: `Parse failed: ${msg}` });
         }
         if (series.length === 0 || series.every((s) => s.points.length === 0)) {
-          const detail = memberNotes.length > 0 ? ` (${memberNotes.join("; ")})` : "";
+          // LGE-4: disclose the header row we saw so unrecognized layouts are
+          // self-diagnosing (user + owner can see exactly which columns failed
+          // to match instead of a bare "no data" verdict).
+          let headerHint = "";
+          if (verifiedFormat === "csv") {
+            const firstLines = buf.toString("utf8", 0, Math.min(buf.length, 4096)).split(/\r?\n/).filter((l) => l.trim()).slice(0, 2);
+            if (firstLines.length > 0) headerHint = ` First row seen: "${firstLines[0].slice(0, 200)}".`;
+          }
+          const detail = (memberNotes.length > 0 ? ` (${memberNotes.join("; ")})` : "") + headerHint;
           await h.updateUpload(uploadId, { status: "failed", error: `No interval data found in file${detail}`.slice(0, 1024) });
           await emitDeadEndPersona({ deadEnd: `empty_file_${verifiedFormat}` });
           throw new TRPCError({ code: "BAD_REQUEST", message: `No interval data recognized in this file.${detail}`.slice(0, 1024) });
