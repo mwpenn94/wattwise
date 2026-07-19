@@ -182,6 +182,57 @@ export function deriveFromAddress(
   };
 }
 
+/* ================= GAP-Q one-address→three-utilities reveal ================= */
+/** Largest gas LDC per state — representative candidates (AGA/EIA-176 largest
+ * distributor by customer count). Like STATE_UTILITY these are STARTING
+ * POINTS: municipal utilities and smaller LDCs serve many areas. States with
+ * negligible gas distribution are omitted and disclosed as such. */
+export const STATE_GAS_UTILITY: Record<string, string> = {
+  AL: "Spire Alabama", AK: "ENSTAR Natural Gas", AZ: "Southwest Gas", AR: "Summit Utilities Arkansas",
+  CA: "SoCalGas", CO: "Xcel Energy (PSCo)", CT: "Eversource Gas (CT)", DE: "Delmarva Power (gas)",
+  FL: "TECO Peoples Gas", GA: "Atlanta Gas Light", ID: "Intermountain Gas", IL: "Nicor Gas",
+  IN: "NIPSCO", IA: "MidAmerican Energy (gas)", KS: "Kansas Gas Service", KY: "Columbia Gas of Kentucky",
+  LA: "Atmos Energy (LA)", ME: "Unitil / Northern Utilities", MD: "Baltimore Gas & Electric (gas)",
+  MA: "National Grid Gas (MA)", MI: "DTE Gas", MN: "CenterPoint Energy (MN)", MS: "Atmos Energy (MS)",
+  MO: "Spire Missouri", MT: "NorthWestern Energy (gas)", NE: "Black Hills Energy (NE)", NV: "Southwest Gas (NV)",
+  NH: "Liberty Utilities (NH gas)", NJ: "PSE&G (gas)", NM: "New Mexico Gas Company", NY: "National Grid Gas (NY)",
+  NC: "Piedmont Natural Gas", ND: "Montana-Dakota Utilities (gas)", OH: "Columbia Gas of Ohio",
+  OK: "Oklahoma Natural Gas", OR: "NW Natural", PA: "UGI Utilities", RI: "Rhode Island Energy (gas)",
+  SC: "Dominion Energy (SC gas)", SD: "MidAmerican Energy (SD gas)", TN: "Piedmont Natural Gas (TN)",
+  TX: "Atmos Energy (TX)", UT: "Dominion Energy Utah", VT: "Vermont Gas Systems", VA: "Virginia Natural Gas",
+  WA: "Puget Sound Energy (gas)", WV: "Mountaineer Gas", WI: "We Energies (gas)", WY: "Black Hills Energy (WY gas)",
+};
+
+export interface UtilityTriple {
+  electric: DerivedField<string | null>;
+  gas: DerivedField<string | null>;
+  water: DerivedField<string | null>;
+}
+
+/** GAP-Q — derive candidate providers for all THREE commodities from one
+ * location. Electric reuses the state's largest IOU (same source as the
+ * cascade); gas uses the largest state LDC; water is inherently municipal so
+ * we NAME the pattern ("City of <city> water utility") only when a city is
+ * known — otherwise we say honestly that water is city-run and unknowable
+ * from state alone. Every entry is an overridable candidate, never a fact. */
+export function deriveUtilityTriple(state: string | null | undefined, city?: string | null): UtilityTriple {
+  const st = state?.toUpperCase()?.trim() || null;
+  const electricName = st ? STATE_UTILITY[st] ?? null : null;
+  const electric: DerivedField<string | null> = electricName
+    ? { value: electricName, source: "state_inferred", note: `${electricName} is ${st}'s largest electric utility — a candidate, not a confirmation.` }
+    : { value: null, source: "unknown", note: "No state — no electric-utility candidate." };
+  const gasName = st ? STATE_GAS_UTILITY[st] ?? null : null;
+  const gas: DerivedField<string | null> = gasName
+    ? { value: gasName, source: "state_inferred", note: `${gasName} is ${st}'s largest gas distributor — many areas are served by municipal utilities or smaller LDCs, and some buildings have no gas service at all.` }
+    : st
+      ? { value: null, source: "unknown", note: `No dominant gas distributor is on file for ${st} — gas service there is sparse or municipally fragmented.` }
+      : { value: null, source: "unknown", note: "No state — no gas-utility candidate." };
+  const water: DerivedField<string | null> = city
+    ? { value: `City of ${city} water utility (typical pattern)`, source: "state_inferred", note: `Water service is almost always municipal — “City of ${city}” is the typical pattern, not a verified provider. Check a water bill to confirm.` }
+    : { value: null, source: "unknown", note: "Water utilities are municipal — without a city we can't even suggest a candidate. Add a city or check a water bill." };
+  return { electric, gas, water };
+}
+
 function zoneSourceToField(s: ClimateZoneSource): DerivedField<string>["source"] {
   if (s === "zip_inferred") return "zip_inferred";
   if (s === "state_inferred") return "state_inferred";

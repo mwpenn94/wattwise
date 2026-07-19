@@ -2,16 +2,19 @@
  * Account & usage — tier display, month-to-date LLM/compute spend metering
  * (handoff §9 unit economics), and one-click full data export (user-owned data).
  */
+import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Download, Gauge, ShieldCheck, BellRing, Database } from "lucide-react";
+import { Download, Gauge, ShieldCheck, BellRing, Database, Trash2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useLocation } from "wouter";
 
 const TIERS: Array<{ id: "free" | "plus" | "pro"; name: string; blurb: string }> = [
   { id: "free", name: "Free", blurb: "2 sites · 12 uploads/mo · 3 scenario runs/mo · template-first bill parsing" },
@@ -163,7 +166,76 @@ export default function Account() {
           </Button>
         </CardContent>
       </Card>
+
+      {/* GAP-K guardrail §8.2: full data deletion — typed confirm phrase, honest
+          statement of what remains (auth identity + one tombstone audit entry). */}
+      <DeleteAccountCard />
     </div>
+  );
+}
+
+function DeleteAccountCard() {
+  const [, navigate] = useLocation();
+  const [phrase, setPhrase] = useState("");
+  const [armed, setArmed] = useState(false);
+  const utils = trpc.useUtils();
+  const del = trpc.account.deleteAllData.useMutation({
+    onSuccess: async (r) => {
+      toast.success(`Deleted — ${r.sitesDeleted} site${r.sitesDeleted === 1 ? "" : "s"} and all associated data removed.`);
+      await utils.invalidate();
+      navigate("/");
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const ready = phrase.trim().toLowerCase() === "delete my account";
+  return (
+    <Card className="mt-4 border-destructive/40">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base text-destructive">
+          <Trash2 className="h-4 w-4" /> Delete all my data
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">
+          Permanently removes every site, meter, reading, bill, analysis, insight, scenario, upload, report, and your
+          audit history. What remains afterwards: your sign-in identity (so the login still works, pointing at an empty
+          account) and a single audit entry recording the deletion. <strong>This cannot be undone</strong> — export your
+          data first if you might want it later.
+        </p>
+        {!armed ? (
+          <Button variant="outline" className="mt-4 border-destructive/50 text-destructive hover:bg-destructive/10" onClick={() => setArmed(true)}>
+            I want to delete my data…
+          </Button>
+        ) : (
+          <div className="mt-4 rounded-md border border-destructive/40 bg-destructive/[0.04] p-3">
+            <p className="text-xs font-medium">
+              Type <span className="font-mono">delete my account</span> to confirm:
+            </p>
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+              <Input
+                value={phrase}
+                onChange={(e) => setPhrase(e.target.value)}
+                placeholder="delete my account"
+                aria-label="Deletion confirmation phrase"
+                className="sm:max-w-xs"
+              />
+              <div className="flex gap-2">
+                <Button
+                  variant="destructive"
+                  disabled={!ready || del.isPending}
+                  onClick={() => del.mutate({ confirmPhrase: "delete my account" })}
+                >
+                  {del.isPending ? "Deleting…" : "Permanently delete everything"}
+                </Button>
+                <Button variant="ghost" onClick={() => { setArmed(false); setPhrase(""); }}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

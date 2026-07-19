@@ -250,3 +250,32 @@
 - [x] §5c-4 Remove builder artifacts from public chrome: Open console CTA + Convergence log link off logged-out chrome (keep Methodology)
 - [x] §5c-5 Mobile header layout fix: ES toggle wrap/collision at phone width, touch targets
 - [x] §5c-6 Minor batch: Free-tier personalization box, muted-text contrast ≥4.5:1, header nav anchors (How it works / Pricing), annual-toggle note deferred with billing
+
+## Reconciliation wave Jul 18 (owner-requested full audit — 20 buildable gaps)
+- [x] GAP-A Solar/PV signature detection + net/gross gate blocking insights (AC11/AC18) + detection feed moments (GAP-P)
+- [x] GAP-T Net-metering banking/true-up rules on solar economics with stated basis
+- [x] GAP-G Estimated-read bill handling (readType, down-weight, disclosure)
+- [x] GAP-H Verdict model-version pinning + occupancy-change re-base (AC12)
+- [x] GAP-D Bill reconciliation self-calibration (verified_against_bill, mismatch widens chips) (AC16a)
+- [x] GAP-B Incentives layer: seed + pre/post payback + expiration + DR negative-cost + escalation basis + who-pays/who-benefits (AC15)
+- [x] GAP-C WA Clean Buildings compliance card + path-to-target (AC16b)
+- [x] GAP-I Cohort insights 15/15-gated
+- [x] GAP-M Utility-exposure rollup (spend by provider×commodity) + re-sweep prompt
+- [x] GAP-E Equipment intelligence: probable inventory + lifecycle horizon + sizing diagnostics + degradation drift + annual checkup (AC13)
+- [x] GAP-F Vertical packs: production_series + KPI/regressor switch + honest degrade + idle-waste ratio (AC14)
+- [x] GAP-J Dimensional receipts + >20% divergence question in profile panel (sites.dimensionReceipts + RefineChips question card + 4-spec suite)
+- [x] GAP-K Account deletion endpoint + confirm UI (guardrail §8.2) (deleteAllUserData cascade + tombstone audit, typed confirm phrase server-enforced, danger-zone card, 2-spec suite)
+- [x] GAP-L Site roles: owner/facility-manager/read-only scoping (siteRoleOf/assertSiteViewer/assertSiteActor, members CRUD, sharedWithMe, SharePanel UI, 5-spec suite)
+- [x] GAP-N Portfolio Manager-compatible export + portfolio verified-savings edition (portfolioManagerCsv ESPM vocabulary + reports.portfolioExport/portfolioVerified Pro-gated + Portfolio header buttons + 6-spec suite)
+- [x] GAP-O Pin-drop + prospective-site mode in QuickStart (prospective col, quickCreate pinLat/pinLng/prospective, map pin UI, 2-spec suite)
+- [x] GAP-Q One-address-three-utilities reveal moment (deriveUtilityTriple + STATE_GAS_UTILITY table, quickCreate returns triple, sites.utilityReveal, QuickStart reveal toast, 3-spec suite)
+- [x] GAP-R EN/ES parity CI test + broader string coverage (REQUIRED_PUBLIC_FUNNEL registry + howit/tiers keys wired in Home.tsx + 5-spec parity gate: coverage, no copy-paste, no orphans, EN fallback, exhaustive classification)
+- [x] GAP-S Winter-sewer story card client-side (dedicated narrative card on Dashboard for winter_water_sewer with pays-twice mechanism, convention-based-estimate badge, sewer disclosure; row stays in ranked list for honest ordering)
+
+## v1.22 delta (Jul 18, S-LIFECYCLE / AC18b)
+- [x] seed_freshness table: source, version, seeded_at, cadence, upstream_release_seen — queryable per source
+- [x] Staleness surfacing: seed past cadence×1.5 widens derived confidence chips + honest user copy
+- [x] Non-URDB tariff freshness: bill-verification resets clock; 12 months unverified → chips widen + template-review task
+- [x] Unknown-tariff crowd discovery: N≥3 unmatched tariff_name_raw at one utility → create-template task
+- [x] Parser-drift monitor: per-template parse success tracked; drop raises template-update task
+- [x] Config-not-constant: external numeric limits readable from config table (seeded), not hardcoded

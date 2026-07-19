@@ -228,12 +228,10 @@ export default function Home() {
         <section id="how-it-works" className="scroll-mt-16 border-t border-border/60 bg-card/40 py-16">
           <div className="container">
             <h2 className="font-display text-2xl font-bold tracking-tight md:text-3xl">
-              One pipeline, actual <span className="text-primary">or hypothetical</span>.
+              {t("howit.title.pre")}
+              <span className="text-primary">{t("howit.title.em")}</span>.
             </h2>
-            <p className="mt-2 max-w-2xl text-muted-foreground">
-              Measured intervals and archetype-synthesized buildings flow through the identical analytics path — the only
-              difference is the provenance label on the output.
-            </p>
+            <p className="mt-2 max-w-2xl text-muted-foreground">{t("howit.sub")}</p>
             <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {FEATURES.map((f) => (
                 <Card key={f.title} className="border-border/70 bg-card/80 transition-transform duration-200 hover:-translate-y-0.5">
@@ -250,7 +248,7 @@ export default function Home() {
 
         {/* tiers */}
         <section id="pricing" className="container scroll-mt-16 py-16">
-          <h2 className="font-display text-2xl font-bold tracking-tight md:text-3xl">Tiers</h2>
+          <h2 className="font-display text-2xl font-bold tracking-tight md:text-3xl">{t("tiers.title")}</h2>
           <div className="mt-8 grid gap-4 md:grid-cols-3">
             {[
               {

@@ -353,6 +353,9 @@ export function runScenario(
   co2eLbPerMwh: number,
   baselineConfidence: "low" | "medium" | "high",
   extrapolated: boolean,
+  /** GAP-T §2.3: NEM banking rules from the tariff row — how export credits
+   * bank (kWh vs dollar) and when they expire changes solar economics. */
+  nem?: { banking?: string | null; creditExpiry?: string | null },
 ): ScenarioResults {
   const disclosures: string[] = [`Modeled on ${LABEL_NORMAL_YEAR} hourly profile.`];
   let hourly = [...baselineHourly];
@@ -406,6 +409,24 @@ export function runScenario(
     if (!solarZoneMapped(climateZone)) {
       disclosures.push(
         `Climate zone "${climateZone}" has no mapped solar-yield entry — a generic ${SOLAR_FALLBACK_YIELD_KWH_PER_KW.toLocaleString()} kWh/kW-yr default was used; treat solar production as low confidence.`,
+      );
+    }
+    // GAP-T §2.3 — net-metering banking basis. Export credits are not cash:
+    // kWh banking offsets later usage at retail; dollar banking (net billing)
+    // credits at an avoided-cost rate below retail; annual true-ups can
+    // forfeit chronic overproduction. The economics shown must say which
+    // regime they assume.
+    if (nem?.banking === "kwh") {
+      disclosures.push(
+        `Export-credit basis: this rate banks exports as kWh credits (net metering)${nem.creditExpiry ? ` — unused credits ${nem.creditExpiry === "annual" ? "reset at the annual true-up; chronic overproduction is forfeited" : `expire ${nem.creditExpiry}`}` : ""}. Savings assume credits offset later usage at the full retail rate.`,
+      );
+    } else if (nem?.banking === "dollar") {
+      disclosures.push(
+        `Export-credit basis: this rate credits exports in dollars at an export rate below retail (net billing)${nem.creditExpiry ? ` — credits ${nem.creditExpiry === "annual" ? "true up annually" : `expire ${nem.creditExpiry}`}` : ""}. Oversizing the array returns less than the retail rate suggests.`,
+      );
+    } else {
+      disclosures.push(
+        "Export-credit basis unknown for this rate — savings assume exports offset usage at the modeled export rate. Confirm your utility's net-metering vs net-billing rules; annual true-up forfeiture can reduce first-year value.",
       );
     }
   }

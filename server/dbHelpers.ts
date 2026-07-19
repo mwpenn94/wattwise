@@ -35,6 +35,11 @@ import {
   reportArtifacts,
   planBaskets,
   alerts,
+  billReconciliations,
+  equipmentInventory,
+  templateTasks,
+  siteMembers,
+  productionSeries,
 } from "../drizzle/schema";
 import type { Alert } from "../drizzle/schema";
 
@@ -162,9 +167,11 @@ export async function createSite(data: typeof sites.$inferInsert) {
 export async function updateSite(
   siteId: number,
   userId: number,
-  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields" | "tenure" | "hasSolar" | "awayMode" | "awayStart" | "awayEnd">>,
+  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields" | "tenure" | "hasSolar" | "awayMode" | "awayStart" | "awayEnd" | "pvDetectionStatus" | "pvDetectedAt" | "netMeteringBasis" | "occupancyChangedAt" | "leaseType">>,
 ) {
-  await assertSiteOwner(siteId, userId);
+  // GAP-L: attribute updates are ACTS — owner or facility_manager may write;
+  // read_only members (and strangers) are rejected inside assertSiteActor.
+  await assertSiteActor(siteId, userId);
   const db = await requireDb();
   await db.update(sites).set(patch).where(eq(sites.id, siteId));
 }
@@ -196,6 +203,128 @@ export async function deleteSite(siteId: number, userId: number) {
   // uploads keep their file provenance but detach from the deleted site
   await db.update(uploads).set({ siteId: null }).where(eq(uploads.siteId, siteId));
   await db.delete(sites).where(eq(sites.id, siteId));
+}
+
+/** GAP-K (guardrail §8.2) — full account data deletion. Removes EVERY row the
+ * user owns: per-site cascade via deleteSite, then user-scoped rows (entities,
+ * site groups, uploads incl. detached ones, metering, report artifacts,
+ * equipment, production series, bill reconciliations, plan baskets, alerts,
+ * measure implementations, site memberships held on others' sites, and the
+ * audit history itself). One tombstone audit entry is written AFTER the wipe so
+ * the deletion event is evidenced; the auth identity row (users) survives with
+ * its tier — the endpoint discloses this. */
+export async function deleteAllUserData(userId: number) {
+  const db = await requireDb();
+  const userSites = await db.select({ id: sites.id }).from(sites).where(eq(sites.userId, userId));
+  for (const s of userSites) {
+    await deleteSite(s.id, userId);
+  }
+  await db.delete(siteMembers).where(eq(siteMembers.userId, userId));
+  await db.delete(siteGroups).where(eq(siteGroups.userId, userId));
+  await db.delete(entities).where(eq(entities.userId, userId));
+  await db.delete(uploads).where(eq(uploads.userId, userId));
+  await db.delete(metering).where(eq(metering.userId, userId));
+  await db.delete(reportArtifacts).where(eq(reportArtifacts.userId, userId));
+  await db.delete(equipmentInventory).where(eq(equipmentInventory.userId, userId));
+  await db.delete(productionSeries).where(eq(productionSeries.userId, userId));
+  await db.delete(billReconciliations).where(eq(billReconciliations.userId, userId));
+  await db.delete(planBaskets).where(eq(planBaskets.userId, userId));
+  await db.delete(alerts).where(eq(alerts.userId, userId));
+  await db.delete(measureImplementations).where(eq(measureImplementations.userId, userId));
+  await db.delete(auditLog).where(eq(auditLog.userId, userId));
+  await db.insert(auditLog).values({
+    userId,
+    action: "account_data_deleted",
+    entityType: "user",
+    entityId: String(userId),
+    detail: { note: "all user data deleted at user request (GAP-K guardrail §8.2); auth identity row retained", sitesDeleted: userSites.length },
+  } as typeof auditLog.$inferInsert);
+  return { sitesDeleted: userSites.length };
+}
+
+/* ---------------- GAP-L site roles: owner / facility_manager / read_only ---------------- */
+/** Resolve a user's effective role on a site: 'owner' when they own the row,
+ * otherwise their site_members role, otherwise null (no access). */
+export async function siteRoleOf(siteId: number, userId: number): Promise<"owner" | "facility_manager" | "read_only" | null> {
+  const db = await requireDb();
+  const own = await db.select({ id: sites.id }).from(sites).where(and(eq(sites.id, siteId), eq(sites.userId, userId))).limit(1);
+  if (own.length > 0) return "owner";
+  const mem = await db
+    .select({ role: siteMembers.role })
+    .from(siteMembers)
+    .where(and(eq(siteMembers.siteId, siteId), eq(siteMembers.userId, userId)))
+    .limit(1);
+  if (mem.length === 0) return null;
+  return mem[0].role === "facility_manager" ? "facility_manager" : "read_only";
+}
+/** Assert the user can at least VIEW the site (owner or any member). Returns
+ * the effective role so callers can branch. */
+export async function assertSiteViewer(siteId: number, userId: number) {
+  const role = await siteRoleOf(siteId, userId);
+  if (!role) throw new TenancyError();
+  return role;
+}
+/** Assert the user can ACT on the site (owner or facility_manager — not read_only). */
+export async function assertSiteActor(siteId: number, userId: number) {
+  const role = await siteRoleOf(siteId, userId);
+  if (!role) throw new TenancyError();
+  if (role === "read_only") throw new TenancyError("Read-only access: viewing is allowed, changes are not");
+  return role;
+}
+export async function listSiteMembers(siteId: number, ownerId: number) {
+  await assertSiteOwner(siteId, ownerId);
+  const db = await requireDb();
+  return db
+    .select({ id: siteMembers.id, userId: siteMembers.userId, role: siteMembers.role, createdAt: siteMembers.createdAt, name: users.name, email: users.email })
+    .from(siteMembers)
+    .innerJoin(users, eq(siteMembers.userId, users.id))
+    .where(eq(siteMembers.siteId, siteId))
+    .orderBy(asc(siteMembers.id));
+}
+export async function findUserByEmail(email: string) {
+  const db = await requireDb();
+  const rows = await db.select().from(users).where(eq(users.email, email)).limit(1);
+  return rows[0] ?? null;
+}
+export async function upsertSiteMember(siteId: number, ownerId: number, memberUserId: number, role: "facility_manager" | "read_only") {
+  await assertSiteOwner(siteId, ownerId);
+  if (memberUserId === ownerId) throw new Error("You already own this site");
+  const db = await requireDb();
+  const existing = await db
+    .select({ id: siteMembers.id })
+    .from(siteMembers)
+    .where(and(eq(siteMembers.siteId, siteId), eq(siteMembers.userId, memberUserId)))
+    .limit(1);
+  if (existing.length > 0) {
+    await db.update(siteMembers).set({ role }).where(eq(siteMembers.id, existing[0].id));
+    return existing[0].id;
+  }
+  const res = await db.insert(siteMembers).values({ siteId, userId: memberUserId, role, invitedBy: ownerId, createdAt: Date.now() });
+  return Number((res as unknown as [{ insertId: number }])[0].insertId);
+}
+export async function removeSiteMember(siteId: number, ownerId: number, memberId: number) {
+  await assertSiteOwner(siteId, ownerId);
+  const db = await requireDb();
+  await db.delete(siteMembers).where(and(eq(siteMembers.id, memberId), eq(siteMembers.siteId, siteId)));
+}
+/** Viewer-scoped site fetch — owner or member; returns row + effective role. */
+export async function getSiteAsViewer(siteId: number, userId: number) {
+  const role = await assertSiteViewer(siteId, userId);
+  const db = await requireDb();
+  const rows = await db.select().from(sites).where(eq(sites.id, siteId)).limit(1);
+  if (rows.length === 0) throw new TenancyError();
+  return { site: rows[0], role };
+}
+/** Sites shared WITH me (member view) — returns site rows + my role. */
+export async function listSharedSites(userId: number) {
+  const db = await requireDb();
+  const rows = await db
+    .select({ site: sites, role: siteMembers.role })
+    .from(siteMembers)
+    .innerJoin(sites, eq(siteMembers.siteId, sites.id))
+    .where(eq(siteMembers.userId, userId))
+    .orderBy(desc(siteMembers.createdAt));
+  return rows;
 }
 
 export async function countSites(userId: number): Promise<number> {
@@ -239,6 +368,97 @@ export async function deleteMeter(meterId: number, userId: number) {
   await db.delete(bills).where(eq(bills.meterId, meterId));
   await db.update(meters).set({ parentMeterId: null }).where(eq(meters.parentMeterId, meterId));
   await db.delete(meters).where(eq(meters.id, meterId));
+}
+
+/* ---------------- AC13 equipment inventory ---------------- */
+export async function listEquipment(siteId: number, userId: number) {
+  await assertSiteOwner(siteId, userId);
+  const db = await requireDb();
+  return db.select().from(equipmentInventory).where(eq(equipmentInventory.siteId, siteId)).orderBy(asc(equipmentInventory.id));
+}
+
+/** Confirm or edit an inventory row — flips source away from 'inferred'. */
+export async function updateEquipment(
+  id: number,
+  userId: number,
+  patch: Partial<Pick<typeof equipmentInventory.$inferInsert, "label" | "source" | "confidence" | "installYear" | "serviceLifeYears" | "notes">>,
+) {
+  const db = await requireDb();
+  const rows = await db.select({ id: equipmentInventory.id }).from(equipmentInventory).where(and(eq(equipmentInventory.id, id), eq(equipmentInventory.userId, userId))).limit(1);
+  if (rows.length === 0) throw new TenancyError();
+  await db.update(equipmentInventory).set(patch).where(eq(equipmentInventory.id, id));
+}
+
+/** GAP-D: fetch one bill with tenancy check via its meter. */
+export async function getBill(billId: number, userId: number) {
+  const db = await requireDb();
+  const rows = await db.select().from(bills).where(eq(bills.id, billId)).limit(1);
+  if (rows.length === 0) return null;
+  await assertMeterOwner(rows[0].meterId, userId);
+  return rows[0];
+}
+
+/** GAP-D: fetch one meter with tenancy check. */
+export async function getMeter(meterId: number, userId: number) {
+  await assertMeterOwner(meterId, userId);
+  const db = await requireDb();
+  const rows = await db.select().from(meters).where(eq(meters.id, meterId)).limit(1);
+  return rows[0] ?? null;
+}
+
+/** GAP-D / AC16a: persist one bill-reconciliation outcome. */
+export async function createBillReconciliation(data: typeof billReconciliations.$inferInsert) {
+  const db = await requireDb();
+  await db.insert(billReconciliations).values(data);
+}
+
+/** GAP-D: list reconciliations for a site (newest first). */
+export async function listBillReconciliations(siteId: number, userId: number) {
+  await assertSiteOwner(siteId, userId);
+  const db = await requireDb();
+  return db.select().from(billReconciliations).where(eq(billReconciliations.siteId, siteId)).orderBy(desc(billReconciliations.id));
+}
+
+/** GAP-D: roll a reconciliation verdict up onto the tariff's trust fields. */
+export async function updateTariffTrust(
+  tariffId: number,
+  patch: {
+    trustStatus: "seeded" | "verified_against_bill" | "mismatch_flagged";
+    reconcileHits: number;
+    reconcileMisses: number;
+    trustUpdatedAt: number;
+  },
+) {
+  const db = await requireDb();
+  await db.update(tariffs).set(patch).where(eq(tariffs.id, tariffId));
+}
+
+/** v1.22 unknown-tariff discovery: does a parsed (utility, rate-name) pair
+ * match any record we carry? Loose match — case-insensitive substring both
+ * directions — so cosmetic OCR variance doesn't raise false create-template
+ * tasks. */
+export async function findTariffByName(utilityRaw: string, nameRaw: string) {
+  const db = await requireDb();
+  const utility = utilityRaw.trim().toLowerCase();
+  const name = nameRaw.trim().toLowerCase();
+  if (!utility || !name) return null;
+  const rows = await db
+    .select({ id: tariffs.id, utilityName: tariffs.utilityName, name: tariffs.name })
+    .from(tariffs);
+  for (const t of rows) {
+    const tu = (t.utilityName ?? "").toLowerCase();
+    const tn = (t.name ?? "").toLowerCase();
+    const utilityMatches = tu.includes(utility) || utility.includes(tu.split(" ")[0] ?? "");
+    const nameMatches = tn.includes(name) || name.includes(tn);
+    if (utilityMatches && nameMatches) return t;
+  }
+  return null;
+}
+
+/** v1.22: open ops tasks raised by crowd tariff discovery / parser drift. */
+export async function listOpenTemplateTasks() {
+  const db = await requireDb();
+  return db.select().from(templateTasks).where(eq(templateTasks.status, "open")).orderBy(desc(templateTasks.id));
 }
 
 export async function setMeterTariff(meterId: number, tariffId: number, userId: number) {
@@ -539,7 +759,8 @@ export async function updateAnalysis(id: number, data: Partial<typeof analyses.$
 }
 
 export async function getLatestAnalysis(siteId: number, userId: number) {
-  await assertSiteOwner(siteId, userId);
+  // GAP-L: shared-site members (facility_manager / read_only) may VIEW results
+  await assertSiteViewer(siteId, userId);
   const db = await requireDb();
   const rows = await db.select().from(analyses).where(eq(analyses.siteId, siteId)).orderBy(desc(analyses.id)).limit(1);
   return rows[0];
@@ -575,7 +796,8 @@ export async function addInsight(row: typeof insights.$inferInsert) {
 }
 
 export async function listInsights(siteId: number, userId: number) {
-  await assertSiteOwner(siteId, userId);
+  // GAP-L: shared-site members may VIEW insights
+  await assertSiteViewer(siteId, userId);
   const db = await requireDb();
   return db.select().from(insights).where(eq(insights.siteId, siteId)).orderBy(asc(insights.id));
 }
@@ -627,6 +849,11 @@ export async function updateMeasureVerdicts(
     verdicts: unknown;
     verifiedSavingsUsd: number;
     lastEvaluatedAt: number;
+    /** AC12 model pinning: engine version stamped at verdict issuance — a
+     * verdict is never silently re-scored by a newer analytics model. */
+    engineVersion?: string;
+    /** AC12 occupancy re-base: which occupancy period these verdicts belong to */
+    occupancyPeriod?: string;
   },
 ) {
   await getMeasureImplementation(id, userId); // tenancy assert

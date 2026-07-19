@@ -13,6 +13,7 @@ import {
   DISAGG_LANGUAGE,
   SOLAR_DISCLOSURE,
   BATTERY_DISCLOSURE,
+  ENGINE_VERSION,
   inferClimateZone,
   inferClimateZoneWithSource,
   TZ_BY_STATE,
@@ -35,7 +36,7 @@ import { runBulkScreen } from "./bulkScreen";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
 import { archetypeBaseline, type BaselineFit } from "./analytics/baseline";
-import { assembleReportData, newReportToken, practitionerCsv } from "./reports";
+import { assembleReportData, newReportToken, practitionerCsv, portfolioManagerCsv, assemblePortfolioVerified, type PortfolioExportRow } from "./reports";
 import { assembleWrapped } from "./wrapped";
 
 /** §3l report kinds → human feature names for tier-gate error copy. */
@@ -54,9 +55,23 @@ import { parse as parseCookieHeader } from "cookie";
 import { createHeartbeatJob, deleteHeartbeatJob } from "./_core/heartbeat";
 import { buildDigest } from "./digest";
 import { storagePut } from "./storage";
-import { deriveFromAddress, cascadeProvenance } from "./cascade";
+import { deriveFromAddress, cascadeProvenance, deriveUtilityTriple } from "./cascade";
 import { placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
 import { computeAddressEstimate, estimateRateAllows } from "./estimate";
+import { reconcileBill } from "./billReconciliation";
+import { assessSeedFreshness, recordParseOutcome, recordUnknownTariff, sweepUnverifiedTariffs } from "./seedLifecycle";
+import { incentiveEconomics } from "./incentives";
+import { VERTICAL_PACKS, addProductionPeriod, listProduction, deleteProductionPeriod } from "./verticals";
+
+/** GAP-D / AC16a: self-calibration on every real bill — fail-open so bill
+ * ingest never breaks because the calibration couldn't run. */
+async function maybeReconcileBill(billId: number, meterId: number, userId: number) {
+  try {
+    await reconcileBill(billId, meterId, userId);
+  } catch (e) {
+    console.warn(`[reconcile] skipped for bill ${billId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 import { createHash } from "crypto";
 import { intervals as intervalsTable } from "../drizzle/schema";
 import { and, asc, eq, gte, lte } from "drizzle-orm";
@@ -254,7 +269,46 @@ export const appRouter = router({
       return h.listSites(ctx.user.id);
     }),
     get: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
-      return h.getSite(input.siteId, ctx.user.id);
+      // GAP-L: owners get their row as before; shared-site members (facility
+      // manager / read-only) can view it too — the effective role rides along
+      // so the UI can gate its edit affordances honestly.
+      const { site, role } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
+      return { ...site, myRole: role };
+    }),
+    /** GAP-L — sites shared WITH me, with my role on each. */
+    sharedWithMe: protectedProcedure.query(async ({ ctx }) => {
+      const rows = await h.listSharedSites(ctx.user.id);
+      return rows.map((r) => ({ ...r.site, myRole: r.role as "facility_manager" | "read_only" }));
+    }),
+    /** GAP-L — membership management (owner only). Roles:
+     * facility_manager = can act (refine, mark measures); read_only = can look.
+     * The invitee must already have a WattWise account (invite-by-email lookup);
+     * we say so honestly instead of pretending an email invitation was sent. */
+    members: router({
+      list: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+        return h.listSiteMembers(input.siteId, ctx.user.id);
+      }),
+      add: protectedProcedure
+        .input(z.object({ siteId: z.number(), email: z.string().email().max(320), role: z.enum(["facility_manager", "read_only"]) }))
+        .mutation(async ({ ctx, input }) => {
+          const target = await h.findUserByEmail(input.email.trim().toLowerCase()) ?? await h.findUserByEmail(input.email.trim());
+          if (!target) {
+            throw new TRPCError({
+              code: "NOT_FOUND",
+              message: "No WattWise account exists for that email yet. Ask them to sign in once first — no email invitation is sent from here (we don't pretend otherwise).",
+            });
+          }
+          const id = await h.upsertSiteMember(input.siteId, ctx.user.id, target.id, input.role);
+          await h.audit(ctx.user.id, "site_member_add", "site", String(input.siteId), { memberUserId: target.id, role: input.role });
+          return { ok: true as const, memberId: id, name: target.name };
+        }),
+      remove: protectedProcedure
+        .input(z.object({ siteId: z.number(), memberId: z.number() }))
+        .mutation(async ({ ctx, input }) => {
+          await h.removeSiteMember(input.siteId, ctx.user.id, input.memberId);
+          await h.audit(ctx.user.id, "site_member_remove", "site", String(input.siteId), { memberId: input.memberId });
+          return { ok: true as const };
+        }),
     }),
     create: protectedProcedure.input(siteInput).mutation(async ({ ctx, input }) => {
       const tier = tierOf(ctx.user);
@@ -427,6 +481,15 @@ export const appRouter = router({
           // Utility confirmed/overridden by the user (the state-largest is
           // only ever shown as an editable suggestion).
           utilityName: z.string().max(128).optional(),
+          // GAP-O pin-drop mode: coordinates from a map pin the user dropped
+          // (NOT device GPS). Only honored together with prospective intent or
+          // when no verified place was selected — a verified place geocode
+          // always wins for address-grounded sites.
+          pinLat: z.number().min(-90).max(90).optional(),
+          pinLng: z.number().min(-180).max(180).optional(),
+          // Prospective site: user is only CONSIDERING this location (pre-purchase
+          // / pre-lease / pin-drop). Insights render modeled-only, never occupancy.
+          prospective: z.boolean().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -489,10 +552,13 @@ export const appRouter = router({
             climateZone: cascade.climateZone.value,
             utilityName: cascade.utilityName.value ?? undefined,
             isHypothetical: false,
-            // §1b portfolio map: coordinates come only from the VERIFIED place
-            // geocode (user picked the address) — never from raw device GPS.
-            lat: verified?.lat ?? undefined,
-            lng: verified?.lng ?? undefined,
+            // §1b portfolio map: coordinates come from the VERIFIED place
+            // geocode (user picked the address), or — GAP-O — from a map pin
+            // the user explicitly dropped. Never from raw device GPS.
+            lat: verified?.lat ?? input.pinLat ?? undefined,
+            lng: verified?.lng ?? input.pinLng ?? undefined,
+            // GAP-O: prospective flag — a considered location, not an occupied one.
+            prospective: input.prospective ? 1 : 0,
             attrSource: input.buildingType ? "user_entered" : "quick_start_defaults",
             // Batch-45 (pass 1959): per-field refinement record — grounded
             // intake counts a user-confirmed building type as refined from
@@ -531,6 +597,9 @@ export const appRouter = router({
                 : `building prior: ${cascade.buildingType.value}, ${cascade.sqft.value.toLocaleString()} sqft, vintage ${cascade.vintage.value} (${cascade.sqft.source.replace(/_/g, " ")}) — UNCONFIRMED: tap the building-type chip to correct it`,
             ].join("; ") +
             `. These are starting points, not facts — every field is overridable, and each "add detail" chip on the dashboard shows exactly what refining a field unlocks.` +
+            (input.prospective
+              ? ` PROSPECTIVE SITE: you marked this as a location you're considering — every figure here is a modeled what-if for the archetype at this location, not a reading of anyone's actual usage.`
+              : "") +
             (tzNote ? ` ${tzNote.body}` : "") +
             ` ${MODELED_ESTIMATES_DISCLAIMER}`,
           // Batch-44 (pass 1915): the combined note inherits the tz note's
@@ -544,12 +613,27 @@ export const appRouter = router({
             tzAmbiguous: tzNote != null,
             placeId: verified?.placeId,
             buildingTypeConfirmed: input.buildingType != null,
+            prospective: input.prospective === true,
+            pinDropped: input.pinLat != null && input.pinLng != null,
           },
           metrics: { assumptions, cascade: cascadeProvenance(cascade) },
         });
         await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name ?? parse.raw.slice(0, 60), quickStart: true });
-        return { id, parse, assumptions };
+        // GAP-Q reveal moment: one address → candidate providers for all three
+        // commodities. Candidates only — each carries its own honesty note.
+        const utilityTriple = deriveUtilityTriple(cascade.state.value, cascade.city.value);
+        return { id, parse, assumptions, utilityTriple };
       }),
+    /** GAP-Q — the three-utilities reveal for an EXISTING site (viewer-scoped):
+     * candidate electric/gas/water providers derived from its location. */
+    utilityReveal: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
+      return {
+        triple: deriveUtilityTriple(site.state, site.city),
+        knownElectric: site.utilityName ?? null,
+        note: "Candidates derived from the site's location — confirm against actual bills. The electric provider on file (if any) always wins over the candidate.",
+      };
+    }),
     /** Optional refinement path for quick-start sites — each supplied field
      *  replaces its placeholder; attrSource flips to user_entered once any core
      *  attribute (buildingType/sqft/vintage) is provided by the user. */
@@ -568,7 +652,10 @@ export const appRouter = router({
         }),
       )
       .mutation(async ({ ctx, input }) => {
-        const site = await h.getSite(input.siteId, ctx.user.id);
+        // GAP-L: refine is an ACT — owner or facility_manager may do it;
+        // read_only members are blocked with a role-naming error.
+        await h.assertSiteActor(input.siteId, ctx.user.id);
+        const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
         const { siteId, ...patch } = input;
         const provided = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
         if (Object.keys(provided).length === 0) return { ok: true as const, updated: [] as string[] };
@@ -739,6 +826,67 @@ export const appRouter = router({
         await h.audit(ctx.user.id, "site_identity_confirm", "site", String(input.siteId), {});
         return { ok: true as const };
       }),
+    /** GAP-J — dimensional receipts: every dimension the model uses, WITH its
+     * source, side by side with what building geometry implies. When the profile
+     * sqft diverges >20% from geometry-derived GFA (footprint × stories), the
+     * client surfaces a QUESTION (never a silent override) — the user's answer
+     * flows through sites.refine like any other refinement. */
+    dimensionReceipts: protectedProcedure
+      .input(z.object({ siteId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        const geom = await h.getSiteGeometry(input.siteId, ctx.user.id);
+        const profileSqft = site.sqft ?? null;
+        const profileSource =
+          site.attrSource === "user_entered" || site.attrSource === "user_confirmed"
+            ? "you provided / confirmed it"
+            : site.attrSource === "assessor"
+              ? "county assessor record"
+              : "building-stock prior for the type (placeholder)";
+        const footprintSqft = geom?.footprintSqft ?? null;
+        const stories = geom?.stories ?? null;
+        const geometryGfaSqft = footprintSqft != null && stories != null && stories > 0 ? footprintSqft * stories : null;
+        const geometrySource = geom?.footprintSource
+          ? `${geom.footprintSource.replace(/_/g, " ")} footprint × ${stories} ${stories === 1 ? "story" : "stories"}`
+          : null;
+        let divergencePct: number | null = null;
+        if (profileSqft != null && profileSqft > 0 && geometryGfaSqft != null && geometryGfaSqft > 0) {
+          divergencePct = Math.abs(geometryGfaSqft - profileSqft) / profileSqft;
+        }
+        const DIVERGENCE_QUESTION_THRESHOLD = 0.2;
+        return {
+          receipts: [
+            {
+              dimension: "floor_area_sqft",
+              valueInUse: profileSqft,
+              source: profileSource,
+              usedBy: "baseline scaling, EUI benchmark percentile, per-sqft opportunity sizing",
+            },
+            ...(geometryGfaSqft != null
+              ? [
+                  {
+                    dimension: "geometry_derived_gfa_sqft",
+                    valueInUse: Math.round(geometryGfaSqft),
+                    source: geometrySource ?? "building geometry",
+                    usedBy: "cross-check only — never silently replaces your floor area",
+                  },
+                ]
+              : []),
+          ],
+          divergence:
+            divergencePct != null && divergencePct > DIVERGENCE_QUESTION_THRESHOLD
+              ? {
+                  pct: Math.round(divergencePct * 100),
+                  profileSqft,
+                  geometryGfaSqft: Math.round(geometryGfaSqft!),
+                  question: `Your profile says ${profileSqft!.toLocaleString()} sqft, but the building footprint × stories works out to about ${Math.round(geometryGfaSqft!).toLocaleString()} sqft (${geometrySource}). Which is closer to right?`,
+                  disclosure:
+                    "Geometry-derived floor area is an estimate too (footprint × story count) — basements, mezzanines, and unconditioned space all blur it. We ask instead of overriding.",
+                }
+              : null,
+          thresholdPct: DIVERGENCE_QUESTION_THRESHOLD * 100,
+        };
+      }),
     /** v1.19 §5 stage 4 — away mode as a promise: one toggle (with optional
      * dates) flips the product's voice. The watchdog itself runs inside the
      * analysis pipeline; this mutation just records the window and audits it. */
@@ -763,6 +911,102 @@ export const appRouter = router({
         await h.audit(ctx.user.id, "site_away_mode", "site", String(input.siteId), { awayMode: input.awayMode });
         return { ok: true as const };
       }),
+    /** GAP-A / AC11 — resolve the solar net/gross gate. One answer releases the
+     * paused insights on the next analysis run:
+     * - net: meter records consumption minus solar (most net-metered homes)
+     * - gross: meter records total consumption (separate generation meter)
+     * - no_solar: user says there is no PV here — gate dismissed, disclosed. */
+    resolvePv: protectedProcedure
+      .input(z.object({ siteId: z.number(), answer: z.enum(["net", "gross", "no_solar"]) }))
+      .mutation(async ({ ctx, input }) => {
+        const patch =
+          input.answer === "net"
+            ? { pvDetectionStatus: "confirmed_net" as const, netMeteringBasis: "net" as const, hasSolar: true }
+            : input.answer === "gross"
+              ? { pvDetectionStatus: "confirmed_gross" as const, netMeteringBasis: "gross" as const, hasSolar: true }
+              : { pvDetectionStatus: "dismissed" as const };
+        await h.updateSite(input.siteId, ctx.user.id, patch);
+        await h.audit(ctx.user.id, "pv_gate_resolved", "site", String(input.siteId), { answer: input.answer });
+        return {
+          ok: true as const,
+          released: true,
+          note:
+            input.answer === "no_solar"
+              ? "Noted — no solar here. If the midday-dip pattern persists we may ask again, because the insights depend on reading your shape correctly."
+              : "Thanks — re-run the analysis and the paused insights will come back, now interpreted on the right basis.",
+        };
+      }),
+    /** AC12 — occupancy change re-base: records WHEN the building's occupancy
+     * changed (move-in/out, new shift, tenant turnover). Verdicts issued before
+     * the change keep their period; baselines fitted after it are disclosed. */
+    markOccupancyChange: protectedProcedure
+      .input(z.object({ siteId: z.number(), changedAt: z.number().optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const changedAt = input.changedAt ?? Date.now();
+        await h.updateSite(input.siteId, ctx.user.id, { occupancyChangedAt: changedAt });
+        await h.audit(ctx.user.id, "occupancy_change_marked", "site", String(input.siteId), { changedAt });
+        return { ok: true as const, changedAt };
+      }),
+    /** AC13 — equipment inventory: list rows (inferred until confirmed). */
+    equipment: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      return h.listEquipment(input.siteId, ctx.user.id);
+    }),
+    /** AC13 — confirm/edit an inventory row: providing an install year or a
+     * label flips source to user_confirmed so re-analysis never clobbers it. */
+    updateEquipment: protectedProcedure
+      .input(
+        z.object({
+          id: z.number(),
+          label: z.string().max(120).optional(),
+          installYear: z.number().int().min(1900).max(2100).nullable().optional(),
+          serviceLifeYears: z.number().int().min(1).max(60).optional(),
+          notes: z.string().max(500).nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { id, ...rest } = input;
+        await h.updateEquipment(id, ctx.user.id, { ...rest, source: "user_confirmed" });
+        await h.audit(ctx.user.id, "equipment_confirmed", "equipment", String(id), rest);
+        return { ok: true as const };
+      }),
+    /** AC14 — log a production period (water pumped, units produced…). Any site
+     * can log any pack metric; the KPI only renders from real logged periods. */
+    addProduction: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          metricKey: z.string().max(48),
+          periodStart: z.number(),
+          periodEnd: z.number(),
+          quantity: z.number().positive(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (input.periodEnd <= input.periodStart) throw new TRPCError({ code: "BAD_REQUEST", message: "Period end must be after period start." });
+        await h.getSite(input.siteId, ctx.user.id); // tenancy
+        const pack = VERTICAL_PACKS.find((p) => p.metricKey === input.metricKey);
+        if (!pack) throw new TRPCError({ code: "BAD_REQUEST", message: "Unknown production metric." });
+        const id = await addProductionPeriod({
+          siteId: input.siteId,
+          userId: ctx.user.id,
+          metricKey: pack.metricKey,
+          metricLabel: pack.metricLabel,
+          unit: pack.unit,
+          periodStart: input.periodStart,
+          periodEnd: input.periodEnd,
+          quantity: input.quantity,
+        });
+        await h.audit(ctx.user.id, "production_logged", "site", String(input.siteId), { metricKey: pack.metricKey, quantity: input.quantity });
+        return { id };
+      }),
+    listProduction: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      await h.getSite(input.siteId, ctx.user.id);
+      return listProduction(input.siteId, ctx.user.id);
+    }),
+    deleteProduction: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
+      await deleteProductionPeriod(input.id, ctx.user.id);
+      return { ok: true as const };
+    }),
     /** Full site removal (cascade: meters, intervals, bills, analytics, geometry,
      * group memberships). Uploads are detached, not deleted — file provenance survives. */
     delete: protectedProcedure.input(z.object({ siteId: z.number() })).mutation(async ({ ctx, input }) => {
@@ -1005,9 +1249,30 @@ export const appRouter = router({
         const lfWeight = lfRows.reduce((a, r) => a + (r.annualUsageKwh ?? 0), 0);
         const portfolioLoadFactor =
           lfWeight > 0 ? lfRows.reduce((a, r) => a + (r.loadFactor ?? 0) * ((r.annualUsageKwh ?? 0) / lfWeight), 0) : null;
+        // GAP-M — utility-exposure rollup: per-provider share of annual spend
+        // across the portfolio. Sites without a known provider or analyzed cost
+        // are grouped honestly under "Unknown" rather than dropped.
+        const exposureMap = new Map<string, { annualCostUsd: number; siteCount: number }>();
+        for (const r of siteRollups) {
+          const key = r.utilityName?.trim() || "Unknown provider";
+          const cur = exposureMap.get(key) ?? { annualCostUsd: 0, siteCount: 0 };
+          cur.annualCostUsd += r.annualCostUsd ?? 0;
+          cur.siteCount += 1;
+          exposureMap.set(key, cur);
+        }
+        const exposureTotal = Array.from(exposureMap.values()).reduce((a, v) => a + v.annualCostUsd, 0);
+        const utilityExposure = Array.from(exposureMap.entries())
+          .map(([utility, v]) => ({
+            utility,
+            siteCount: v.siteCount,
+            annualCostUsd: Math.round(v.annualCostUsd),
+            sharePct: exposureTotal > 0 ? Math.round((v.annualCostUsd / exposureTotal) * 100) : null,
+          }))
+          .sort((a, b) => b.annualCostUsd - a.annualCostUsd);
         return {
           entities: allEntities,
           sites: siteRollups,
+          utilityExposure,
           totals: {
             siteCount: siteRollups.length,
             analyzedCount: siteRollups.filter((r) => r.analyzed).length,
@@ -1267,6 +1532,21 @@ export const appRouter = router({
         const dataUrl = `data:${input.mime};base64,${input.contentBase64}`;
         const outcome = await extractBill(dataUrl, ctx.user.id, tierOf(ctx.user));
         await h.audit(ctx.user.id, "bill_ocr", "site", String(input.siteId), { outcome: outcome.status });
+        // v1.22 parser-drift monitor: per-template (LLM extractor) success
+        // tracking — sustained drops raise a template-update task before users
+        // feel it. Fail-open: telemetry must never break ingest.
+        await recordParseOutcome("llm_bill_extractor_v1", outcome.status === "extracted").catch(() => undefined);
+        // v1.22 unknown-tariff crowd discovery: a parsed rate-schedule name that
+        // matches no record we carry aggregates across users; N≥3 occurrences
+        // at one utility raises a create-template task.
+        if (outcome.status === "extracted") {
+          const rawName = outcome.bill.rateScheduleName?.value?.trim();
+          const rawUtility = outcome.bill.utilityName?.value?.trim();
+          if (rawName && rawUtility) {
+            const known = await h.findTariffByName(rawUtility, rawName).catch(() => null);
+            if (!known) await recordUnknownTariff(rawUtility, rawName).catch(() => undefined);
+          }
+        }
         return outcome;
       }),
   }),
@@ -1288,6 +1568,9 @@ export const appRouter = router({
           rateScheduleName: z.string().max(255).optional(),
           source: z.enum(["manual", "parsed_pdf", "parsed_image"]).default("manual"),
           supersedesBillId: z.number().optional(),
+          /** GAP-G §2.6 — estimated meter reads: utilities sometimes bill on an
+           * estimated read and true-up later; usage shifts between months. */
+          readType: z.enum(["actual", "estimated"]).default("actual"),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -1302,9 +1585,11 @@ export const appRouter = router({
             totalCost: input.totalCostUsd,
             source: input.source,
             supersedesBillId: input.supersedesBillId,
+            readType: input.readType,
           },
           ctx.user.id,
         );
+        await maybeReconcileBill(id.id, input.meterId, ctx.user.id);
         return { id };
       }),
     /** Progressive participation (Jul 2026): persist a bill against a SITE that
@@ -1321,6 +1606,7 @@ export const appRouter = router({
           billedDemandKw: z.number().nullable().optional(),
           totalCostUsd: z.number(),
           source: z.enum(["manual", "parsed_pdf", "parsed_image"]).default("parsed_image"),
+          readType: z.enum(["actual", "estimated"]).default("actual"),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -1368,10 +1654,12 @@ export const appRouter = router({
             demandBilledSource: input.billedDemandKw != null ? "parsed_bill" : null,
             totalCost: input.totalCostUsd,
             source: input.source,
+            readType: input.readType,
           },
           ctx.user.id,
         );
         await h.audit(ctx.user.id, "bill_created", "bill", String(id), { siteId: input.siteId, quickStart: true });
+        await maybeReconcileBill(id.id, meter.id, ctx.user.id);
         return { id, meterId: meter.id };
       }),
   }),
@@ -1545,12 +1833,37 @@ export const appRouter = router({
       const meter = siteMeters.find((m) => m.commodity === "electric" && m.meterRole === "main") ?? siteMeters.find((m) => m.commodity === "electric") ?? null;
 
       const evaluatedAt = Date.now();
+      // AC12 occupancy re-base: verdicts are attributed to the occupancy period
+      // in effect at implementation time. If the site's occupancy changed AFTER
+      // this measure went in, the verdicts issued before the change keep their
+      // period label — they are never silently re-based to the new occupancy.
+      const occChanged = site.occupancyChangedAt ?? null;
+      const occupancyPeriod =
+        occChanged == null
+          ? "baseline"
+          : impl.implementedAt < occChanged
+            ? `pre-${new Date(occChanged).toISOString().slice(0, 7)}`
+            : `post-${new Date(occChanged).toISOString().slice(0, 7)}`;
       const persistAndReturn = async (result: ReturnType<typeof evaluateImplementation>) => {
+        // AC12 model pinning: verdicts already issued under an older engine are
+        // not silently re-scored — a version change is disclosed on the result.
+        if (impl.engineVersion && impl.engineVersion !== ENGINE_VERSION) {
+          result.disclosures.push(
+            `Analytics engine updated since these verdicts were first issued (${impl.engineVersion} → ${ENGINE_VERSION}). Past monthly verdicts keep their original scoring; only new months use the current engine.`,
+          );
+        }
+        if (occChanged != null && impl.implementedAt < occChanged) {
+          result.disclosures.push(
+            `Occupancy changed on ${new Date(occChanged).toLocaleDateString()} — months after that date are compared against a shifted usage pattern and are scored conservatively rather than re-based.`,
+          );
+        }
         await h.updateMeasureVerdicts(input.id, ctx.user.id, {
           status: result.status,
           verdicts: result.monthVerdicts,
           verifiedSavingsUsd: result.verifiedSavingsUsd,
           lastEvaluatedAt: evaluatedAt,
+          engineVersion: impl.engineVersion ?? ENGINE_VERSION,
+          occupancyPeriod,
         });
         return { ...result, lastEvaluatedAt: evaluatedAt };
       };
@@ -1635,6 +1948,20 @@ export const appRouter = router({
       );
       const result = evaluateImplementation(months, fit, blendedRate, impl.expectedSavingsUsd ?? null);
       result.disclosures.push(rateDisclosure);
+      // §2.6 estimated reads: if any bill overlapping the evaluation window was
+      // billed on an ESTIMATED meter read, the months it touches are disclosed —
+      // an estimated read can shift usage between adjacent months and produce a
+      // phantom saving/regression that reverses when the true-up bill lands.
+      const siteBills = await h.listBills(impl.siteId, ctx.user.id);
+      const estimatedBills = siteBills.filter(
+        (b) => b.readType === "estimated" && new Date(b.periodEnd).getTime() >= impl.implementedAt,
+      );
+      if (estimatedBills.length > 0) {
+        const monthsTouched = Array.from(new Set(estimatedBills.map((b) => String(b.periodEnd).slice(0, 7)))).join(", ");
+        result.disclosures.push(
+          `${estimatedBills.length} bill${estimatedBills.length === 1 ? " was" : "s were"} issued on an estimated meter read (${monthsTouched}). Estimated reads can shift usage between months — verdicts for those months may move when the utility trues up.`,
+        );
+      }
       if (!coeffs || normals.length === 0) {
         result.disclosures.push(
           "No fitted counterfactual baseline exists for this site — months cannot be evaluated until an analysis with ≥4 months of usage history has run.",
@@ -1696,7 +2023,7 @@ export const appRouter = router({
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
         // Build baseline hourly profile: measured intervals if available, else archetype
-        const { hourly, loadBasis, confidence, extrapolated, structure, co2eLbPerMwh, climateZone, tariffBasisDisclosure, archetypeZoneDisclosure } = await buildScenarioBasis(site, ctx.user.id);
+        const { hourly, loadBasis, confidence, extrapolated, structure, co2eLbPerMwh, climateZone, tariffBasisDisclosure, archetypeZoneDisclosure, nem } = await buildScenarioBasis(site, ctx.user.id);
         const t0 = Date.now();
         const scenarioInput: ScenarioInput = {
           kind: input.kind,
@@ -1708,7 +2035,32 @@ export const appRouter = router({
           evAnnualKwh: input.evAnnualKwh,
           capexUsd: input.capexUsd,
         };
-        const results = runScenario(hourly, scenarioInput, structure, climateZone, co2eLbPerMwh, confidence, extrapolated);
+        const results = runScenario(hourly, scenarioInput, structure, climateZone, co2eLbPerMwh, confidence, extrapolated, nem);
+        // AC15 — incentives layer: attach live (never-expired) incentive matches
+        // with pre- AND post-incentive paybacks, named sources, and who-pays/
+        // who-benefits. Tenure-honest: renters never see owner-only credits.
+        try {
+          const measureKey = input.kind === "solar_battery" ? "solar" : input.kind === "efficiency" ? "led_retrofit" : input.kind;
+          const annualSavings = Math.max(0, -((results as unknown as { siteTotalDeltaCost?: number }).siteTotalDeltaCost ?? 0));
+          const incEcon = await incentiveEconomics({
+            measureKey,
+            state: site.state ?? null,
+            utilityName: site.utilityName ?? null,
+            sectorClass:
+              site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? ("residential" as const) : ("commercial" as const),
+            capexUsd: input.capexUsd ?? 0,
+            annualSavingsUsd: annualSavings,
+            tenure: site.tenure ?? null,
+          });
+          if (incEcon.matches.length) {
+            (results as unknown as Record<string, unknown>).incentives = incEcon;
+            results.disclosures.push(
+              `Incentives: ${incEcon.matches.map((m) => m.name).join("; ")} — payback shown both before (${incEcon.paybackPreYears ?? "n/a"} yr) and after (${incEcon.paybackPostYears ?? "n/a"} yr) incentives. ${incEcon.matches[0].disclosure}`,
+            );
+          }
+        } catch (e) {
+          console.warn("[incentives] skipped:", e instanceof Error ? e.message : String(e));
+        }
         if (tariffBasisDisclosure) results.disclosures.push(tariffBasisDisclosure);
         if (archetypeZoneDisclosure) results.disclosures.push(archetypeZoneDisclosure);
         if (loadBasis === "archetype_scaled") {
@@ -1820,6 +2172,7 @@ export const appRouter = router({
           })),
           sectorClass,
           site.hasSolar ?? false,
+          basis.nem,
         );
         if (basis.tariffBasisDisclosure) result.disclosures.push(basis.tariffBasisDisclosure);
         if (basis.archetypeZoneDisclosure) result.disclosures.push(basis.archetypeZoneDisclosure);
@@ -1907,6 +2260,7 @@ export const appRouter = router({
               })),
               sectorClass,
               site.hasSolar ?? false,
+              basis.nem,
             );
             perSite.push({
               siteId,
@@ -1998,6 +2352,18 @@ export const appRouter = router({
       await seeded();
       return h.listSeederRuns();
     }),
+    /** v1.22 S-LIFECYCLE: the freshness ledger — every seeded source with its
+     * age vs cadence, plus never-bill-verified tariff findings and open
+     * template tasks. Public: staleness is a disclosure, not a secret. */
+    dataFreshness: publicProcedure.query(async () => {
+      await seeded();
+      const [seeds, tariffFindings, templateTasks] = await Promise.all([
+        assessSeedFreshness(),
+        sweepUnverifiedTariffs(),
+        h.listOpenTemplateTasks(),
+      ]);
+      return { seeds, tariffFindings, templateTasks };
+    }),
     labels: publicProcedure.query(() => ({
       cpEstimated: LABEL_CP_ESTIMATED,
       prototypeArchetype: LABEL_PROTOTYPE_ARCHETYPE,
@@ -2087,6 +2453,21 @@ export const appRouter = router({
       await h.audit(ctx.user.id, "data_export", "user", String(ctx.user.id), { tables: Object.keys(data) });
       return data;
     }),
+    /** GAP-K (guardrail §8.2) — delete everything. The confirm phrase is
+     * enforced server-side (not just a UI nicety); the response states exactly
+     * what was removed and what remains (the auth identity row, plus one
+     * tombstone audit entry evidencing the deletion). Irreversible. */
+    deleteAllData: protectedProcedure
+      .input(z.object({ confirmPhrase: z.literal("delete my account") }))
+      .mutation(async ({ ctx }) => {
+        const result = await h.deleteAllUserData(ctx.user.id);
+        return {
+          ok: true as const,
+          sitesDeleted: result.sitesDeleted,
+          note:
+            "All your data — sites, meters, readings, bills, analyses, insights, scenarios, uploads, reports, equipment, memberships, and audit history — has been deleted. What remains: your sign-in identity (so you can log in again to an empty account) and a single audit entry recording this deletion. This cannot be undone.",
+        };
+      }),
     /** §3f lifecycle: digest settings — quiet by default (opt-in), anchored to
      * the user's bill-cycle day. The digest itself (send infra) is future work;
      * the setting is real and persisted so the contract is honest. */
@@ -2196,6 +2577,50 @@ export const appRouter = router({
         const csv = input.kind === "practitioner" ? practitionerCsv(data) : null;
         return { token, data, csv };
       }),
+    /** GAP-N — ENERGY STAR Portfolio Manager–compatible CSV across every site
+     * (Pro). Rows come from persisted summary insights + baselines only; sites
+     * without an analysis export with blank figures, never fabricated ones. */
+    portfolioExport: protectedProcedure.mutation(async ({ ctx }) => {
+      requireTier(tierOf(ctx.user), "pro", "Portfolio Manager export");
+      const userSites = await h.listSites(ctx.user.id);
+      const rows: PortfolioExportRow[] = [];
+      for (const s of userSites) {
+        const insightRows = await h.listInsights(s.id, ctx.user.id);
+        const summary = insightRows.find((i) => i.kind === "summary");
+        const metrics = (summary?.metrics ?? {}) as {
+          currentCost?: { total?: number };
+          annualUsageKwh?: number;
+          usage?: { annualKwh?: number };
+        };
+        const annualUsageKwh = metrics.annualUsageKwh ?? metrics.usage?.annualKwh ?? null;
+        const baselineRow = await h.getLatestBaseline(s.id, ctx.user.id).catch(() => null);
+        const params = (baselineRow?.params ?? null) as { confidenceLabel?: string; confidence?: string } | null;
+        const impls = await h.listMeasureImplementations(s.id, ctx.user.id);
+        rows.push({
+          siteId: s.id,
+          siteName: s.name,
+          buildingType: s.buildingType,
+          state: s.state,
+          zip: s.zip,
+          sqft: s.sqft,
+          annualUsageKwh,
+          annualCostUsd: metrics.currentCost?.total ?? null,
+          euiKwhPerSqft: annualUsageKwh != null && s.sqft ? annualUsageKwh / s.sqft : null,
+          euiBasis: params?.confidenceLabel ?? params?.confidence ?? null,
+          verifiedSavingsUsd: impls.reduce((a, i) => a + (i.verifiedSavingsUsd ?? 0), 0),
+          analyzed: summary != null,
+        });
+      }
+      await h.audit(ctx.user.id, "report_generate", "portfolio", "all", { kind: "portfolio_manager_csv", siteCount: rows.length });
+      return { csv: portfolioManagerCsv(rows), siteCount: rows.length };
+    }),
+    /** GAP-N — portfolio verified-savings edition (Pro): cumulative verified
+     * headline across all sites + per-site verdict ledgers. Only persisted
+     * implementation verdicts count toward the verified total. */
+    portfolioVerified: protectedProcedure.query(async ({ ctx }) => {
+      requireTier(tierOf(ctx.user), "pro", "Portfolio Verified Savings Statement");
+      return assemblePortfolioVerified(ctx.user.id);
+    }),
     /** Public verify endpoint — the token is the capability. Shows the printed
      * snapshot next to the CURRENT figures so a forwarded PDF is never silently
      * stale. Only headline numbers, never account details. */
@@ -2457,6 +2882,12 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
     // candidate list and which row is the current cost basis.
     chosenTariffId: chosen.id,
     tariffRows,
+    // GAP-T §2.3: NEM banking rules from the chosen tariff row — solar
+    // scenarios must disclose which export-credit regime the economics assume.
+    nem: {
+      banking: (chosen as { nemBanking?: string | null }).nemBanking ?? null,
+      creditExpiry: (chosen as { nemCreditExpiry?: string | null }).nemCreditExpiry ?? null,
+    },
   };
 }
 

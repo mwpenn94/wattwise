@@ -47,6 +47,11 @@ const EN = {
   "footer.terms": "Terms of use",
   "footer.contact": "Contact",
   "footer.methodology": "Methodology",
+  // GAP-R broader public-funnel coverage: section headings on the landing page
+  "howit.title.pre": "One pipeline, actual ",
+  "howit.title.em": "or hypothetical",
+  "howit.sub": "Measured intervals and archetype-synthesized buildings flow through the identical analytics path — the only difference is the provenance label on the output.",
+  "tiers.title": "Tiers",
 } as const;
 
 export type StringKey = keyof typeof EN;
@@ -73,9 +78,49 @@ const ES: Partial<Record<StringKey, string>> = {
   "footer.terms": "Términos de uso",
   "footer.contact": "Contacto",
   "footer.methodology": "Metodología",
+  "howit.title.pre": "Una sola tubería, real ",
+  "howit.title.em": "o hipotética",
+  "howit.sub": "Los intervalos medidos y los edificios sintetizados por arquetipo pasan por la misma ruta analítica — la única diferencia es la etiqueta de procedencia en el resultado.",
+  "tiers.title": "Niveles",
 };
 
 const TABLES: Record<Lang, Partial<Record<StringKey, string>>> = { en: EN, es: ES };
+
+/** GAP-R — the public-funnel keys a Spanish speaker hits BEFORE trusting us
+ * with data. The parity CI test enforces 100% ES coverage of this list, so a
+ * new funnel string can't ship EN-only by accident. Console/analysis surfaces
+ * are intentionally not on this list (disclosed via lang.consoleNote). */
+export const REQUIRED_PUBLIC_FUNNEL: readonly StringKey[] = [
+  "hero.tagline",
+  "hero.sub",
+  "cta.tryFree",
+  "cta.seeEstimate",
+  "cta.signIn",
+  "ladder.title",
+  "ladder.estimate",
+  "ladder.good",
+  "ladder.great",
+  "ladder.measured",
+  "ladder.promise",
+  "estimator.addressPrompt",
+  "estimator.disclaimer",
+  "lang.label",
+  "lang.consoleNote",
+  "nav.howItWorks",
+  "nav.pricing",
+  "footer.privacy",
+  "footer.terms",
+  "footer.contact",
+  "footer.methodology",
+  "howit.title.pre",
+  "howit.title.em",
+  "howit.sub",
+  "tiers.title",
+] as const;
+
+/** Test-only introspection: the raw tables, exported so the parity spec can
+ * audit coverage without duplicating string lists. */
+export const I18N_TABLES = { EN, ES } as const;
 
 /* ---------- store ---------- */
 let current: Lang = (() => {

@@ -52,6 +52,10 @@ export default function RefineChips({ siteId, site, onRefined }: Props) {
   const utils = trpc.useUtils();
   const refine = trpc.sites.refine.useMutation();
   const confirmIdentity = trpc.sites.confirmIdentity.useMutation();
+  // GAP-J dimensional receipts: when profile sqft and geometry-derived GFA
+  // diverge >20%, the panel asks WHICH is right — never silently overrides.
+  const receipts = trpc.sites.dimensionReceipts.useQuery({ siteId }, { staleTime: 60_000 });
+  const [dimAnswered, setDimAnswered] = useState(false);
   const [sqft, setSqft] = useState("");
   const [vintage, setVintage] = useState("");
   const [loc, setLoc] = useState({ state: "", zip: "" });
@@ -116,6 +120,40 @@ export default function RefineChips({ siteId, site, onRefined }: Props) {
           Quick-start placeholders in effect — add detail only if you want to
         </p>
       </div>
+      {receipts.data?.divergence && !dimAnswered && (
+        <div className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/[0.05] px-3 py-2">
+          <p className="text-sm">{receipts.data.divergence.question}</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">{receipts.data.divergence.disclosure}</p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-3 text-xs"
+              disabled={refine.isPending}
+              onClick={async () => {
+                await apply({ sqft: receipts.data!.divergence!.geometryGfaSqft }, "Floor area (geometry-derived)");
+                setDimAnswered(true);
+              }}
+            >
+              Use ~{receipts.data.divergence.geometryGfaSqft.toLocaleString()} sqft (geometry)
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-3 text-xs"
+              onClick={() => {
+                setDimAnswered(true);
+                toast.success("Keeping your profile floor area — the geometry figure stays visible as a cross-check, nothing changed.");
+              }}
+            >
+              Keep {receipts.data.divergence.profileSqft?.toLocaleString()} sqft (profile)
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 px-3 text-xs" onClick={() => setOpenChip("sqft")}>
+              Neither — enter the real value
+            </Button>
+          </div>
+        </div>
+      )}
       {identityPhrase && !identityAnswered && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-background/60 px-3 py-2">
           <p className="text-sm">

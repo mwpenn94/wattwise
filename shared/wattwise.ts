@@ -10,6 +10,11 @@ export const LABEL_NORMAL_YEAR = "normal-year basis" as const;
 export const MODELED_ESTIMATES_DISCLAIMER =
   "All outputs are modeled estimates — not a professional energy audit, engineering study, or financial/tax advice. Savings projections carry the stated confidence ranges." as const;
 
+/** AC12 model pinning: the analytics engine version stamped on verdicts at
+ * issuance. Bump when baseline/verdict math changes materially — verdicts
+ * pinned to an older version are disclosed, never silently re-scored. */
+export const ENGINE_VERSION = "ww-2026.07" as const;
+
 /* ---------- Free-tier economics ---------- */
 export const FREE_TIER_MAX_COST_USD = 0.2;
 export const FREE_TIER_MONTHLY_LLM_BUDGET_USD = 0.5;

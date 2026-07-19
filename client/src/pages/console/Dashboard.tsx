@@ -16,7 +16,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Activity, BarChart3, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown, Zap } from "lucide-react";
+import { Activity, BarChart3, Droplets, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown, Zap } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { decimateForChart, fmtNum, fmtUsd, type ChartPoint } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
 import { InsightCard, chipFromConfidence } from "@/components/InsightCard";
@@ -659,6 +660,60 @@ export default function Dashboard() {
             />
           </div>
         )}
+
+      {/* GAP-S winter-sewer story card: the §2.57 sewer-on-winter-water linkage
+          deserves narrative treatment — the "pays twice" mechanism is the story,
+          not just a row in the ranking. The row STAYS in the ranked list below
+          (dollar ordering must remain honest); this card explains the why. */}
+      {(() => {
+        const sewer = oppRows.find((o) => o.measure === "winter_water_sewer");
+        if (!sewer) return null;
+        const disclosures = ((sewer.provenance as Record<string, unknown> | null)?.disclosures as string[] | undefined) ?? [];
+        return (
+          <Card className="mt-4 border-sky-500/40 bg-sky-500/5">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 font-display text-base">
+                <Droplets className="h-4 w-4 text-sky-500" /> Your winter water use sets next year&apos;s sewer bill
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-4 md:grid-cols-[1fr_auto]">
+                <div>
+                  <p className="text-sm leading-relaxed">
+                    Most municipal utilities set sewer charges from your <span className="font-medium">winter</span> water usage — the
+                    winter-quarter-average convention, because winter use is nearly all indoor and proxies what actually reaches the
+                    sewer. That means every gallon you cut this winter pays <span className="font-medium">twice</span>: on the water
+                    bill now, and on twelve months of sewer billing set by that winter window.
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">{sewer.description}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" className="bg-background" onClick={() => { window.location.href = `/app/scenarios?site=${activeSiteId}&measure=${sewer.measure}`; }}>
+                      Model this in Scenarios
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setMarkTarget({ id: sewer.id, measure: sewer.measure, title: sewer.title, expectedSavingsUsd: sewer.estCostSavingsPerYr ?? null })}>
+                      I did this
+                    </Button>
+                  </div>
+                </div>
+                <div className="flex flex-col items-start gap-1 md:items-end">
+                  {sewer.estCostSavingsPerYr != null ? (
+                    <>
+                      <span className="font-display text-2xl font-bold text-sky-600 dark:text-sky-400">{fmtUsd(sewer.estCostSavingsPerYr)}/yr</span>
+                      <span className="text-[11px] text-muted-foreground">water + sewer combined, screening band</span>
+                    </>
+                  ) : (
+                    <span className="text-sm text-muted-foreground">No dollar figure yet (needs a priced rate)</span>
+                  )}
+                  <Badge variant="outline" className="mt-1 border-sky-500/40 text-[10px] text-sky-600 dark:text-sky-400">convention-based estimate</Badge>
+                </div>
+              </div>
+              {disclosures.length > 0 && (
+                <p className="mt-3 border-t border-border/60 pt-2 text-[11px] leading-relaxed text-muted-foreground">{disclosures[0]}</p>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       <Card className="mt-4 border-border/70">
         <CardHeader className="pb-2">

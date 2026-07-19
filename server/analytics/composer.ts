@@ -112,6 +112,8 @@ export function composeMeasures(
   sectorClass: string,
   /** v1.18: solar status of the site — gates technology-conditioned plans in the re-sweep */
   siteHasSolar = false,
+  /** GAP-T §2.3: NEM banking rules from the current cost-basis tariff row. */
+  nem?: { banking?: string | null; creditExpiry?: string | null },
 ): ComposedResult {
   const disclosures: string[] = [
     `Composed plan modeled on ${LABEL_NORMAL_YEAR} hourly profile — measures compose on one profile; savings are never summed independently.`,
@@ -128,7 +130,7 @@ export function composeMeasures(
       endUseFractions,
       capexUsd: m.capexUsd,
     };
-    const r = runScenario(baselineHourly, input, structure, climateZone, co2eLbPerMwh, baselineConfidence, extrapolated);
+    const r = runScenario(baselineHourly, input, structure, climateZone, co2eLbPerMwh, baselineConfidence, extrapolated, nem);
     return {
       key: m.key,
       label: m.label,
@@ -182,6 +184,21 @@ export function composeMeasures(
     if (!solarZoneMapped(climateZone)) {
       disclosures.push(
         `Climate zone "${climateZone}" has no mapped solar-yield entry — a generic ${SOLAR_FALLBACK_YIELD_KWH_PER_KW.toLocaleString()} kWh/kW-yr default was used; treat solar production as low confidence.`,
+      );
+    }
+    // GAP-T §2.3: composed baskets with solar carry the same export-credit
+    // regime disclosure as single scenarios — banking rules shift the payback.
+    if (nem?.banking === "kwh") {
+      disclosures.push(
+        "Export-credit basis: this rate banks exports as kWh credits (net metering). Basket savings assume credits offset later usage at the full retail rate.",
+      );
+    } else if (nem?.banking === "dollar") {
+      disclosures.push(
+        "Export-credit basis: this rate credits exports in dollars at an export rate below retail (net billing) — oversizing the array returns less than the retail rate suggests.",
+      );
+    } else {
+      disclosures.push(
+        "Export-credit basis unknown for this rate — confirm your utility's net-metering vs net-billing rules; annual true-up forfeiture can reduce first-year value.",
       );
     }
   }

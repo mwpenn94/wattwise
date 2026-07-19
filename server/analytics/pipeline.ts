@@ -36,6 +36,8 @@ import { benchmarkPercentile, rankOpportunities, OpportunityCandidate } from "./
 import * as h from "../dbHelpers";
 import { computeCostUsd, recordMeterEvent } from "./costModel";
 import { computeVacantBaseline, evaluateAwayWatchdog, tsInAwayWindow } from "../awayMode";
+import { detectPvSignature, PV_GATED_INSIGHT_KINDS, pvGateMessage } from "./pvDetection";
+import { staleSeedsForDomain } from "../seedLifecycle";
 import type { Site, Meter } from "../../drizzle/schema";
 
 /**
@@ -169,6 +171,32 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // Cycle 3 (passes 36/66): all hour-of-day logic runs in the meter's IANA
   // timezone, never the server's.
   const tz = meter?.timezone ?? DEFAULT_TZ;
+
+  /* GAP-A / AC11 / AC18 — PV signature detection + net/gross gate.
+   * Runs only on electric interval data for sites that have NOT declared solar
+   * and have no prior detection verdict. A detected-but-unresolved signature
+   * BLOCKS load-shape-dependent insights further down (never silently renders
+   * them) until the user answers net vs gross. */
+  let pvGateActive = false;
+  let pvDetection: ReturnType<typeof detectPvSignature> | null = null;
+  const pvStatus = site.pvDetectionStatus ?? "none";
+  if (hasIntervals && meter?.commodity === "electric") {
+    if (!site.hasSolar && pvStatus === "none") {
+      pvDetection = detectPvSignature(points, tz);
+      if (pvDetection.detected) {
+        pvGateActive = true;
+        await h.updateSite(site.id, userId, {
+          pvDetectionStatus: "detected_unconfirmed",
+          pvDetectedAt: Date.now(),
+        });
+        narrate("Detected a solar-panel usage fingerprint — pausing shape-dependent insights until you confirm whether the meter is net or gross");
+      }
+    } else if (pvStatus === "detected_unconfirmed") {
+      // Still unresolved from a prior run — keep the gate up.
+      pvGateActive = true;
+      pvDetection = detectPvSignature(points, tz);
+    }
+  }
   const demand = hasIntervals ? computeDemandAnalytics(points, 4, [6, 7, 8, 9], tz) : null;
   narrate(
     hasIntervals
@@ -826,9 +854,205 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       metrics: { climateZone },
     });
   }
+  /* AC16b — building performance-standard compliance card. Only renders when
+     a seeded program plausibly applies (jurisdiction + sector + floor area);
+     shows deadline countdown, EUI vs target, path-to-target, and penalty
+     exposure. EUI basis (measured vs estimated) is always disclosed. */
+  try {
+    const { assessCompliance } = await import("../compliance");
+    const assessments = await assessCompliance({
+      state: site.state ?? null,
+      buildingType: site.buildingType ?? null,
+      sqft: site.sqft ?? null,
+      annualKwh: (meter?.commodity ?? "electric") === "electric" ? annualUsage : null,
+      euiBasis: hasIntervals && annualUsage != null ? "measured" : annualUsage != null ? "estimated" : "unknown",
+    });
+    for (const a of assessments) {
+      insightRows.push({
+        siteId: site.id,
+        meterId: meter?.id ?? null,
+        analysisId,
+        kind: "compliance",
+        title: a.bindingTarget
+          ? `${a.programName}: ${a.monthsToDeadline} months to deadline`
+          : `${a.programName}: reporting deadline in ${a.monthsToDeadline} months`,
+        body: a.pathToTarget,
+        severity: a.onTrack === false ? "warning" : "info",
+        disaggregationMethod: disaggMethod,
+        confidence: a.euiBasis === "measured" ? "high" : "low",
+        provenance: { method: "compliance_seed_v1", disclosure: a.disclosure, source: a.programCode },
+        metrics: { compliance: a },
+      });
+      narrate(
+        `AC16b: ${a.programName} applies — ${a.monthsToDeadline} mo to deadline${a.gapPct != null ? `, EUI gap ${a.gapPct > 0 ? "+" : ""}${a.gapPct}%` : ""}${a.penaltyExposureUsd ? `, penalty exposure ~$${a.penaltyExposureUsd.toLocaleString()}` : ""}`,
+      );
+    }
+  } catch (e) {
+    narrate(`AC16b compliance check skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  /* GAP-I — de-identified cohort insight, 15/15 privacy rule: renders ONLY
+     when the site's cohort (state | building type | size band) has ≥15
+     members. Below that, nothing — no teaser. Cohorts recompute weekly. */
+  try {
+    const { recomputeCohorts, cohortInsightFor } = await import("../cohort");
+    if ((meter?.commodity ?? "electric") === "electric") {
+      await recomputeCohorts();
+      const cohort = await cohortInsightFor({
+        state: site.state ?? null,
+        buildingType: site.buildingType ?? null,
+        sqft: site.sqft ?? null,
+        annualKwh: annualUsage,
+      });
+      if (cohort) {
+        insightRows.push({
+          siteId: site.id,
+          meterId: meter?.id ?? null,
+          analysisId,
+          kind: "cohort",
+          title: `How you compare with ${cohort.n} similar buildings`,
+          body: cohort.message,
+          severity: "info",
+          disaggregationMethod: disaggMethod,
+          confidence: "medium",
+          provenance: { method: "cohort_15_15_v1", cohortKey: cohort.cohortKey, n: cohort.n },
+          metrics: { cohort },
+        });
+        narrate(`GAP-I: cohort insight rendered (n=${cohort.n} ≥ 15, ${cohort.standing.replace(/_/g, " ")})`);
+      } else {
+        narrate("GAP-I: cohort below the 15-member privacy floor — rendered nothing (by design)");
+      }
+    }
+  } catch (e) {
+    narrate(`GAP-I cohort skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  /* AC13 — probable equipment inventory + lifecycle horizon + degradation
+     drift + sizing diagnostics, composed into the annual-checkup story.
+     Every inventory row is INFERRED (source='inferred', carrying the
+     observation that justified it) until the user confirms or edits it —
+     the insight says so explicitly. Fail-open: never blocks the analysis. */
+  try {
+    const { inferEquipment, syncInferredEquipment, lifecycleHorizon, degradationDrift, sizingDiagnostic, annualCheckupStory } = await import("../equipment");
+    const hvacShareRaw = (endUseFractions?.cooling ?? 0) + (endUseFractions?.heating ?? 0);
+    const hvacShare = hvacShareRaw > 0 ? hvacShareRaw : null;
+    const baseloadShare = endUseFractions?.plug_load ?? endUseFractions?.baseload ?? null;
+    const metersForEquip = await h.listMeters(site.id, userId);
+    const hasGasMeter = metersForEquip.some((m) => m.commodity === "gas");
+    // Degradation drift needs the PRIOR run's normalized annual usage — read
+    // it from the previous summary insight BEFORE this run's rows replace it.
+    let priorNorm: number | null = null;
+    try {
+      const priorInsights = await h.listInsights(site.id, userId);
+      const priorSummary = priorInsights.find((i) => i.kind === "summary");
+      priorNorm = ((priorSummary?.metrics ?? null) as { baseline?: { normalizedAnnualUsage?: number | null } } | null)?.baseline?.normalizedAnnualUsage ?? null;
+    } catch {
+      /* drift optional */
+    }
+    const inferred = inferEquipment({
+      buildingType: site.buildingType ?? null,
+      sqft: site.sqft ?? null,
+      state: site.state ?? null,
+      hvacShare,
+      baseloadShare,
+      hasSolar: site.hasSolar ?? false,
+      hasGasMeter,
+      peakKw: demand?.peakKw ?? null,
+    });
+    await syncInferredEquipment(site.id, userId, inferred);
+    const invRows = await h.listEquipment(site.id, userId);
+    const lifecycle = lifecycleHorizon(
+      invRows.map((r) => ({ equipKey: r.equipKey, label: r.label, installYear: r.installYear ?? null, serviceLifeYears: r.serviceLifeYears ?? null })),
+    );
+    const currentNorm = baseline?.normalizedAnnualUsage ?? null;
+    const drift =
+      priorNorm != null && currentNorm != null && Math.abs(priorNorm - currentNorm) > 1e-6 ? degradationDrift(currentNorm, priorNorm) : null;
+    const sizing = sizingDiagnostic({ loadFactor: demand?.loadFactor ?? null, hvacShare, peakKw: demand?.peakKw ?? null, sqft: site.sqft ?? null });
+    const story = annualCheckupStory({ siteName: site.name, lifecycle, drift, sizing });
+    const planningItems = lifecycle.filter((l) => l.window === "past_typical_life" || l.window === "inside_5yr_window");
+    insightRows.push({
+      siteId: site.id,
+      meterId: meter?.id ?? null,
+      analysisId,
+      kind: "equipment",
+      title:
+        planningItems.length > 0
+          ? `Equipment checkup: ${planningItems.length} item${planningItems.length === 1 ? "" : "s"} in the replacement-planning window`
+          : "Equipment checkup: probable inventory (confirm to sharpen)",
+      body: story,
+      severity: planningItems.length > 0 || (drift?.material === true && drift.driftPct > 0) ? "warning" : "info",
+      disaggregationMethod: disaggMethod,
+      confidence: "low",
+      provenance: {
+        method: "equipment_inference_v1",
+        disclosure:
+          "Inventory is inferred from usage patterns and building attributes with typical service lives — not an inspection. Confirm or edit rows to make lifecycle planning yours.",
+        inferredCount: inferred.length,
+      },
+      metrics: { lifecycle, drift, sizing: sizing.kind === "no_finding" ? null : sizing },
+    });
+    narrate(
+      `AC13: equipment checkup — ${invRows.length} inventory row${invRows.length === 1 ? "" : "s"}${planningItems.length > 0 ? `, ${planningItems.length} in the replacement-planning window` : ""}${drift?.material ? `, normalized drift ${drift.driftPct > 0 ? "+" : ""}${drift.driftPct}%` : ""}`,
+    );
+  } catch (e) {
+    narrate(`AC13 equipment checkup skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  /* AC14 — vertical packs: production-normalized KPI + regressor honesty.
+     Renders when the building type matches a pack OR the user has logged
+     production periods. The KPI itself only computes from real logged data. */
+  try {
+    const { VERTICAL_PACKS, packForBuildingType, listProduction, productionKpi, regressorDisclosure } = await import("../verticals");
+    const periods = await listProduction(site.id, userId);
+    const typePack = packForBuildingType(site.buildingType ?? null);
+    const packsWithData = VERTICAL_PACKS.filter((p) => periods.some((r) => r.metricKey === p.metricKey && r.quantity > 0));
+    const activePacks = packsWithData.length > 0 ? packsWithData : typePack ? [typePack] : [];
+    if (activePacks.length > 0) {
+      const usageKwhInWindow = (fromTs: number, toTs: number) =>
+        points.reduce((s, p) => (p.ts >= fromTs && p.ts < toTs && p.usage > 0 ? s + p.usage : s), 0);
+      for (const pack of activePacks) {
+        const kpi = hasIntervals ? productionKpi({ pack, periods, usageKwhInWindow }) : null;
+        const hasData = periods.some((r) => r.metricKey === pack.metricKey && r.quantity > 0);
+        insightRows.push({
+          siteId: site.id,
+          meterId: meter?.id ?? null,
+          analysisId,
+          kind: "vertical",
+          title: kpi ? `${pack.label}: ${Math.round(kpi.intensity).toLocaleString()} ${kpi.kpiLabel}` : `${pack.label}: production-driven building`,
+          body: kpi ? `${kpi.message} ${kpi.coverageNote} ${regressorDisclosure(pack, true)}` : regressorDisclosure(pack, hasData),
+          severity: "info",
+          disaggregationMethod: disaggMethod,
+          confidence: kpi ? "medium" : "low",
+          provenance: {
+            method: "vertical_pack_v1",
+            packKey: pack.packKey,
+            ...(kpi?.typicalRange ? { rangeBasis: kpi.typicalRange.basis } : {}),
+            disclosure: "Production KPI computed only over periods you logged — never an assumed production figure. Typical ranges are published ranges with a named basis, not percentiles.",
+          },
+          metrics: { kpi },
+        });
+        narrate(`AC14: vertical pack '${pack.packKey}' — ${kpi ? `KPI ${Math.round(kpi.intensity).toLocaleString()} ${kpi.kpiLabel}` : "regressor note (no production log yet)"}`);
+      }
+    }
+  } catch (e) {
+    narrate(`AC14 vertical pack skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
   // Machine-readable summary row: persists demand analytics (incl. heatmap),
   // benchmark, emissions, current cost, and tariff comparisons so the dashboard
   // KPI cards and panels survive page reloads (live-E2E pass-1 finding).
+  // v1.22 S-LIFECYCLE staleness chip-widening: when a seeded source this
+  // analysis leans on has passed its refresh cadence, figures derived from it
+  // widen — named and dated, never silent. Fail-open: freshness telemetry
+  // must never fail the analysis.
+  let staleDisclosures: string[] = [];
+  try {
+    const staleDomains = await Promise.all([staleSeedsForDomain("tariffs"), staleSeedsForDomain("emissions"), staleSeedsForDomain("benchmark")]);
+    staleDisclosures = staleDomains
+      .flat()
+      .map(
+        (s) =>
+          `${s.label} is ${s.ageDays} days old (refresh cadence ${s.cadenceDays} days) — figures that lean on it carry wider uncertainty until it's refreshed.`,
+      );
+  } catch {
+    /* freshness check must never fail the analysis */
+  }
   insightRows.push({
     siteId: site.id,
     meterId: meter?.id ?? null,
@@ -839,7 +1063,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     severity: "info",
     disaggregationMethod: disaggMethod,
     confidence: baseline?.confidence ?? "low",
-    provenance: { method: "pipeline_summary_v1" },
+    provenance: { method: "pipeline_summary_v1", ...(staleDisclosures.length ? { seedStaleness: staleDisclosures } : {}) },
     metrics: {
       demand,
       benchmark,
@@ -887,8 +1111,34 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         : null,
     },
   });
-  await h.replaceInsights(site.id, insightRows);
-  narrate(`Wrote ${insightRows.length} insight${insightRows.length === 1 ? "" : "s"} — every figure carries its provenance`);
+  /* PV gate enforcement: while a detected solar signature is unresolved,
+   * load-shape-dependent insights are withheld and replaced by ONE gate card
+   * that explains what is paused and why. Blocked, not silently rendered. */
+  let persistedInsightRows = insightRows;
+  if (pvGateActive) {
+    const withheld = insightRows.filter((r) => PV_GATED_INSIGHT_KINDS.has(r.kind));
+    persistedInsightRows = insightRows.filter((r) => !PV_GATED_INSIGHT_KINDS.has(r.kind));
+    persistedInsightRows.push({
+      siteId: site.id,
+      meterId: meter?.id ?? null,
+      analysisId,
+      kind: "pv_gate",
+      title: "Do you have solar panels? One answer unlocks the rest",
+      body: pvGateMessage(pvDetection ?? { detected: true, signatureDayShare: 0, daysAnalyzed: 0, hasNegativeIntervals: false, rationale: "previously detected" }),
+      severity: "warning",
+      confidence: "high",
+      provenance: {
+        method: "pv_signature_detector_v1",
+        detection: pvDetection,
+        withheldKinds: withheld.map((r) => r.kind),
+        resolution: "Answer net/gross (or 'no solar here') on the dashboard to release the paused insights on the next analysis.",
+      },
+      metrics: { withheldCount: withheld.length },
+    });
+    narrate(`Withheld ${withheld.length} shape-dependent insight${withheld.length === 1 ? "" : "s"} behind the solar net/gross question — blocked, not guessed`);
+  }
+  await h.replaceInsights(site.id, persistedInsightRows);
+  narrate(`Wrote ${persistedInsightRows.length} insight${persistedInsightRows.length === 1 ? "" : "s"} — every figure carries its provenance`);
 
   /* ---------- stage 7: opportunities ---------- */
   const oppCands: OpportunityCandidate[] = [];
@@ -1046,6 +1296,58 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
           : "Re-priced your actual load profile on this tariff's published structure — exact for the observed period; assumes your load pattern repeats.",
       disclosures: [MODELED_ESTIMATES_DISCLAIMER],
     });
+  }
+  /* AC15 — incentives on the opportunity feed. Two obligations:
+     (1) demand-response enrollments are NEGATIVE-COST actions (the utility
+         pays you) and surface as their own "they pay you" card;
+     (2) any capex measure with a live matching incentive names it with the
+         source — pre/post-incentive economics render in the scenario layer. */
+  try {
+    const { matchIncentives } = await import("../incentives");
+    const sector =
+      site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? ("residential" as const) : ("commercial" as const);
+    const drMatches = await matchIncentives({
+      measureKey: "peak_management",
+      state: site.state ?? null,
+      utilityName: site.utilityName ?? null,
+      sectorClass: sector,
+      capexUsd: 0,
+    });
+    const drPay = drMatches.filter((m) => m.kind === "dr_payment" && (m.annualUsd ?? 0) > 0);
+    if (drPay.length > 0) {
+      const total = drPay.reduce((s, m) => s + (m.annualUsd ?? 0), 0);
+      oppCands.push({
+        key: "dr_enrollment",
+        title: `Demand-response enrollment — ${drPay[0].whoPays.split(" (")[0]} pays you`,
+        category: "tariff",
+        annualSavingsUsdLo: total,
+        annualSavingsUsdHi: total,
+        capexBand: "none",
+        confidence: "medium",
+        rationale: `${drPay.map((m) => m.name).join("; ")}: enrollment credits worth ~$${total}/yr — a negative-cost action; the utility pays you to allow brief peak-event adjustments you can override.`,
+        disclosures: [drPay[0].disclosure],
+      });
+      narrate(`AC15: demand-response enrollment surfaced as a they-pay-you card ($${total}/yr, ${drPay.length} program${drPay.length === 1 ? "" : "s"})`);
+    }
+    for (const c of oppCands) {
+      if (c.capexBand === "none") continue;
+      const ms = await matchIncentives({
+        measureKey: c.key,
+        state: site.state ?? null,
+        utilityName: site.utilityName ?? null,
+        sectorClass: sector,
+        capexUsd: 0,
+      });
+      const live = ms.filter((m) => m.annualUsd == null);
+      if (live.length > 0) {
+        c.disclosures = [
+          ...(c.disclosures ?? []),
+          `Incentive available: ${live.map((m) => m.name).join("; ")} (${live[0].sourceName}) — run the scenario for pre- and post-incentive payback.`,
+        ];
+      }
+    }
+  } catch (e) {
+    narrate(`AC15 incentive matching skipped: ${e instanceof Error ? e.message : String(e)}`);
   }
   /* v1.18 §5 stage 5 — tenure modes: opportunity generation must respect what
      the occupant can actually DO. "A renter shown a solar payback is a spec

@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { AlertTriangle, BadgeCheck, ChevronDown, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Zap } from "lucide-react";
+import { AlertTriangle, BadgeCheck, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -85,6 +85,7 @@ export default function Portfolio() {
               </SelectContent>
             </Select>
           )}
+          <PortfolioExports />
         </div>
       </div>
 
@@ -250,6 +251,102 @@ export default function Portfolio() {
  * verified-address geocode get a pin; the rest are counted honestly below the
  * map. The whole card hides when no site has coordinates — an empty map that
  * pretends to know locations would be a spec failure. */
+/** GAP-N — portfolio-level exports (Pro): ENERGY STAR Portfolio Manager CSV
+ * download + the portfolio verified-savings statement dialog. Tier errors
+ * surface as toasts with the server's honest feature-naming copy. */
+function PortfolioExports() {
+  const [verifiedOpen, setVerifiedOpen] = useState(false);
+  const exportCsv = trpc.reports.portfolioExport.useMutation({
+    onSuccess: (r) => {
+      const blob = new Blob([r.csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `wattwise-portfolio-manager-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported ${r.siteCount} site${r.siteCount === 1 ? "" : "s"} — Portfolio Manager–compatible CSV`);
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  return (
+    <>
+      <Button size="sm" variant="outline" className="bg-background" disabled={exportCsv.isPending} onClick={() => exportCsv.mutate()}>
+        <Download className="mr-1.5 h-3.5 w-3.5" /> {exportCsv.isPending ? "Exporting…" : "Portfolio Manager CSV"}
+      </Button>
+      <Button size="sm" variant="outline" className="bg-background" onClick={() => setVerifiedOpen(true)}>
+        <FileCheck2 className="mr-1.5 h-3.5 w-3.5" /> Verified savings statement
+      </Button>
+      {verifiedOpen && <PortfolioVerifiedDialog open={verifiedOpen} onClose={() => setVerifiedOpen(false)} />}
+    </>
+  );
+}
+
+function PortfolioVerifiedDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const data = trpc.reports.portfolioVerified.useQuery(undefined, { enabled: open, retry: false });
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[80vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 font-display">
+            <BadgeCheck className="h-4 w-4 text-primary" /> Portfolio verified savings
+          </DialogTitle>
+        </DialogHeader>
+        {data.isLoading && <Skeleton className="h-40 w-full" />}
+        {data.error && <p className="text-sm text-destructive">{data.error.message}</p>}
+        {data.data && (
+          <div>
+            <div className="rounded-lg border border-border/70 bg-muted/40 p-4">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Cumulative verified savings</p>
+              <p className="mt-1 font-display text-3xl font-bold">{fmtUsd(data.data.verifiedTotalUsd)}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {data.data.analyzedCount}/{data.data.siteCount} sites analyzed · only measured post-implementation verdicts count — planned or estimated savings never enter this total.
+              </p>
+            </div>
+            {data.data.perSite.length === 0 ? (
+              <p className="mt-4 text-sm text-muted-foreground">
+                No implemented measures yet. Mark a recommendation “I did this” on any site and WattWise will start verifying savings against its weather-adjusted baseline.
+              </p>
+            ) : (
+              data.data.perSite.map((s) => (
+                <div key={s.siteId} className="mt-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold">{s.siteName}</p>
+                    <Badge variant="secondary" className="text-[10px]">{fmtUsd(s.verifiedSavingsUsd)} verified</Badge>
+                  </div>
+                  <Table className="mt-1.5">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-xs">Measure</TableHead>
+                        <TableHead className="text-xs">Status</TableHead>
+                        <TableHead className="text-xs">Months</TableHead>
+                        <TableHead className="text-right text-xs">Verified $</TableHead>
+                        <TableHead className="text-xs">Basis</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {s.verdicts.map((v, i) => (
+                        <TableRow key={i}>
+                          <TableCell className="text-xs">{v.measure.replace(/_/g, " ")}</TableCell>
+                          <TableCell className="text-xs">{v.status.replace(/_/g, " ")}</TableCell>
+                          <TableCell className="text-xs">{v.months}</TableCell>
+                          <TableCell className="text-right text-xs">{fmtUsd(v.verifiedSavingsUsd)}</TableCell>
+                          <TableCell className="text-xs">{v.chip}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ))
+            )}
+            <p className="mt-4 text-[11px] text-muted-foreground">{data.data.disclaimer}</p>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function PortfolioMap({
   rows,
 }: {

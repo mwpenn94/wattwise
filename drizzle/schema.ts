@@ -10,6 +10,7 @@ import {
   mysqlTable,
   text,
   timestamp,
+  tinyint,
   uniqueIndex,
   varchar,
 } from "drizzle-orm/mysql-core";
@@ -91,6 +92,10 @@ export const sites = mysqlTable(
     utilityName: varchar("utilityName", { length: 128 }),
     egridSubregion: varchar("egridSubregion", { length: 8 }),
     isHypothetical: boolean("isHypothetical").default(false).notNull(),
+    /** GAP-O pin-drop mode: a prospective site was created from a map pin (or an
+     * address the user is only CONSIDERING — pre-purchase / pre-lease). Insights
+     * render with a "prospective — modeled only" frame and never claim occupancy. */
+    prospective: tinyint("prospective").default(0).notNull(),
     /** provenance for attribute values: user_entered | assessor | archetype_default */
     attrSource: varchar("attrSource", { length: 32 }).default("user_entered"),
     /** v1.18 tenure modes: opportunity generation filters by what the occupant
@@ -113,6 +118,28 @@ export const sites = mysqlTable(
      * which alone cannot say WHICH core placeholders remain; this can. Null for
      * regular (non-quick-start) sites and legacy rows. */
     refinedFields: json("refinedFields"),
+    /** AC11/AC18 PV gate: solar signature detection state. 'none' = no signature;
+     * 'detected_unconfirmed' = signature found, insights that depend on load shape
+     * are BLOCKED until the user resolves net vs gross; 'confirmed_net' /
+     * 'confirmed_gross' = resolved; 'dismissed' = user says no solar. */
+    pvDetectionStatus: mysqlEnum("pvDetectionStatus", [
+      "none",
+      "detected_unconfirmed",
+      "confirmed_net",
+      "confirmed_gross",
+      "dismissed",
+    ])
+      .default("none")
+      .notNull(),
+    pvDetectedAt: bigint("pvDetectedAt", { mode: "number" }),
+    /** what the meter records for a solar site: net of PV, or gross consumption */
+    netMeteringBasis: varchar("netMeteringBasis", { length: 16 }),
+    /** AC12: occupancy-change event — analytics re-base the baseline from this
+     * timestamp forward; verdicts issued before it keep their period attribution. */
+    occupancyChangedAt: bigint("occupancyChangedAt", { mode: "number" }),
+    /** AC15 who-pays/who-benefits: for leased commercial sites, incentive and
+     * capex framing depends on the lease. null = owner-occupied / unknown. */
+    leaseType: mysqlEnum("leaseType", ["owner_occupied", "gross", "triple_net"]),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
@@ -227,6 +254,10 @@ export const bills = mysqlTable(
     supersedesBillId: int("supersedesBillId"),
     /** Cycle 5: demand_billed reconciliation provenance */
     demandBilledSource: mysqlEnum("demandBilledSource", ["parsed_bill", "ratchet_computed"]),
+    /** §2.6 estimated reads: utilities sometimes bill on estimated (not actual)
+     * meter reads; those periods are down-weighted in baselines and disclosed
+     * in any verdict that overlaps them. */
+    readType: mysqlEnum("readType", ["actual", "estimated", "unknown"]).default("actual").notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   (t) => [index("bills_meter_idx").on(t.meterId)],
@@ -260,6 +291,25 @@ export const tariffs = mysqlTable(
     effectiveDate: date("effectiveDate"),
     source: varchar("source", { length: 64 }).default("urdb_snapshot").notNull(),
     sourceVersion: varchar("sourceVersion", { length: 32 }),
+    /** AC16a bill-reconciliation self-calibration: every parsed bill is scored
+     * against the predicted cost on the recorded tariff. Repeated hits upgrade
+     * trust; misses flag the record and widen savings chips downstream. */
+    trustStatus: mysqlEnum("trustStatus", ["seeded", "verified_against_bill", "mismatch_flagged"])
+      .default("seeded")
+      .notNull(),
+    trustUpdatedAt: bigint("trustUpdatedAt", { mode: "number" }),
+    reconcileHits: int("reconcileHits").default(0).notNull(),
+    reconcileMisses: int("reconcileMisses").default(0).notNull(),
+    /** v1.22 non-URDB tariff freshness: currency is earned from bills, not
+     * assumed from age. Every reconciliation hit resets this clock; a non-URDB
+     * tariff unverified for 12 months widens chips and raises a review task. */
+    billVerifiedAt: bigint("billVerifiedAt", { mode: "number" }),
+    /** §5.10 net-metering banking rules: how exported kWh credits carry over.
+     * 'monthly' = credits net within the billing month only; 'annual' = banked
+     * to an annual true-up. null = not a NEM-relevant tariff. */
+    nemBanking: mysqlEnum("nemBanking", ["monthly", "annual", "none"]),
+    /** credit expiry / true-up description, e.g. "April true-up at avoided cost" */
+    nemCreditExpiry: varchar("nemCreditExpiry", { length: 32 }),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   (t) => [
@@ -421,6 +471,13 @@ export const measureImplementations = mysqlTable(
     /** cumulative verified savings to date (recomputed on each verdict pass) */
     verifiedSavingsUsd: double("verifiedSavingsUsd"),
     lastEvaluatedAt: bigint("lastEvaluatedAt", { mode: "number" }),
+    /** AC12 model pinning: the analytics engine version that issued the latest
+     * verdicts; a verdict is never silently re-scored by a newer model. */
+    engineVersion: varchar("engineVersion", { length: 32 }),
+    /** AC12 occupancy re-base: which occupancy period the verdicts belong to,
+     * e.g. "pre-2026-03" — verdicts issued before an occupancy change keep
+     * their period attribution instead of being re-based. */
+    occupancyPeriod: varchar("occupancyPeriod", { length: 64 }),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   (t) => [index("mi_site_idx").on(t.siteId), index("mi_user_idx").on(t.userId)],
@@ -754,7 +811,7 @@ export const alerts = mysqlTable(
     id: int("id").autoincrement().primaryKey(),
     userId: int("userId").notNull(),
     siteId: int("siteId").notNull(),
-    kind: mysqlEnum("kind", ["anomaly", "demand_spike", "rate_opportunity", "verdict", "digest", "away_watchdog"]).notNull(),
+    kind: mysqlEnum("kind", ["anomaly", "demand_spike", "rate_opportunity", "verdict", "digest", "away_watchdog", "pv_signature"]).notNull(),
     title: varchar("title", { length: 255 }).notNull(),
     body: text("body"),
     /** the dollar figure that justifies this alert's existence */
@@ -773,3 +830,210 @@ export const alerts = mysqlTable(
 );
 
 export type Alert = typeof alerts.$inferSelect;
+
+/** AC15 incentives — curated seed of federal/state/utility incentives with
+ * expirations. An expired incentive must never render; economics show pre- and
+ * post-incentive paybacks with named sources. */
+export const incentives = mysqlTable(
+  "incentives",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    code: varchar("code", { length: 48 }).notNull(),
+    name: varchar("name", { length: 160 }).notNull(),
+    /** federal | state | utility */
+    level: varchar("level", { length: 16 }).notNull(),
+    /** 'US', 'AZ', 'WA', or utility territory shorthand */
+    jurisdiction: varchar("jurisdiction", { length: 32 }).notNull(),
+    utilityName: varchar("utilityName", { length: 64 }),
+    /** JSON array of opportunity measure keys this incentive applies to */
+    measureKeys: text("measureKeys").notNull(),
+    /** residential | commercial | both */
+    sectorClass: varchar("sectorClass", { length: 16 }).default("both").notNull(),
+    /** tax_credit | rebate | bill_credit | dr_payment */
+    kind: varchar("kind", { length: 24 }).notNull(),
+    /** percent_of_cost | fixed_usd | usd_per_year (DR) */
+    amountType: varchar("amountType", { length: 24 }).notNull(),
+    amountValue: double("amountValue").notNull(),
+    amountCapUsd: double("amountCapUsd"),
+    /** ms epoch; null = no legislated sunset */
+    expiresAt: bigint("expiresAt", { mode: "number" }),
+    sourceName: varchar("sourceName", { length: 120 }).notNull(),
+    sourceUrl: varchar("sourceUrl", { length: 255 }),
+    notes: text("notes"),
+    createdAt: bigint("createdAt", { mode: "number" }).notNull(),
+  },
+);
+export type Incentive = typeof incentives.$inferSelect;
+
+/** AC14 vertical packs — user-entered production series (monthly quantities)
+ * that unlock production-normalized KPIs and a production regressor. */
+export const productionSeries = mysqlTable(
+  "production_series",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    /** e.g. water_pumped_mg, units_produced, irrigated_acres */
+    metricKey: varchar("metricKey", { length: 48 }).notNull(),
+    metricLabel: varchar("metricLabel", { length: 96 }).notNull(),
+    unit: varchar("unit", { length: 32 }).notNull(),
+    periodStart: bigint("periodStart", { mode: "number" }).notNull(),
+    periodEnd: bigint("periodEnd", { mode: "number" }).notNull(),
+    quantity: double("quantity").notNull(),
+    createdAt: bigint("createdAt", { mode: "number" }).notNull(),
+  },
+  (t) => [index("ps_site_idx").on(t.siteId), index("ps_user_idx").on(t.userId)],
+);
+export type ProductionSeriesRow = typeof productionSeries.$inferSelect;
+
+/** §3i roles — owner / facility_manager / read_only membership per site.
+ * The owning userId on sites stays the root owner; members extend access. */
+export const siteMembers = mysqlTable(
+  "site_members",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    /** facility_manager can act (mark measures, refine); read_only can look */
+    role: varchar("role", { length: 24 }).default("read_only").notNull(),
+    invitedBy: int("invitedBy").notNull(),
+    createdAt: bigint("createdAt", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("sm_site_user").on(t.siteId, t.userId),
+    index("sm_user_idx").on(t.userId),
+  ],
+);
+export type SiteMember = typeof siteMembers.$inferSelect;
+
+/** AC16b compliance programs — seeded building-performance mandates
+ * (WA Clean Buildings first). targetEuiByType is JSON {buildingType: kBtu/sqft}. */
+export const compliancePrograms = mysqlTable(
+  "compliance_programs",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    code: varchar("code", { length: 48 }).notNull(),
+    name: varchar("name", { length: 160 }).notNull(),
+    jurisdiction: varchar("jurisdiction", { length: 32 }).notNull(),
+    minSqft: double("minSqft").notNull(),
+    /** JSON array of covered buildingTypes; null = all commercial */
+    buildingTypes: text("buildingTypes"),
+    targetEuiByType: text("targetEuiByType").notNull(),
+    deadline: bigint("deadline", { mode: "number" }).notNull(),
+    penaltyPerSqftUsd: double("penaltyPerSqftUsd").notNull(),
+    sourceName: varchar("sourceName", { length: 120 }).notNull(),
+    sourceUrl: varchar("sourceUrl", { length: 255 }),
+    createdAt: bigint("createdAt", { mode: "number" }).notNull(),
+  },
+);
+export type ComplianceProgram = typeof compliancePrograms.$inferSelect;
+
+/** AC13 equipment intelligence — probable inventory inferred from archetype +
+ * building attributes, confirmable by the user; drives lifecycle horizon. */
+export const equipmentInventory = mysqlTable(
+  "equipment_inventory",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    equipKey: varchar("equipKey", { length: 48 }).notNull(),
+    label: varchar("label", { length: 120 }).notNull(),
+    /** inferred | user_confirmed | user_entered */
+    source: varchar("source", { length: 24 }).default("inferred").notNull(),
+    confidence: varchar("confidence", { length: 16 }).default("medium").notNull(),
+    /** null when inferred from vintage; user can correct */
+    installYear: int("installYear"),
+    serviceLifeYears: int("serviceLifeYears").notNull(),
+    notes: text("notes"),
+    createdAt: bigint("createdAt", { mode: "number" }).notNull(),
+    updatedAt: bigint("updatedAt", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("eq_site_key").on(t.siteId, t.equipKey),
+    index("eq_user_idx").on(t.userId),
+  ],
+);
+export type EquipmentRow = typeof equipmentInventory.$inferSelect;
+
+/** AC16a bill reconciliations — one row per parsed bill scored against the
+ * predicted cost on the recorded tariff. */
+export const billReconciliations = mysqlTable(
+  "bill_reconciliations",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    billId: int("billId").notNull(),
+    tariffId: int("tariffId"),
+    predictedUsd: double("predictedUsd").notNull(),
+    actualUsd: double("actualUsd").notNull(),
+    deltaPct: double("deltaPct").notNull(),
+    /** match (<=4%) | near (<=12%) | mismatch (>12%) */
+    verdict: varchar("verdict", { length: 24 }).notNull(),
+    createdAt: bigint("createdAt", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("br_bill").on(t.billId), index("br_site_idx").on(t.siteId)],
+);
+export type BillReconciliation = typeof billReconciliations.$inferSelect;
+
+/** 15/15-gated cohort stats — de-identified aggregates computed across users;
+ * a cohort renders NOTHING below n=15. */
+export const cohortStats = mysqlTable(
+  "cohort_stats",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    /** e.g. "AZ|office|10k-50k sqft" */
+    cohortKey: varchar("cohortKey", { length: 96 }).notNull(),
+    metricKey: varchar("metricKey", { length: 48 }).notNull(),
+    n: int("n").notNull(),
+    p25: double("p25").notNull(),
+    median: double("median").notNull(),
+    p75: double("p75").notNull(),
+    computedAt: bigint("computedAt", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("cs_key").on(t.cohortKey, t.metricKey)],
+);
+export type CohortStat = typeof cohortStats.$inferSelect;
+
+/** v1.22 S-LIFECYCLE / AC18b — seeds are living data, not build artifacts.
+ * Every seeder declares a refresh cadence; a seed past cadence×1.5 widens the
+ * confidence chips of everything derived from it. Queryable per source. */
+export const seedFreshness = mysqlTable("seed_freshness", {
+  id: int("id").autoincrement().primaryKey(),
+  source: varchar("source", { length: 64 }).notNull().unique(),
+  version: varchar("version", { length: 32 }).notNull(),
+  seededAt: bigint("seededAt", { mode: "number" }).notNull(),
+  cadenceDays: int("cadenceDays").notNull(),
+  upstreamReleaseSeen: varchar("upstreamReleaseSeen", { length: 64 }),
+  lastCheckedAt: bigint("lastCheckedAt", { mode: "number" }),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+export type SeedFreshnessRow = typeof seedFreshness.$inferSelect;
+
+/** v1.22 — ops task queue for the tariff-template landscape: crowd-sourced
+ * unknown-tariff discovery (N≥3 unmatched names → create-template), 12-month
+ * unverified non-URDB tariffs (template_review), parser drift (template_update). */
+export const templateTasks = mysqlTable("template_tasks", {
+  id: int("id").autoincrement().primaryKey(),
+  kind: mysqlEnum("kind", ["create_template", "template_review", "template_update"]).notNull(),
+  utilityName: varchar("utilityName", { length: 128 }),
+  tariffNameRaw: varchar("tariffNameRaw", { length: 190 }),
+  occurrences: int("occurrences").default(1).notNull(),
+  status: mysqlEnum("status", ["open", "resolved"]).default("open").notNull(),
+  note: text("note"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+export type TemplateTaskRow = typeof templateTasks.$inferSelect;
+
+/** v1.22 config-not-constant rule: external numeric limits (API caps,
+ * free-tier thresholds, cache TTLs, service lives) ship as seeded config. */
+export const platformConfig = mysqlTable("platform_config", {
+  id: int("id").autoincrement().primaryKey(),
+  configKey: varchar("configKey", { length: 96 }).notNull().unique(),
+  configValue: varchar("configValue", { length: 190 }).notNull(),
+  description: text("description"),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+export type PlatformConfigRow = typeof platformConfig.$inferSelect;

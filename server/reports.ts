@@ -166,6 +166,144 @@ export function practitionerCsv(d: ReportData): string {
   return lines.join("\n");
 }
 
+/* ================= GAP-N portfolio exports ================= */
+
+export interface PortfolioExportRow {
+  siteId: number;
+  siteName: string;
+  buildingType: string | null;
+  state: string | null;
+  zip: string | null;
+  sqft: number | null;
+  annualUsageKwh: number | null;
+  annualCostUsd: number | null;
+  euiKwhPerSqft: number | null;
+  euiBasis: string | null;
+  verifiedSavingsUsd: number;
+  analyzed: boolean;
+}
+
+/** ENERGY STAR Portfolio Manager building-type mapping. PM's picklist is
+ * finite; anything we can't map cleanly exports as "Other" with the WattWise
+ * type preserved in its own column — never silently mislabeled. */
+const ESPM_TYPE: Record<string, string> = {
+  office: "Office",
+  retail: "Retail Store",
+  warehouse: "Non-Refrigerated Warehouse",
+  school: "K-12 School",
+  grocery: "Supermarket/Grocery Store",
+  restaurant: "Restaurant",
+  hotel: "Hotel",
+  hospital: "Hospital (General Medical & Surgical)",
+  multifamily: "Multifamily Housing",
+  single_family: "Single Family Home",
+  manufacturing: "Manufacturing/Industrial Plant",
+};
+
+/** GAP-N — Portfolio Manager-compatible CSV: one property row per site using
+ * PM's spreadsheet-upload vocabulary (Property Name, Primary Function, Gross
+ * Floor Area, energy use in kWh). Honesty rules carry over: modeled figures
+ * are chip-suffixed, unmapped types are "Other", missing figures stay blank
+ * (PM rejects fabrications anyway), and the disclaimer rides the last row. */
+export function portfolioManagerCsv(rows: PortfolioExportRow[]): string {
+  const esc = (s: string | number | null) => {
+    const v = s == null ? "" : String(s);
+    return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  };
+  const lines: string[] = [];
+  lines.push(
+    [
+      "Property Name",
+      "Primary Function",
+      "WattWise Building Type",
+      "State/Province",
+      "Postal Code",
+      "Gross Floor Area (ft2)",
+      "Annual Electricity Use (kWh)",
+      "Annual Energy Cost (USD)",
+      "Site EUI (kWh/ft2)",
+      "EUI Basis",
+      "Verified Savings To Date (USD)",
+      "Data Status",
+    ].join(","),
+  );
+  for (const r of rows) {
+    lines.push(
+      [
+        esc(r.siteName),
+        esc(r.buildingType ? (ESPM_TYPE[r.buildingType] ?? "Other") : "Other"),
+        esc(r.buildingType ?? ""),
+        esc(r.state ?? ""),
+        esc(r.zip ?? ""),
+        esc(r.sqft),
+        esc(r.annualUsageKwh != null ? Math.round(r.annualUsageKwh) : null),
+        esc(r.annualCostUsd != null ? Math.round(r.annualCostUsd) : null),
+        esc(r.euiKwhPerSqft != null ? r.euiKwhPerSqft.toFixed(2) : null),
+        esc(r.euiBasis ?? (r.analyzed ? "modeled" : "")),
+        esc(Math.round(r.verifiedSavingsUsd)),
+        r.analyzed ? "analyzed (modeled figures)" : "not yet analyzed — fields left blank, not fabricated",
+      ].join(","),
+    );
+  }
+  lines.push(["# " + MODELED_ESTIMATES_DISCLAIMER.replace(/,/g, ";"), "", "", "", "", "", "", "", "", "", "", ""].join(","));
+  return lines.join("\n");
+}
+
+export interface PortfolioVerifiedData {
+  generatedAt: number;
+  siteCount: number;
+  analyzedCount: number;
+  verifiedTotalUsd: number;
+  perSite: Array<{
+    siteId: number;
+    siteName: string;
+    verifiedSavingsUsd: number;
+    verdicts: VerdictRow[];
+  }>;
+  disclaimer: string;
+}
+
+/** GAP-N — portfolio verified-savings edition: cumulative verified headline
+ * across every site with the per-site verdict ledgers underneath. Only
+ * persisted implementation verdicts count — planned/estimated savings never
+ * enter the verified total. */
+export async function assemblePortfolioVerified(userId: number): Promise<PortfolioVerifiedData> {
+  const userSites = await h.listSites(userId);
+  const perSite: PortfolioVerifiedData["perSite"] = [];
+  let analyzedCount = 0;
+  for (const s of userSites) {
+    const impls = await h.listMeasureImplementations(s.id, userId);
+    const analysis = await h.getLatestAnalysis(s.id, userId);
+    if (analysis) analyzedCount += 1;
+    if (impls.length === 0) continue;
+    const verdicts: VerdictRow[] = impls.map((i) => {
+      const v = (i.verdicts ?? []) as unknown[];
+      return {
+        measure: i.measure,
+        implementedAt: i.implementedAt,
+        status: i.status,
+        verifiedSavingsUsd: i.verifiedSavingsUsd ?? 0,
+        months: Array.isArray(v) ? v.length : 0,
+        chip: i.status === "verified" ? ("Measured" as Chip) : ("Est." as Chip),
+      };
+    });
+    perSite.push({
+      siteId: s.id,
+      siteName: s.name,
+      verifiedSavingsUsd: verdicts.reduce((a, v) => a + v.verifiedSavingsUsd, 0),
+      verdicts,
+    });
+  }
+  return {
+    generatedAt: Date.now(),
+    siteCount: userSites.length,
+    analyzedCount,
+    verifiedTotalUsd: perSite.reduce((a, s) => a + s.verifiedSavingsUsd, 0),
+    perSite: perSite.sort((a, b) => b.verifiedSavingsUsd - a.verifiedSavingsUsd),
+    disclaimer: MODELED_ESTIMATES_DISCLAIMER,
+  };
+}
+
 /** Random URL-safe token for report_artifacts. */
 export function newReportToken(): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";

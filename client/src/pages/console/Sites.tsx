@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Building2, FolderKanban, MoreVertical, Pencil, Plus, Trash2, Zap } from "lucide-react";
+import { Building2, FolderKanban, MoreVertical, Pencil, Plus, Trash2, Users, Zap } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -226,7 +226,123 @@ export default function Sites() {
           </Card>
         )}
       </div>
+
+      <SharedWithMe />
     </div>
+  );
+}
+
+/** GAP-L: sites other owners shared with me — my role is shown on each card
+ * (facility manager = can act; read-only = can look). */
+function SharedWithMe() {
+  const [, navigate] = useLocation();
+  const shared = trpc.sites.sharedWithMe.useQuery();
+  if (shared.isLoading || (shared.data ?? []).length === 0) return null;
+  return (
+    <div className="mt-8">
+      <h2 className="flex items-center gap-2 font-display text-lg font-semibold">
+        <Users className="h-4 w-4 text-primary" /> Shared with me
+      </h2>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        Sites other accounts gave you access to. Facility managers can refine and act; read-only can view everything but change nothing.
+      </p>
+      <div className="mt-3 grid gap-4 md:grid-cols-2">
+        {(shared.data ?? []).map((s) => (
+          <Card key={s.id} className="cursor-pointer border-border/70 transition-transform hover:-translate-y-0.5" onClick={() => navigate(`/app?site=${s.id}`)}>
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="flex items-center gap-2 font-display text-base">
+                <Building2 className="h-4 w-4 text-primary" /> {s.name}
+              </CardTitle>
+              <Badge variant="outline" className="text-[10px]">
+                {s.myRole === "facility_manager" ? "facility manager — can act" : "read-only — can look"}
+              </Badge>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                {s.city && <span>{s.city}, {s.state}</span>}
+                {s.buildingType && <Badge variant="secondary" className="text-[10px]">{s.buildingType.replace(/_/g, " ")}</Badge>}
+                {s.sqft && <span>{s.sqft.toLocaleString()} sqft</span>}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** GAP-L: owner-side sharing manager — add by email (account must exist; we say
+ * so instead of pretending an invitation email was sent), choose role, remove. */
+function SharePanel({ siteId, open, onClose }: { siteId: number; open: boolean; onClose: () => void }) {
+  const utils = trpc.useUtils();
+  const members = trpc.sites.members.list.useQuery({ siteId }, { enabled: open });
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"facility_manager" | "read_only">("read_only");
+  const add = trpc.sites.members.add.useMutation({
+    onSuccess: async (r) => {
+      toast.success(`${r.name ?? "Member"} added`);
+      setEmail("");
+      await utils.sites.members.list.invalidate({ siteId });
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const remove = trpc.sites.members.remove.useMutation({
+    onSuccess: async () => {
+      toast.success("Access removed");
+      await utils.sites.members.list.invalidate({ siteId });
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 font-display">
+            <Users className="h-4 w-4 text-primary" /> Share this site
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-xs text-muted-foreground">
+          Grant another WattWise account access. <strong>Facility manager</strong> can refine attributes and mark measures;{" "}
+          <strong>read-only</strong> can view analyses and insights but change nothing. The person must have signed in to
+          WattWise at least once — no invitation email is sent from here.
+        </p>
+        <div className="flex flex-col gap-2">
+          <Input placeholder="their-email@example.com" value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Member email" />
+          <div className="flex gap-2">
+            <Select value={role} onValueChange={(v) => setRole(v as typeof role)}>
+              <SelectTrigger className="flex-1"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="read_only">Read-only — can look</SelectItem>
+                <SelectItem value="facility_manager">Facility manager — can act</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button disabled={!email.includes("@") || add.isPending} onClick={() => add.mutate({ siteId, email: email.trim(), role })}>
+              {add.isPending ? "Adding…" : "Add"}
+            </Button>
+          </div>
+        </div>
+        <div className="mt-2">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Current access</p>
+          {(members.data ?? []).length === 0 ? (
+            <p className="mt-1 text-xs text-muted-foreground">Only you.</p>
+          ) : (
+            <ul className="mt-1 space-y-1.5">
+              {(members.data ?? []).map((m) => (
+                <li key={m.id} className="flex items-center justify-between gap-2 rounded-md border border-border/70 px-2.5 py-1.5">
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-medium">{m.name ?? m.email ?? `user #${m.userId}`}</p>
+                    <p className="text-[10px] text-muted-foreground">{m.role === "facility_manager" ? "facility manager — can act" : "read-only — can look"}</p>
+                  </div>
+                  <Button size="sm" variant="ghost" className="h-7 px-2 text-xs text-destructive" disabled={remove.isPending} onClick={() => remove.mutate({ siteId, memberId: m.id })}>
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -351,6 +467,7 @@ function SiteActions({ site }: { site: { id: number; name: string; address?: str
   const utils = trpc.useUtils();
   const [editOpen, setEditOpen] = useState(false);
   const [metersOpen, setMetersOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [form, setForm] = useState({
     name: site.name,
@@ -396,12 +513,17 @@ function SiteActions({ site }: { site: { id: number; name: string; address?: str
           <DropdownMenuItem onClick={() => setMetersOpen(true)}>
             <Zap className="mr-2 h-3.5 w-3.5" /> Manage meters
           </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setShareOpen(true)}>
+            <Users className="mr-2 h-3.5 w-3.5" /> Share access…
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => setConfirmDelete(true)}>
             <Trash2 className="mr-2 h-3.5 w-3.5" /> Delete site…
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+
+      {shareOpen && <SharePanel siteId={site.id} open={shareOpen} onClose={() => setShareOpen(false)} />}
 
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="max-w-md">

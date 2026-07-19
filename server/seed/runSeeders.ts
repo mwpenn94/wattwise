@@ -28,6 +28,7 @@ import {
   synthesizeTmyHourly,
 } from "./seedData";
 import { LABEL_PROTOTYPE_ARCHETYPE } from "../../shared/wattwise";
+import { registerSeedFreshness } from "../seedLifecycle";
 import {
   STATE_PROFILES,
   ZONE_STATIONS,
@@ -410,6 +411,11 @@ export function ensureSeeded(): Promise<void> {
           archetypes: await seedArchetypes(db),
           convergence: await seedConvergenceLog(db),
         };
+        // v1.22 S-LIFECYCLE: register per-seeder refresh cadences + config
+        // defaults (idempotent; existing ops-tuned rows are preserved).
+        await registerSeedFreshness(SEED_VERSION).catch((e) =>
+          console.warn("[Seed] freshness registration failed", e),
+        );
         console.log("[Seed] complete", JSON.stringify(results));
       } catch (err) {
         console.error("[Seed] failed", err);

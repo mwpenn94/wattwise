@@ -18,6 +18,7 @@ import { Building2, Check, Factory, Home as HomeIcon, Hotel, MapPin, Receipt, Sh
 import { Link, useLocation } from "wouter";
 import { fileToBase64 } from "@/lib/wattwiseUi";
 import AnalysisProgress from "@/components/AnalysisProgress";
+import { MapView } from "@/components/Map";
 
 interface FieldConf {
   periodStart?: number;
@@ -82,6 +83,12 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
   const [highlightIdx, setHighlightIdx] = useState(-1);
   const [utilityOverride, setUtilityOverride] = useState<string | null>(null);
   const suggestBoxRef = useRef<HTMLDivElement>(null);
+  // GAP-O pin-drop / prospective-site mode: no address needed — click the map,
+  // we reverse-geocode a LABEL (disclosed as approximate) and create the site as
+  // prospective ("considering this location"), never claiming occupancy.
+  const [pinMode, setPinMode] = useState(false);
+  const [pin, setPin] = useState<{ lat: number; lng: number; label: string | null } | null>(null);
+  const pinMarkerRef = useRef<google.maps.marker.AdvancedMarkerElement | google.maps.Marker | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -114,13 +121,61 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
   const billOcr = trpc.uploads.billOcr.useMutation();
   const billSave = trpc.bills.createForSite.useMutation();
 
-  const busy = phase !== "idle";
-
+    const busy = phase !== "idle";
+  /** GAP-Q reveal moment — one address just became candidate providers for all
+   * THREE commodities. Shown as a rich toast right after creation so the user
+   * sees the “whoa” before the analysis lands; every line is a candidate with
+   * its own honesty note server-side (never presented as verified). */
+  function revealUtilities(triple?: { electric: { value: string | null }; gas: { value: string | null }; water: { value: string | null } }) {
+    if (!triple) return;
+    const lines = [
+      triple.electric.value ? `⚡ ${triple.electric.value}` : null,
+      triple.gas.value ? `🔥 ${triple.gas.value}` : null,
+      triple.water.value ? `💧 ${triple.water.value}` : null,
+    ].filter((l): l is string => l != null);
+    if (lines.length < 2) return; // one candidate isn't a reveal — stay quiet
+    toast.info(`One address → ${lines.length} likely utilities`, {
+      description: `${lines.join("  ·  ")} — candidates from your location, not confirmations. Override any of them as bills arrive.`,
+      duration: 9000,
+    });
+  }
   async function finishToDashboard(siteId: number) {
     setAnalyzingSiteId(siteId);
     await analyze.mutateAsync({ siteId });
     await Promise.all([utils.insights.invalidate(), utils.sites.list.invalidate()]);
     navigate(`/app?site=${siteId}`);
+  }
+
+  async function startFromPin() {
+    if (!pin) {
+      toast.error("Click the map to drop a pin first.");
+      return;
+    }
+    if (!buildingType) {
+      toast.error("Tap what this location is — home, office, retail… — so the analysis isn't built on a guess.");
+      return;
+    }
+    setPhase("creating");
+    try {
+      const res = await quickCreate.mutateAsync({
+        address: pin.label ?? `Pinned location (${pin.lat.toFixed(4)}, ${pin.lng.toFixed(4)})`,
+        buildingType: buildingType as never,
+        utilityName: utilityOverride?.trim() || undefined,
+        pinLat: pin.lat,
+        pinLng: pin.lng,
+        prospective: true,
+      });
+      await utils.sites.list.invalidate();
+      setPhase("analyzing");
+      toast.success("Prospective site created from your pin — running a modeled-only quick analysis…");
+      revealUtilities(res.utilityTriple);
+      await finishToDashboard(res.id);
+      toast.success("Modeled estimate ready — it's a what-if for a location you're considering, not a reading of anyone's usage.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Pin-drop start failed");
+    } finally {
+      setPhase("idle");
+    }
   }
 
   async function startFromAddress() {
@@ -147,6 +202,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
           ? `Site created for ${res.parse.city ? `${res.parse.city}, ` : ""}${res.parse.state}${res.parse.zip ? ` ${res.parse.zip}` : ""}${selectedPlace ? " (verified address)" : ""} — running quick analysis…`
           : "Site created (location not recognized — US-median assumptions disclosed) — running quick analysis…",
       );
+      revealUtilities(res.utilityTriple);
       await finishToDashboard(res.id);
       toast.success("Quick-win analysis ready — remaining assumptions are disclosed; refine anything, anytime.");
     } catch (e) {
@@ -468,10 +524,78 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
             <Receipt className="h-3.5 w-3.5" /> or start from a bill photo
           </button>
           <span aria-hidden>·</span>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 text-primary underline-offset-2 hover:underline disabled:opacity-50"
+            onClick={() => setPinMode((v) => !v)}
+            disabled={busy || billDraft != null}
+            aria-pressed={pinMode}
+          >
+            <MapPin className="h-3.5 w-3.5" /> {pinMode ? "hide the map" : "or drop a pin instead"}
+          </button>
+          <span aria-hidden>·</span>
           <Link href="/app/wizard" className="underline-offset-2 hover:underline">
             prefer the guided step-by-step form?
           </Link>
         </div>
+
+        {pinMode && !billDraft && (
+          <div className="mt-3 rounded-md border border-border/70 p-2">
+            <p className="text-[11px] text-muted-foreground">
+              Click anywhere on the map to pin a location you're <span className="font-medium text-foreground">considering</span> — no
+              address required. The site is created as <span className="font-medium text-foreground">prospective</span>: everything is a
+              modeled what-if from location + building type, never a claim about who lives there or what they use.
+            </p>
+            <MapView
+              className="mt-2 h-64 rounded-md"
+              initialCenter={{ lat: 33.4484, lng: -112.074 }}
+              initialZoom={10}
+              onMapReady={(map) => {
+                map.addListener("click", (e: google.maps.MapMouseEvent) => {
+                  if (!e.latLng) return;
+                  const lat = e.latLng.lat();
+                  const lng = e.latLng.lng();
+                  // one pin at a time — move it, don't stack markers
+                  if (pinMarkerRef.current) {
+                    if ("setMap" in pinMarkerRef.current && typeof (pinMarkerRef.current as google.maps.Marker).setMap === "function") {
+                      (pinMarkerRef.current as google.maps.Marker).setMap(null);
+                    } else {
+                      (pinMarkerRef.current as google.maps.marker.AdvancedMarkerElement).map = null;
+                    }
+                  }
+                  pinMarkerRef.current = new window.google.maps.Marker({ position: { lat, lng }, map });
+                  setPin({ lat, lng, label: null });
+                  // Reverse-geocode a human label — best-effort; the pin works without it.
+                  try {
+                    new window.google.maps.Geocoder().geocode({ location: { lat, lng } }, (results, status) => {
+                      if (status === "OK" && results && results[0]) {
+                        setPin({ lat, lng, label: results[0].formatted_address });
+                      }
+                    });
+                  } catch {
+                    /* label stays coordinates-only — disclosed */
+                  }
+                });
+              }}
+            />
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {pin ? (
+                <p className="flex-1 text-[11px] text-muted-foreground">
+                  Pinned: <span className="font-medium text-foreground">{pin.label ?? `${pin.lat.toFixed(4)}, ${pin.lng.toFixed(4)}`}</span>
+                  {pin.label ? " (approximate label from the pin — not a verified address)" : " (coordinates only)"}
+                </p>
+              ) : (
+                <p className="flex-1 text-[11px] text-muted-foreground">No pin yet — click the map.</p>
+              )}
+              <Button size="sm" onClick={startFromPin} disabled={busy || !pin || !buildingType}>
+                {phase === "creating" ? "Creating…" : "Analyze this pin"}
+              </Button>
+            </div>
+            {pin && !buildingType && (
+              <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">Pick a building type above so the modeled estimate has a real archetype.</p>
+            )}
+          </div>
+        )}
         <input ref={billRef} type="file" hidden accept=".png,.jpg,.jpeg,.pdf" onChange={(e) => startFromBill(e.target.files)} />
 
         {billDraft && (
