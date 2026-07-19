@@ -38,8 +38,16 @@ import { computeCostUsd, recordMeterEvent } from "./costModel";
 import { computeVacantBaseline, evaluateAwayWatchdog, tsInAwayWindow } from "../awayMode";
 import { detectPvSignature, PV_GATED_INSIGHT_KINDS, pvGateMessage } from "./pvDetection";
 import { staleSeedsForDomain } from "../seedLifecycle";
+// Cross-commodity parity: gas/water opportunity generation rides along in the
+// same stage-7 pass as electric ranking (see the injection block below).
+import { generateCommodityOpportunities, type XcOpportunity } from "../commodityOpportunities";
+import { resolveCommodityService } from "../commodityService";
 import type { Site, Meter } from "../../drizzle/schema";
-import { generateCommodityOpportunities } from "../commodityOpportunities"; // cross-commodity parity (stage 7)
+
+/** Opportunity candidate as it flows through ranking/persistence — electric
+ * candidates plus the cross-commodity extras (unit, commodity, per-unit
+ * savings) that gas/water cards carry for implementer-grade rebate math. */
+type OppCand = OpportunityCandidate & Partial<Pick<XcOpportunity, "estUnitsSavedPerYr" | "unit" | "commodity">>;
 
 /**
  * Unoccupied hours per year for a typical single-shift commercial facility:
@@ -305,79 +313,93 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   );
 
   /* Cross-commodity stage-2 parity (owner report Jul 19): gas/water baselines
-     were never persisted — the archetype path above is electric-only (only
-     electric 8760 shapes are seeded). For each non-electric commodity this
-     site can support, persist an annual baseline with the SAME
-     measured-vs-imputed discipline as electric: ≥60 days of that commodity's
-     meter data → annualized measured; else benchmark intensity × sqft
-     (CBECS/RECS/WaterSense), disclosed in confidenceLabel. Gas params carry an
-     HDD-weighted monthly heating split (55% heating share weighted by HDD,
-     45% flat — EIA end-use prior); no fabricated hourly shape, since no gas
-     8760 archetypes are seeded and inventing one would violate the honesty
-     rule. Skipped when analyzing that commodity's own meter directly (the
-     block above already persisted its real baseline). */
+     are persisted with the SAME measured-vs-imputed discipline as electric —
+     ≥60 days of that commodity's meter data → annualized measured; else
+     benchmark intensity × sqft (CBECS/RECS/WaterSense), disclosed verbatim in
+     confidenceLabel. Gas params carry an HDD-weighted monthly heating split
+     (55% heating share weighted by HDD — EIA end-use prior); no fabricated
+     hourly shape, since no gas/water 8760 archetypes are seeded and inventing
+     one would violate the honesty rule.
+     Service applicability (owner reports Jul 19: "not all sites are dual
+     fuel", "not every building has a water or electric hookup", "service
+     areas can attribute or impute this"): each commodity passes the shared
+     resolution ladder in server/commodityService.ts — user override →
+     meter/equipment evidence → utility service-territory imputation (seeded
+     tariff snapshot) → commodity default (gas never assumed; electric/water
+     plausible-active). Skips are narrated with the resolved reason. Skipped
+     for the commodity being analyzed directly (its real fit persisted above).
+     Failures never fail the run. */
   try {
     const allMeters = await h.listMeters(site.id, userId);
     for (const com of ["gas", "water"] as const) {
-      if (meter?.commodity === com) continue; // already handled above with full fit
+      if (meter?.commodity === com) continue; // real fit already persisted above
+      // Service-applicability ladder (shared with stage-7): user override →
+      // meter/equipment evidence → territory imputation → commodity default
+      // (gas never assumed; water plausible-active). Skips narrated verbatim.
+      const svc = await resolveCommodityService(site, userId, com).catch(() => null);
+      if (svc && !svc.analyze) {
+        narrate(`${com === "gas" ? "Gas" : "Water"} baseline skipped: ${svc.reason}`);
+        continue;
+      }
       const cMeter =
         allMeters.find((m) => m.commodity === com && m.meterRole !== "submeter") ??
         allMeters.find((m) => m.commodity === com) ??
         null;
       let annual: number | null = null;
-      let basisLabel = "";
+      let basisLabel: string | null = null;
       let trainStart: number | null = null;
       let trainEnd: number | null = null;
       if (cMeter) {
-        const pts = await h.getIntervalPoints(cMeter.id, userId);
-        if (pts.length >= 2) {
-          const span = Math.max(1, (pts[pts.length - 1].ts - pts[0].ts) / 86_400_000);
-          const tot = pts.reduce((s, p) => s + p.usage, 0);
-          if (span >= 60 && tot > 0) {
-            annual = (tot / span) * 365;
-            basisLabel = `measured — annualized from ${Math.round(span)} days of ${com} data`;
-            trainStart = pts[0].ts;
-            trainEnd = pts[pts.length - 1].ts;
+        const cPts = await h.getIntervalPoints(cMeter.id, userId);
+        if (cPts.length >= 2) {
+          const spanDays = Math.max(1, (cPts[cPts.length - 1].ts - cPts[0].ts) / 86_400_000);
+          const total = cPts.reduce((s, p) => s + p.usage, 0);
+          if (spanDays >= 60 && total > 0) {
+            annual = (total / spanDays) * 365;
+            basisLabel = `measured — annualized from ${Math.round(spanDays)} days of ${com} meter data`;
+            trainStart = cPts[0].ts;
+            trainEnd = cPts[cPts.length - 1].ts;
           }
         }
       }
-      if (annual == null && site.sqft && site.buildingType) {
+      let benchSource: string | null = null;
+      if (annual == null && site.sqft && site.sqft > 0 && site.buildingType) {
         const bm = await h.getBenchmark(site.buildingType, com);
         if (bm) {
           annual = bm.medianEui * site.sqft;
           basisLabel = `benchmark-imputed — ${bm.medianEui} ${bm.unit} (${bm.source}) × ${site.sqft.toLocaleString()} sqft; screening-grade`;
+          benchSource = `${bm.source}:${bm.sourceVersion ?? ""}`;
         }
       }
-      if (annual != null && annual > 0) {
+      if (annual == null || !basisLabel) continue; // neither measured nor imputable — never fabricate
+      // Gas: HDD-weighted monthly heating split (annual only for water — no
+      // defensible monthly shape prior exists for water use).
+      let monthlySplit: number[] | null = null;
+      if (com === "gas" && normals.length === 12) {
         const totalHdd = normals.reduce((s, n) => s + (n.hddBase65 ?? 0), 0);
-        const monthlySplit =
-          com === "gas" && totalHdd > 0
-            ? normals.map((n) => ({
-                month: n.month,
-                units: Math.round(annual! * (0.45 / 12 + 0.55 * ((n.hddBase65 ?? 0) / totalHdd))),
-              }))
-            : normals.map((n) => ({ month: n.month, units: Math.round(annual! / 12) }));
-        await h.saveBaseline({
-          siteId: site.id,
-          meterId: cMeter?.id ?? null,
-          method: basisLabel.startsWith("measured") ? "billing_hdd_cdd" : "archetype_synthetic",
-          commodity: com,
-          params: { annualUnits: Math.round(annual), monthlySplit, split: com === "gas" ? "hdd_weighted_55pct_heating" : "flat" },
-          rSquared: null,
-          cvrmse: null,
-          trainStart,
-          trainEnd,
-          weatherBasis: LABEL_NORMAL_YEAR,
-          confidenceLabel: basisLabel,
-          source: basisLabel.startsWith("measured") ? "measured_intervals" : "benchmark_intensity",
-        });
-        narrate(
-          `${com === "gas" ? "Gas" : "Water"} baseline persisted (${basisLabel.split(" — ")[0]}): ${Math.round(annual).toLocaleString()} ${com === "gas" ? "therms" : "gallons"}/yr`,
-        );
+        if (totalHdd > 0) {
+          const heatFrac = Math.min(0.65, 0.55 * Math.min(1, totalHdd / 3000));
+          monthlySplit = normals.map((n) => (annual! * (1 - heatFrac)) / 12 + annual! * heatFrac * ((n.hddBase65 ?? 0) / totalHdd));
+        }
       }
+      await h.saveBaseline({
+        siteId: site.id,
+        meterId: cMeter?.id ?? null,
+        method: "archetype_synthetic",
+        commodity: com,
+        params: { annualUnits: annual, basis: basisLabel, monthlySplit },
+        rSquared: null,
+        cvrmse: null,
+        trainStart,
+        trainEnd,
+        weatherBasis: com === "gas" && monthlySplit ? "normal_year_hdd_split" : "none",
+        confidenceLabel: basisLabel,
+        source: benchSource ?? (cMeter ? "meter_annualized" : "benchmark"),
+      });
+      narrate(`Persisted ${com} baseline (${basisLabel.startsWith("measured") ? "measured" : "benchmark-imputed"}): ${Math.round(annual).toLocaleString()} ${com === "gas" ? "therms" : "gal"}/yr`);
     }
   } catch (e) {
-    narrate(`Cross-commodity baseline persistence skipped: ${e instanceof Error ? e.message : String(e)}`);
+    narrate(`Cross-commodity baseline pass skipped: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   /* ---------- stage 3: tariff check (current + sweep) ---------- */
@@ -1239,11 +1261,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   narrate(`Wrote ${persistedInsightRows.length} insight${persistedInsightRows.length === 1 ? "" : "s"} — every figure carries its provenance`);
 
   /* ---------- stage 7: opportunities ---------- */
-  // Parity fix (owner report Jul 19): candidates may carry implementer-grade
-  // unit savings + commodity so gas/water measures rank alongside electric
-  // with honest per-unit figures for custom rebate programs.
-  type OppCand = OpportunityCandidate & { estUnitsSavedPerYr?: number; unit?: string; commodity?: string };
-  const oppCands: OppCand[] = [];
+  const oppCands: OpportunityCandidate[] = [];
   // §2.57 sewer-on-winter-water linkage (water meters only): most municipal
   // sewer charges are set from WINTER water usage (winter-quarter-average
   // convention — winter use ≈ indoor-only, proxying what actually reaches the
@@ -1466,23 +1484,21 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     OWNER_CAPEX_KEYS.has(c.key) || c.capexBand === "medium" || c.capexBand === "high";
   /* Cross-commodity parity (owner report Jul 19): gas/water opportunities are
      generated HERE, in the SAME run, because replaceOpportunities wipes the
-     site's rows per analysis — a separate run would let an electric re-run
-     silently clobber the gas/water cards. Baselines follow the same
-     imputed-vs-measured discipline as electric: measured when ≥60 days of
-     that commodity's meter data exists, else benchmark-imputed
-     (CBECS/RECS/WaterSense intensity × sqft), disclosed verbatim on every
-     card. Injected BEFORE tenure filtering so renter/HOA rules apply to
-     gas/water capex measures identically. */
+     site's rows per analysis — generating them in a separate run would let an
+     electric re-run silently clobber the gas/water cards. Baselines follow
+     the same imputed-vs-measured discipline as electric: measured when ≥60
+     days of that commodity's meter data exists, else benchmark-imputed
+     (CBECS/RECS/WaterSense intensity × sqft) with the imputation disclosed
+     verbatim on every card. Injected BEFORE tenure filtering so renter/HOA
+     rules apply to gas/water capex measures identically. */
   try {
     const currentCommodity = meter?.commodity ?? "electric";
-    const xc = (
-      await generateCommodityOpportunities(
-        { id: site.id, buildingType: site.buildingType, sqft: site.sqft, state: site.state },
-        userId,
-        normals,
-        narrate,
-      )
-    ).filter((c) => c.commodity !== currentCommodity);
+    const xc = (await generateCommodityOpportunities(
+      { id: site.id, buildingType: site.buildingType, sqft: site.sqft, state: site.state },
+      userId,
+      normals,
+      narrate,
+    )).filter((c) => c.commodity !== currentCommodity);
     const existingKeys = new Set(oppCands.map((c) => c.key));
     for (const c of xc) if (!existingKeys.has(c.key)) oppCands.push(c);
   } catch (e) {

@@ -112,6 +112,11 @@ export const sites = mysqlTable(
     /** optional away window (ms epoch); null = indefinite while awayMode on */
     awayStart: bigint("awayStart", { mode: "number" }),
     awayEnd: bigint("awayEnd", { mode: "number" }),
+    /** SVC (owner reports Jul 19): per-commodity service profile — JSON object
+     * { electric?: "active"|"none"|"unknown", gas?: ..., water?: ... }. User
+     * override tier of the resolution ladder in server/commodityService.ts;
+     * null/missing keys mean "unknown" (evidence → territory → default apply). */
+    servicesProfile: json("servicesProfile"),
     /** Batch-45 (pass 1959): per-field refinement record for quick-start sites —
      * JSON array of core field names (buildingType/sqft/vintage) the user has
      * explicitly provided. Site-level attrSource flips on the FIRST refinement,

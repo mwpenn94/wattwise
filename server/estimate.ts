@@ -18,7 +18,7 @@ import { archetypeBaseline } from "./analytics/baseline";
 import * as h from "./dbHelpers";
 import { costOnTariff, tariffEligible } from "./analytics/tariffEngine";
 import type { TariffStructure } from "../shared/wattwise";
-import { buildAccuracyLadder } from "../shared/capabilityMatrix";
+import { buildAccuracyLadder } from "../shared/capabilityMatrix"; // accuracy ladder + cross-commodity gas teaser
 
 /* ---------------- IP rate limiting (public endpoint guard) ---------------- */
 const BUCKET_MAX = 12; // estimates per window per IP
@@ -58,9 +58,7 @@ export interface PublicEstimate {
   percentileBand: string | null;
   betterThanMedian: boolean | null;
   benchmarkSource: string | null;
-  /** cross-commodity parity (owner report Jul 19): gas is benchmark-imputed the
-   * same honest way electric is archetype-imputed — present only when a gas
-   * benchmark exists for the building type. Never fabricated when absent. */
+  /** cross-commodity teaser — benchmark-imputed gas estimate (null when no gas benchmark exists for the type) */
   gasEstimate: {
     annualTherms: number;
     annualCostUsd: number;
@@ -193,10 +191,12 @@ export async function computeAddressEstimate(input: {
             : "bottom quartile";
   }
 
-  // 5b. Gas estimate — benchmark intensity × sqft, priced on the first seeded
-  //     state gas tariff's flat rate, else a disclosed national average. Water
-  //     is deliberately omitted from the public teaser (rates vary too much by
-  //     district to be honest without an address-verified utility).
+  // 5b. Cross-commodity gas teaser — benchmark-imputed therms for the type/size,
+  //     priced on the cheapest seeded gas tariff for the state, else the EIA
+  //     national average. Null (not zero) when no gas benchmark exists — the
+  //     teaser never fabricates a number. Framed "if your building uses gas":
+  //     an anonymous estimate has no meter or equipment evidence, so the copy
+  //     must not assert dual fuel (owner report Jul 19).
   let gasEstimate: PublicEstimate["gasEstimate"] = null;
   const gasBench = await h.getBenchmark(input.buildingType, "gas");
   if (gasBench && sqft > 0) {
@@ -205,24 +205,20 @@ export async function computeAddressEstimate(input: {
     let gasTariffName: string | null = null;
     const gasTariffs = state ? await h.listTariffs("gas", state) : [];
     for (const t of gasTariffs) {
-      const s = t.structure as TariffStructure;
-      const r = s.energy?.[0]?.ratePerUnit;
-      if (typeof r === "number" && r > 0) {
+      const r = (t.structure as TariffStructure)?.energy?.[0]?.ratePerUnit;
+      if (typeof r === "number" && r > 0 && (gasRate == null || r < gasRate)) {
         gasRate = r;
         gasTariffName = t.name;
-        break;
       }
     }
-    const NATIONAL_AVG_PER_THERM = 1.2; // EIA 2025 blended commercial/residential — disclosed fallback
-    const rate = gasRate ?? NATIONAL_AVG_PER_THERM;
-    const fixed = 0; // public teaser: usage charge only, disclosed in basis
-    const annualGasCost = annualTherms * rate + fixed;
+    if (gasRate == null) gasRate = 1.2; // EIA 2025 national average $/therm — disclosed below
+    const gasAnnualCost = annualTherms * gasRate;
     gasEstimate = {
       annualTherms: Math.round(annualTherms),
-      annualCostUsd: Math.round(annualGasCost),
-      monthlyCostUsd: Math.round(annualGasCost / 12),
+      annualCostUsd: Math.round(gasAnnualCost),
+      monthlyCostUsd: Math.round(gasAnnualCost / 12),
       tariffName: gasTariffName,
-      basis: `${gasBench.medianEui} therms/sqft-yr median (${gasBench.source}) × ${sqft.toLocaleString()} sqft, priced at ${gasTariffName ? `the seeded ${gasTariffName} rate` : `a national average $${NATIONAL_AVG_PER_THERM.toFixed(2)}/therm`} — benchmark-imputed, not your bill`,
+      basis: `If your building uses natural gas: benchmark-imputed — ${gasBench.medianEui} ${gasBench.unit} (${gasBench.source}) × ${sqft.toLocaleString()} sqft, priced at ${gasTariffName ? `the seeded ${gasTariffName} rate` : "the EIA national average $1.20/therm"}. All-electric buildings can ignore this line.`,
     };
   }
 

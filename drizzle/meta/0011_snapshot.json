@@ -1,8 +1,8 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "f0be1187-1185-4440-9546-c7bf20840ea2",
-  "prevId": "08892ee3-a3d1-4e51-ba5f-2df13c7b248d",
+  "id": "51cb996e-67bd-4940-9fa6-9dfc607ac82b",
+  "prevId": "f0be1187-1185-4440-9546-c7bf20840ea2",
   "tables": {
     "alerts": {
       "name": "alerts",
@@ -1560,6 +1560,20 @@
           "notNull": true,
           "autoincrement": false
         },
+        "unitCommodity": {
+          "name": "unitCommodity",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "unitLabel": {
+          "name": "unitLabel",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "amountCapUsd": {
           "name": "amountCapUsd",
           "type": "double",
@@ -2767,7 +2781,7 @@
         },
         "transform": {
           "name": "transform",
-          "type": "enum('rate_switch','solar','battery_peak_shave','schedule_shift','led_equipment','electrification','ev_charging','occupancy_change','hypothetical_building')",
+          "type": "enum('rate_switch','solar','battery_peak_shave','schedule_shift','led_equipment','electrification','ev_charging','occupancy_change','hypothetical_building','gas_efficiency','water_efficiency')",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -3604,6 +3618,13 @@
         "awayEnd": {
           "name": "awayEnd",
           "type": "bigint",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "servicesProfile": {
+          "name": "servicesProfile",
+          "type": "json",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

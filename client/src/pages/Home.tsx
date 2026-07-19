@@ -429,7 +429,7 @@ function SampleInsightCard() {
                 <p className="mt-1 text-xs text-muted-foreground">Peer comparison: {sample.data.percentileBand}</p>
               )}
               <p className="mt-3 text-xs text-muted-foreground">
-                This is a real analysis of a demo office in Tucson — type your address above to see yours.
+                This is a real analysis of a typical U.S. office on national-average benchmarks and rates — type your address above to see yours priced on your local climate and utility.
               </p>
             </>
           )}

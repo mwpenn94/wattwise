@@ -25,6 +25,7 @@ import QuickStart from "@/components/QuickStart";
 import { MarkImplementedDialog, ProveItSection } from "@/components/ProveIt";
 import RefineChips from "@/components/RefineChips";
 import SiteGeometryPanel from "@/components/SiteGeometryPanel";
+import UtilityServicesCard from "@/components/UtilityServicesCard";
 import { Link, useSearch } from "wouter";
 
 type Demand = {
@@ -238,6 +239,14 @@ export default function Dashboard() {
       {activeSiteId != null && (
         <div className="mt-4">
           <SiteGeometryPanel siteId={activeSiteId} />
+        </div>
+      )}
+
+      {/* SVC: per-commodity service applicability — what we analyze and why,
+          with one-tap correction (all-electric, well water, off-grid). */}
+      {activeSiteId != null && (
+        <div className="mt-4">
+          <UtilityServicesCard siteId={activeSiteId} />
         </div>
       )}
 
@@ -871,6 +880,12 @@ export default function Dashboard() {
                   why={o.description ?? ""}
                   confidence={chipFromConfidence(o.confidence, o.disaggregationMethod === "nilmtk_1min_plus")}
                   extraChips={[
+                    /* Parity fix (Jul 19): gas/water measures rank alongside electric —
+                       the commodity chip makes the cross-commodity feed legible. */
+                    ...((): string[] => {
+                      const com = (o.provenance as Record<string, unknown> | null)?.commodity as string | undefined;
+                      return com && com !== "electric" ? [com === "gas" ? "natural gas" : com] : [];
+                    })(),
                     ...(o.ratchetAware ? ["ratchet-aware"] : []),
                     ...(o.disaggregationMethod ? [o.disaggregationMethod.replace(/_/g, " ")] : []),
                   ]}

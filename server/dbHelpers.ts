@@ -167,7 +167,7 @@ export async function createSite(data: typeof sites.$inferInsert) {
 export async function updateSite(
   siteId: number,
   userId: number,
-  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields" | "tenure" | "hasSolar" | "awayMode" | "awayStart" | "awayEnd" | "pvDetectionStatus" | "pvDetectedAt" | "netMeteringBasis" | "occupancyChangedAt" | "leaseType">>,
+  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields" | "tenure" | "hasSolar" | "awayMode" | "awayStart" | "awayEnd" | "pvDetectionStatus" | "pvDetectedAt" | "netMeteringBasis" | "occupancyChangedAt" | "leaseType" | "servicesProfile">>,
 ) {
   // GAP-L: attribute updates are ACTS — owner or facility_manager may write;
   // read_only members (and strangers) are rejected inside assertSiteActor.
@@ -768,7 +768,9 @@ export async function getLatestAnalysis(siteId: number, userId: number) {
   await assertSiteViewer(siteId, userId);
   const db = await requireDb();
   const rows = await db.select().from(analyses).where(eq(analyses.siteId, siteId)).orderBy(desc(analyses.id)).limit(1);
-  return rows[0];
+  // null, never undefined — this feeds a tRPC .query and React Query treats
+  // undefined data as an error state that can crash the console page.
+  return rows[0] ?? null;
 }
 
 export async function saveBaseline(data: typeof baselines.$inferInsert) {
@@ -781,7 +783,10 @@ export async function getLatestBaseline(siteId: number, userId: number) {
   await assertSiteOwner(siteId, userId);
   const db = await requireDb();
   const rows = await db.select().from(baselines).where(eq(baselines.siteId, siteId)).orderBy(desc(baselines.id)).limit(1);
-  return rows[0];
+  // React Query rejects `undefined` query data ("Query data cannot be
+  // undefined") and the resulting error can take down the whole console page
+  // — a site with no analysis yet must read as an empty state, not a crash.
+  return rows[0] ?? null;
 }
 
 export async function replaceInsights(siteId: number, rows: Array<typeof insights.$inferInsert>) {

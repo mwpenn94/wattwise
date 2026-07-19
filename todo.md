@@ -363,8 +363,31 @@
 - [x] VIS-3: Verified live: prod bundle index-BfGoGYCV.js carries all feature strings, API healthy, DB seeded; UI screenshots confirm Scenarios (gas/water kinds), Tariffs (commodity tabs), Reports (M&V card). Remaining visibility is data-dependent (Dashboard pills need gas/water meters; implementer savings appears after a run)
 
 ## Commodity parity in imputed usage + auto opportunities (reported Jul 19)
-- [ ] OPP-1: Stage-2 parity — per-commodity imputed baselines for gas/water meters without data (benchmark intensity × sqft, HDD-weighted monthly split for gas heating, disclosed), saved with correct commodity (remove electric hardcode)
-- [ ] OPP-2: Stage-7 parity — auto-generated gas opportunities (heating tune-up/controls, hot-water efficiency, weatherization tied to envelope) and water opportunities (fixture efficiency, leak screening), priced at assigned/seeded gas-water rates, ranked with electric, with implementer unit savings
-- [ ] OPP-3: Analysis runs cover gas/water meters (metered AND imputed) and surfaces show cross-commodity opportunities together
-- [ ] OPP-4: Public estimate funnel gains gas imputed usage/cost alongside electric with benchmark provenance
-- [ ] OPP-5: Vitest coverage + live end-to-end verification of all parity paths
+- [x] OPP-1: Stage-2 parity — per-commodity imputed baselines for gas/water meters without data (benchmark intensity × sqft, HDD-weighted monthly split for gas heating, disclosed), saved with correct commodity (remove electric hardcode)
+- [x] OPP-2: Stage-7 parity — auto-generated gas opportunities (heating tune-up/controls, hot-water efficiency, weatherization tied to envelope) and water opportunities (fixture efficiency, leak screening), priced at assigned/seeded gas-water rates, ranked with electric, with implementer unit savings
+- [x] OPP-3: Analysis runs cover gas/water meters (metered AND imputed) and surfaces show cross-commodity opportunities together
+- [x] OPP-4: Public estimate funnel gains gas imputed usage/cost alongside electric with benchmark provenance
+- [x] OPP-5: Vitest coverage + live end-to-end verification of all parity paths
+
+## National sample estimate (requested Jul 19)
+- [x] NS-1: Replace the Tucson-specific sample with a location-neutral "typical U.S. office" sample — national benchmarks + blended national rates, honest provenance (no fake address/city)
+- [x] NS-2: Update estimator UI copy (button + result labels) to reflect the national sample; no map pin for a non-real address
+- [x] NS-3: Tests updated/passing, tsc clean, live API verified, checkpoint saved
+
+## Building geometry failure (reported Jul 19)
+- [x] GEO-1: Reproduce and root-cause the building geometry failure (logs + code path)
+- [x] GEO-2: Fix the failure with honest error handling (no silent failures), tests updated
+- [x] GEO-3: Verify geometry flow end-to-end live
+
+## Fuel applicability per site (reported Jul 19)
+- [x] FUEL-1: Audit — do gas/water imputed baselines + opportunities gate on per-site fuel evidence (meters, bills, equipment, user confirmation) or assume dual fuel everywhere?
+- [x] FUEL-2: Implement evidence-based fuel gating: only generate gas/water baselines/opportunities when the site has that commodity's meter, OR profile equipment burns that fuel, OR user confirms; never assume
+- [x] FUEL-3: Surface the gating honestly in UI (e.g., "no gas meter or gas equipment on this site — add one to unlock gas analysis"), tests + live verification
+
+## Per-commodity service applicability (reported Jul 19)
+- [x] SVC-1: Schema — per-site service profile (electric/gas/water: active | none | unknown) with user override; single shared resolution used by all analysis paths
+- [x] SVC-2: Resolution ladder — user override → meter/equipment evidence → utility service-territory imputation (registry of which commodities are served at the site's location) → commodity-specific default (electric/water plausible, gas never assumed); provenance disclosed at every tier
+- [x] SVC-3: Analysis honors the profile — no baselines/opportunities for a commodity resolved "none"; skips narrated honestly with the resolution reason
+- [x] SVC-4: UI — site-level utility services control (per-commodity on/off/unknown) showing provenance (user-set vs evidence vs territory-imputed)
+- [x] SVC-5: Tests for resolution ladder combinations + live verification
+

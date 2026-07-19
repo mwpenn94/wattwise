@@ -252,7 +252,7 @@ export function PublicEstimator() {
                   disabled={sampleMut.isPending}
                 >
                   {sampleMut.isPending ? <Spinner className="h-3 w-3" /> : <Building2 className="h-3.5 w-3.5" />}
-                  Try a sample Tucson office
+                  Try a typical U.S. office
                 </button>
               </div>
               {locateError && <p className="mt-2 text-[11px] text-muted-foreground">{locateError}</p>}

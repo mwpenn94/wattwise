@@ -63,6 +63,7 @@ import { reconcileBill } from "./billReconciliation";
 import { assessSeedFreshness, recordParseOutcome, recordUnknownTariff, sweepUnverifiedTariffs } from "./seedLifecycle";
 import { incentiveEconomics } from "./incentives";
 import { runCommodityEfficiency } from "./commodityScenario";
+import { resolveAllCommodityServices } from "./commodityService";
 import { assessMv } from "./mv";
 import { VERTICAL_PACKS, addProductionPeriod, listProduction, deleteProductionPeriod } from "./verticals";
 
@@ -178,24 +179,27 @@ export const appRouter = router({
         return { estimate: est, place: { formattedAddress: place.formattedAddress, lat: place.lat, lng: place.lng, placeId: place.placeId } };
       }),
     /* §1 demo building — a zero-commitment sample estimate (no address, no
-     * sign-up). Uses a fixed, clearly-labeled Tucson office archetype so a
-     * visitor can see the product's voice before typing anything real. */
+     * sign-up). Location-neutral by design (owner request Jul 19): a "typical
+     * U.S. office" — no state → priced on the national blended commercial rate
+     * and the mixed-climate 4A archetype — so visitors anywhere see a number
+     * that reads as "buildings like yours", not "someone else's city". No
+     * fabricated address, no map pin: the demo never pretends to be a place. */
     sample: publicProcedure.mutation(async ({ ctx }) => {
       if (!estimateRateAllows(ctx.req.ip ?? "unknown")) {
         throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many estimates from this connection — try again in a few minutes." });
       }
       const est = await computeAddressEstimate({
-        formattedAddress: "Sample office · Tucson, AZ 85701",
-        city: "Tucson",
-        state: "AZ",
-        zip: "85701",
+        formattedAddress: null,
+        city: null,
+        state: null,
+        zip: null,
         placeVerified: false,
         buildingType: "office",
         sqft: 12_000,
       });
       return {
         estimate: est,
-        place: { formattedAddress: "Sample office · Tucson, AZ 85701 (demo building)", lat: 32.2217, lng: -110.9698, placeId: "sample-tucson-office" },
+        place: { formattedAddress: "Typical U.S. office · 12,000 sqft (demo building — national averages)", lat: null, lng: null, placeId: "sample-national-office" },
         isSample: true as const,
       };
     }),
@@ -208,10 +212,10 @@ export const appRouter = router({
       const now = Date.now();
       if (sampleCardCache && now - sampleCardCache.at < 6 * 60 * 60 * 1000) return sampleCardCache.value;
       const est = await computeAddressEstimate({
-        formattedAddress: "Sample office · Tucson, AZ 85701",
-        city: "Tucson",
-        state: "AZ",
-        zip: "85701",
+        formattedAddress: null,
+        city: null,
+        state: null,
+        zip: null,
         placeVerified: false,
         buildingType: "office",
         sqft: 12_000,
@@ -221,7 +225,7 @@ export const appRouter = router({
         topOpportunity: est.topOpportunity,
         percentileBand: est.percentileBand,
         rung: est.accuracy.rung,
-        label: "Sample office · Tucson, AZ 85701 (demo building)",
+        label: "Typical U.S. office · 12,000 sqft (demo building — national averages)",
       };
       sampleCardCache = { at: now, value };
       return value;
@@ -278,6 +282,35 @@ export const appRouter = router({
       const { site, role } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
       return { ...site, myRole: role };
     }),
+    /** SVC (owner reports Jul 19) — per-commodity service applicability with
+     * provenance. Resolution ladder: user override → meter/equipment evidence →
+     * territory imputation → commodity default (gas never assumed). */
+    services: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
+      return resolveAllCommodityServices(site, ctx.user.id);
+    }),
+    setServices: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          electric: z.enum(["active", "none", "unknown"]).optional(),
+          gas: z.enum(["active", "none", "unknown"]).optional(),
+          water: z.enum(["active", "none", "unknown"]).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Owner or facility_manager may set; merge over the existing profile so
+        // a single-commodity toggle never clobbers the others. "unknown" clears
+        // the override and returns that commodity to evidence/territory tiers.
+        const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
+        const prior = (site.servicesProfile ?? {}) as Record<string, string>;
+        const merged: Record<string, string> = { ...prior };
+        for (const c of ["electric", "gas", "water"] as const) {
+          if (input[c]) merged[c] = input[c]!;
+        }
+        await h.updateSite(input.siteId, ctx.user.id, { servicesProfile: merged });
+        return resolveAllCommodityServices({ ...site, servicesProfile: merged }, ctx.user.id);
+      }),
     /** GAP-L — sites shared WITH me, with my role on each. */
     sharedWithMe: protectedProcedure.query(async ({ ctx }) => {
       const rows = await h.listSharedSites(ctx.user.id);
