@@ -33,8 +33,12 @@ interface SeedIncentive {
   measureKeys: string[];
   sectorClass: "residential" | "commercial" | "both";
   kind: "tax_credit" | "rebate" | "bill_credit" | "dr_payment";
-  amountType: "percent_of_cost" | "fixed_usd" | "usd_per_year";
+  amountType: "percent_of_cost" | "fixed_usd" | "usd_per_year" | "usd_per_unit_saved";
   amountValue: number;
+  /** for usd_per_unit_saved: which commodity's first-year unit savings the rate applies to */
+  unitCommodity?: "electric" | "gas" | "water";
+  /** for usd_per_unit_saved: the unit label the rate is quoted in (kWh, therm, kgal) */
+  unitLabel?: string;
   amountCapUsd?: number;
   /** ISO date or null for no legislated sunset */
   expires?: string;
@@ -130,6 +134,57 @@ const SEED: SeedIncentive[] = [
     notes: "Prescriptive + custom lighting rebates, roughly 20–50% of project cost; we quote 35% capped at $20k.",
   },
   {
+    code: "az_aps_custom_ci",
+    name: "APS Custom Business Solutions rebate ($/kWh saved)",
+    level: "utility",
+    jurisdiction: "AZ",
+    utilityName: "APS",
+    measureKeys: ["led_retrofit", "hvac_tuneup", "baseload_reduction", "efficiency", "peak_management"],
+    sectorClass: "commercial",
+    kind: "rebate",
+    amountType: "usd_per_unit_saved",
+    amountValue: 0.08,
+    unitCommodity: "electric",
+    unitLabel: "kWh",
+    amountCapUsd: 300_000,
+    sourceName: "APS Business Custom incentives",
+    notes: "Custom (non-prescriptive) projects are paid per first-year kWh saved — program rates historically ~$0.05–$0.11/kWh; we quote a mid-range $0.08/kWh snapshot, capped. Savings must be supported by engineering calculations or M&V — the Verified Savings (M&V) panel produces the implementer-ready numbers.",
+  },
+  {
+    code: "az_srp_custom_ci",
+    name: "SRP Standard/Custom Business rebate ($/kWh saved)",
+    level: "utility",
+    jurisdiction: "AZ",
+    utilityName: "SRP",
+    measureKeys: ["led_retrofit", "hvac_tuneup", "baseload_reduction", "efficiency"],
+    sectorClass: "commercial",
+    kind: "rebate",
+    amountType: "usd_per_unit_saved",
+    amountValue: 0.05,
+    unitCommodity: "electric",
+    unitLabel: "kWh",
+    amountCapUsd: 200_000,
+    sourceName: "SRP Business Solutions custom incentives",
+    notes: "Custom measures paid per first-year kWh saved (snapshot ~$0.05/kWh). First-year unit savings from the scenario or M&V panel feed this directly.",
+  },
+  {
+    code: "az_swgas_efficiency",
+    name: "Southwest Gas commercial efficiency rebate ($/therm saved)",
+    level: "utility",
+    jurisdiction: "AZ",
+    utilityName: "Southwest Gas",
+    measureKeys: ["gas_efficiency", "hvac_tuneup", "efficiency"],
+    sectorClass: "commercial",
+    kind: "rebate",
+    amountType: "usd_per_unit_saved",
+    amountValue: 1.0,
+    unitCommodity: "gas",
+    unitLabel: "therm",
+    amountCapUsd: 50_000,
+    sourceName: "Southwest Gas energy-efficiency programs",
+    notes: "Gas efficiency measures paid per first-year therm saved (snapshot ~$1.00/therm, program-dependent).",
+  },
+  {
     code: "expired_example_ev_credit",
     name: "Expired legacy state solar credit (test guard)",
     level: "state",
@@ -164,6 +219,8 @@ export async function seedIncentives(): Promise<void> {
       kind: s.kind,
       amountType: s.amountType,
       amountValue: s.amountValue,
+      unitCommodity: s.unitCommodity ?? null,
+      unitLabel: s.unitLabel ?? null,
       amountCapUsd: s.amountCapUsd ?? null,
       expiresAt: s.expires ? new Date(s.expires + "T23:59:59Z").getTime() : null,
       sourceName: s.sourceName,
@@ -188,6 +245,14 @@ export interface IncentiveMatch {
   valueUsd: number;
   /** for dr_payment: recurring annual payment instead of capex offset */
   annualUsd: number | null;
+  /** for usd_per_unit_saved: the program rate (e.g. 0.08 = $0.08/kWh) */
+  ratePerUnitSaved: number | null;
+  /** for usd_per_unit_saved: unit the rate is quoted in (kWh, therm, kgal) */
+  rateUnit: string | null;
+  /** for usd_per_unit_saved: commodity whose savings the rate pays on */
+  rateCommodity: string | null;
+  /** true when valueUsd could not be computed because no unit savings were supplied */
+  needsUnitSavings: boolean;
   whoPays: string;
   whoBenefits: "owner" | "occupant" | "either";
   sourceName: string;
@@ -227,6 +292,8 @@ export async function matchIncentives(opts: {
   utilityName?: string | null;
   sectorClass: "residential" | "commercial";
   capexUsd: number;
+  /** first-year unit savings per commodity (kWh, therms, gallons) — feeds usd_per_unit_saved custom rebates */
+  unitsSavedAnnual?: Partial<Record<"electric" | "gas" | "water", number>>;
   now?: number;
 }): Promise<IncentiveMatch[]> {
   const db = await getDb();
@@ -251,11 +318,24 @@ export async function matchIncentives(opts: {
 
     let valueUsd = 0;
     let annualUsd: number | null = null;
+    let needsUnitSavings = false;
     if (r.amountType === "percent_of_cost") {
       valueUsd = opts.capexUsd * r.amountValue;
       if (r.amountCapUsd != null) valueUsd = Math.min(valueUsd, r.amountCapUsd);
     } else if (r.amountType === "fixed_usd") {
       valueUsd = r.amountCapUsd != null ? Math.min(r.amountValue, r.amountCapUsd) : r.amountValue;
+    } else if (r.amountType === "usd_per_unit_saved") {
+      // Custom-project rebates pay per first-year unit saved ($/kWh, $/therm).
+      // Water rates are quoted per kgal but savings arrive in gallons.
+      const commodity = (r.unitCommodity ?? "electric") as "electric" | "gas" | "water";
+      const savedRaw = opts.unitsSavedAnnual?.[commodity];
+      if (savedRaw != null && savedRaw > 0) {
+        const saved = commodity === "water" && r.unitLabel === "kgal" ? savedRaw / 1000 : savedRaw;
+        valueUsd = saved * r.amountValue;
+        if (r.amountCapUsd != null) valueUsd = Math.min(valueUsd, r.amountCapUsd);
+      } else {
+        needsUnitSavings = true; // rate is shown; dollars await a savings figure
+      }
     } else {
       annualUsd = r.amountValue;
     }
@@ -267,6 +347,10 @@ export async function matchIncentives(opts: {
       kind: r.kind,
       valueUsd: Math.round(valueUsd),
       annualUsd,
+      ratePerUnitSaved: r.amountType === "usd_per_unit_saved" ? r.amountValue : null,
+      rateUnit: r.amountType === "usd_per_unit_saved" ? (r.unitLabel ?? null) : null,
+      rateCommodity: r.amountType === "usd_per_unit_saved" ? (r.unitCommodity ?? null) : null,
+      needsUnitSavings,
       whoPays: whoPaysFor(r),
       whoBenefits: benefits,
       sourceName: r.sourceName,
@@ -291,6 +375,8 @@ export async function incentiveEconomics(opts: {
   sectorClass: "residential" | "commercial";
   capexUsd: number;
   annualSavingsUsd: number;
+  /** first-year unit savings per commodity — prices usd_per_unit_saved custom rebates */
+  unitsSavedAnnual?: Partial<Record<"electric" | "gas" | "water", number>>;
   tenure?: string | null;
   now?: number;
 }): Promise<IncentiveEconomics> {

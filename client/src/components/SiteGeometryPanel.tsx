@@ -43,7 +43,8 @@ interface Candidate {
   osmId?: string;
   distanceM?: number;
   prism?: boolean;
-  source?: "osm" | "microsoft";
+  source?: "osm" | "microsoft" | "usa_structures";
+  heightSource?: "footprint_dataset" | "stories_estimate";
 }
 
 const ORDER = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const;
@@ -267,12 +268,16 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     }
     if (typeof selected === "number" && candidates[selected]) {
       const c = candidates[selected];
+      // Height pre-fill: OSM tags and USA Structures LiDAR heights are real
+      // dataset measurements — send them. Microsoft footprints carry none, so
+      // height falls back to the stories estimate server-side (disclosed).
+      const datasetHeight = c.heightSource === "footprint_dataset";
       confirm.mutate({
         siteId,
         ring: c.ring,
         source: c.source ?? "osm",
         osmId: c.osmId,
-        heightM: c.source === "microsoft" ? undefined : c.heightM,
+        heightM: datasetHeight ? c.heightM : undefined,
         stories: c.stories ?? undefined,
       });
     }
@@ -292,8 +297,8 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
           {hasStored ? <Badge variant="outline" className="text-[10px]">confirmed</Badge> : null}
         </CardTitle>
         <CardDescription>
-          Footprint, height, and orientation sharpen the model — solar sizing, envelope estimates, and the floor-area
-          cross-check all read from here. You confirm; we never silently assert.
+          Footprint, height, and orientation sharpen the model — solar sizing, heating/cooling envelope losses, and the
+          floor-area cross-check all read from here, for every commodity. You confirm; we never silently assert.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -362,7 +367,8 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
                 >
                   {Math.round(c.areaSqft).toLocaleString()} sqft
                   {c.distanceM != null ? ` · ${c.distanceM}m away` : ""}
-                  {c.source === "microsoft" ? " · MS" : ""}
+                  {c.source === "microsoft" ? " · MS" : c.source === "usa_structures" ? " · FEMA" : ""}
+                  {c.heightSource === "footprint_dataset" && c.stories ? ` · ~${c.stories} fl` : ""}
                 </Button>
               ))}
               {fallback && (
@@ -433,9 +439,26 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
                       ))}
                     </div>
                   )}
+                  {active.heightSource === "footprint_dataset" && (
+                    <div className="text-[10px] text-emerald-600 dark:text-emerald-400">
+                      Height {active.heightM.toFixed(1)} m measured by the source dataset — pre-fills stories (≈{active.stories ?? Math.max(1, Math.round(active.heightM / 3.2))}); drawing it yourself overrides.
+                    </div>
+                  )}
+                  {!drawing &&
+                    typeof selected === "number" &&
+                    candidates.length > 1 &&
+                    candidates.some((c) => c.heightSource === "footprint_dataset" && Math.abs(c.heightM - (candidates[selected]?.heightM ?? 0)) > 3.2) && (
+                      <div className="text-[10px] text-muted-foreground">
+                        Nearby building parts have differing measured heights — if your building steps between sections, confirm the part that matches your address (or trace the tallest section yourself).
+                      </div>
+                    )}
                   {!active.prism && (
                     <div className="text-[10px] text-muted-foreground">
-                      {active.source === "microsoft" ? "Microsoft US Building Footprints (ODC-BY)" : "© OpenStreetMap contributors (ODbL)"}
+                      {active.source === "microsoft"
+                        ? "Microsoft US Building Footprints (ODC-BY)"
+                        : active.source === "usa_structures"
+                          ? "FEMA USA Structures (public domain; heights from LiDAR/imagery where available)"
+                          : "© OpenStreetMap contributors (ODbL)"}
                     </div>
                   )}
                 </div>

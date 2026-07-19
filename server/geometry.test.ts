@@ -131,34 +131,77 @@ describe("fetchOsmFootprints (mocked Overpass)", () => {
   });
 });
 
-describe("fetchEsriFootprints (mocked Esri MSBFP feature service)", () => {
-  it("parses esri rings into sorted microsoft-source candidates and filters noise", async () => {
+describe("fetchEsriFootprints (mocked USA Structures + MSBFP fallback)", () => {
+  const lat = 32.2226;
+  const lng = -110.9747;
+
+  it("queries USA Structures first and carries HEIGHT into height-bearing candidates", async () => {
     const { fetchEsriFootprints } = await import("./geometry");
-    const lat = 32.2226;
-    const lng = -110.9747;
     const ringNear = rectRing(lat, lng);
     const ringFar = rectRing(lat + 0.0004, lng, 30, 15);
     const tiny = rectRing(lat, lng, 2, 1.5);
     const fetcher = async (url: string) => {
       expect(url).toContain("esriGeometryPoint");
-      expect(url).toContain("MSBFP2");
+      expect(url).toContain("USA_Structures");
       return {
         features: [
-          { attributes: { OBJECTID: 22 }, geometry: { rings: [ringFar] } },
-          { attributes: { OBJECTID: 11 }, geometry: { rings: [ringNear] } },
-          { attributes: { OBJECTID: 33 }, geometry: { rings: [tiny] } },
+          { attributes: { BUILD_ID: 22, HEIGHT: 9.6, PRIM_OCC: "Education" }, geometry: { rings: [ringFar] } },
+          { attributes: { BUILD_ID: 11, HEIGHT: 6.4, PRIM_OCC: "Residential" }, geometry: { rings: [ringNear] } },
+          { attributes: { BUILD_ID: 33, HEIGHT: 3 }, geometry: { rings: [tiny] } },
         ],
       };
     };
     const cands = await fetchEsriFootprints({ lat, lng }, fetcher);
     expect(cands).toHaveLength(2); // tiny (<10 sqm) filtered
-    expect(cands[0].osmId).toBe("msbfp/11"); // nearest first
-    expect(cands[0].source).toBe("microsoft");
-    expect(cands[0].heightM).toBeNull(); // dataset carries no heights
+    expect(cands[0].osmId).toBe("usastruct/11"); // nearest first
+    expect(cands[0].source).toBe("usa_structures");
+    expect(cands[0].heightM).toBe(6.4); // measured height flows through
+    expect(cands[0].stories).toBe(2); // 6.4 / 3.2
+    expect(cands[0].occupancyClass).toBe("Residential");
     expect(cands[0].areaSqft).toBeGreaterThan(2000);
+    // deriveGeometry treats the measured height as dataset-sourced
+    expect(deriveGeometry(cands[0]).heightSource).toBe("footprint_dataset");
   });
 
-  it("returns [] when the service finds nothing nearby", async () => {
+  it("leaves height null when USA Structures has no measurement (honesty preserved)", async () => {
+    const { fetchEsriFootprints } = await import("./geometry");
+    const fetcher = async () => ({
+      features: [{ attributes: { BUILD_ID: 5, HEIGHT: null }, geometry: { rings: [rectRing(lat, lng)] } }],
+    });
+    const cands = await fetchEsriFootprints({ lat, lng }, fetcher);
+    expect(cands[0].heightM).toBeNull();
+    expect(cands[0].stories).toBeNull();
+    expect(deriveGeometry(cands[0]).heightSource).toBe("stories_estimate");
+  });
+
+  it("falls back to MSBFP2 microsoft-source footprints when USA Structures errors", async () => {
+    const { fetchEsriFootprints } = await import("./geometry");
+    const fetcher = async (url: string) => {
+      if (url.includes("USA_Structures")) throw new Error("service down");
+      expect(url).toContain("MSBFP2");
+      return { features: [{ attributes: { OBJECTID: 11 }, geometry: { rings: [rectRing(lat, lng)] } }] };
+    };
+    const cands = await fetchEsriFootprints({ lat, lng }, fetcher);
+    expect(cands).toHaveLength(1);
+    expect(cands[0].source).toBe("microsoft");
+    expect(cands[0].osmId).toBe("msbfp/11");
+    expect(cands[0].heightM).toBeNull(); // MSBFP carries no heights
+  });
+
+  it("falls back to MSBFP2 when USA Structures returns no features nearby", async () => {
+    const { fetchEsriFootprints } = await import("./geometry");
+    const calls: string[] = [];
+    const fetcher = async (url: string) => {
+      calls.push(url);
+      if (url.includes("USA_Structures")) return { features: [] };
+      return { features: [{ attributes: { OBJECTID: 7 }, geometry: { rings: [rectRing(lat, lng)] } }] };
+    };
+    const cands = await fetchEsriFootprints({ lat, lng }, fetcher);
+    expect(calls).toHaveLength(2);
+    expect(cands[0].source).toBe("microsoft");
+  });
+
+  it("returns [] when both services find nothing nearby", async () => {
     const { fetchEsriFootprints } = await import("./geometry");
     const cands = await fetchEsriFootprints({ lat: 32, lng: -110 }, async () => ({ features: [] }));
     expect(cands).toEqual([]);

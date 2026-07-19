@@ -52,7 +52,19 @@ export default function Dashboard() {
   const activeSiteId = siteSel ? Number(siteSel) : urlSite ? Number(urlSite) : (sites.data?.[0]?.id ?? null);
 
   const meters = trpc.sites.meters.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
-  const meter = meters.data?.find((m) => m.commodity === "electric") ?? meters.data?.[0];
+  // Commodity-aware meter selection: defaults to electric but every commodity
+  // on the site is switchable — gas/water meters are first-class, not hidden.
+  const [meterSel, setMeterSel] = useState<number | null>(null);
+  const meter =
+    (meterSel != null ? meters.data?.find((m) => m.id === meterSel) : undefined) ??
+    meters.data?.find((m) => m.commodity === "electric") ??
+    meters.data?.[0];
+  const meterCommodities = useMemo(() => {
+    const seen = new Map<string, { id: number; commodity: string }>();
+    for (const m of meters.data ?? []) if (!seen.has(m.commodity)) seen.set(m.commodity, { id: m.id, commodity: m.commodity });
+    return Array.from(seen.values());
+  }, [meters.data]);
+  const flowUnit = meter?.commodity === "gas" ? "therms/day" : meter?.commodity === "water" ? "gal/day" : "kW";
   const latest = trpc.analysis.latest.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const baseline = trpc.analysis.baseline.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const insights = trpc.insights.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
@@ -336,9 +348,24 @@ export default function Dashboard() {
       <Card className={`mt-4 border-border/70 ${demandFirst ? "order-1" : "order-3"}`}>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <CardTitle className="font-display text-base">
-            Interval demand — {rangeDays === "all" ? "full history" : `last ${rangeDays} days of data`}
+            {meter?.commodity === "gas" ? "Gas usage" : meter?.commodity === "water" ? "Water usage" : "Interval demand"} — {rangeDays === "all" ? "full history" : `last ${rangeDays} days of data`}
           </CardTitle>
           <div className="flex flex-wrap items-center gap-1.5">
+            {meterCommodities.length > 1 &&
+              meterCommodities.map((mc) => (
+                <button
+                  key={mc.commodity}
+                  type="button"
+                  onClick={() => setMeterSel(mc.id)}
+                  className={`rounded border px-2 py-0.5 font-mono text-[10px] capitalize transition-colors ${
+                    meter?.commodity === mc.commodity
+                      ? "border-primary bg-primary/15 text-primary"
+                      : "border-border text-muted-foreground hover:border-primary/50"
+                  }`}
+                >
+                  {mc.commodity === "gas" ? "gas" : mc.commodity}
+                </button>
+              ))}
             {([30, 90, 365, "all"] as const).map((d) => (
               <button
                 key={String(d)}
@@ -384,11 +411,11 @@ export default function Dashboard() {
                   fontSize={11}
                   minTickGap={48}
                 />
-                <YAxis stroke="oklch(0.6 0.01 260)" fontSize={11} width={44} unit=" kW" />
+                <YAxis stroke="oklch(0.6 0.01 260)" fontSize={11} width={52} unit={` ${flowUnit === "kW" ? "kW" : flowUnit.split("/")[0]}`} />
                 <Tooltip
                   contentStyle={{ background: "oklch(0.22 0.012 260)", border: "1px solid oklch(0.35 0.01 260)", borderRadius: 8, fontSize: 12 }}
                   labelFormatter={(ts) => new Date(Number(ts)).toLocaleString()}
-                  formatter={(v) => [`${v} kW`, "demand"]}
+                  formatter={(v) => [`${v} ${flowUnit === "kW" ? "kW" : flowUnit.split("/")[0]}`, flowUnit === "kW" ? "demand" : "usage"]}
                 />
                 <Area type="monotone" dataKey="kw" stroke="oklch(0.8 0.16 80)" strokeWidth={1.5} fill="url(#kwFill)" isAnimationActive={false} dot={false} />
               </AreaChart>

@@ -258,6 +258,13 @@ export interface ScenarioResults {
   dispatchMethod?: "sequential" | "co_optimized";
   baselineAnnualCost?: number;
   scenarioAnnualCost?: number;
+  /** First-year unit savings by commodity — the figures custom rebate
+   * programs ($/kWh, $/therm saved) pay on. Attached post-run; absent when
+   * the scenario adds load (e.g. EV) or saves nothing. */
+  implementerSavings?: {
+    unitsSavedAnnual: Partial<Record<Commodity, number>>;
+    note: string;
+  };
 }
 
 /* ---------- Interval point used across engines ---------- */

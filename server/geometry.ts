@@ -27,8 +27,10 @@ export interface FootprintCandidate {
   areaSqft: number;
   heightM: number | null;
   stories: number | null;
-  source: "osm" | "microsoft" | "user_drawn" | "prism";
+  source: "osm" | "microsoft" | "usa_structures" | "user_drawn" | "prism";
   osmId?: string;
+  /** USA Structures primary occupancy class (e.g. "Education/Pre-K - 12 Schools") */
+  occupancyClass?: string;
   /** distance from query point to polygon centroid, meters */
   distanceM: number;
   tags?: Record<string, string>;
@@ -302,6 +304,14 @@ export async function fetchOsmFootprints(
 const ESRI_MSBFP_URL =
   "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/MSBFP2/FeatureServer/0/query";
 
+/** FEMA USA Structures — the height-bearing national footprint layer (the same
+ * data family behind Esri's 3D Buildings layer the owner referenced). Public,
+ * point-queryable, returns HEIGHT in meters (LiDAR/NGA where available) plus
+ * occupancy class. Primary Esri-family source; MSBFP2 stays as the footprints-
+ * only fallback when this service errors. */
+const USA_STRUCTURES_URL =
+  "https://services2.arcgis.com/FiaPA4ga0iQKduv3/arcgis/rest/services/USA_Structures_View/FeatureServer/0/query";
+
 interface EsriFeature {
   attributes?: Record<string, unknown>;
   geometry?: { rings?: [number, number][][] };
@@ -319,18 +329,8 @@ async function defaultEsriFetch(url: string): Promise<{ features?: EsriFeature[]
   return (await res.json()) as { features?: EsriFeature[] };
 }
 
-/**
- * Microsoft US Building Footprints (ODbL-free, ODC-BY licensed), hosted by
- * Esri as a public feature service. Second source in the resolution chain:
- * used when Overpass is unreachable or has no mapped building near the point.
- * Footprints only — no height attribute, so heightSource remains
- * stories_estimate and honesty labels reflect that.
- */
-export async function fetchEsriFootprints(
-  point: LatLng,
-  fetcher: EsriFetcher = defaultEsriFetch,
-): Promise<FootprintCandidate[]> {
-  const params = new URLSearchParams({
+function esriQueryParams(point: LatLng, outFields: string): URLSearchParams {
+  return new URLSearchParams({
     where: "1=1",
     geometry: `${point.lng},${point.lat}`,
     geometryType: "esriGeometryPoint",
@@ -338,33 +338,69 @@ export async function fetchEsriFootprints(
     spatialRel: "esriSpatialRelIntersects",
     distance: "60",
     units: "esriSRUnit_Meter",
-    outFields: "OBJECTID",
+    outFields,
     returnGeometry: "true",
     outSR: "4326",
     resultRecordCount: "8",
     f: "json",
   });
-  const data = await fetcher(`${ESRI_MSBFP_URL}?${params.toString()}`);
+}
+
+function esriFeaturesToCandidates(
+  features: EsriFeature[],
+  point: LatLng,
+  source: "microsoft" | "usa_structures",
+): FootprintCandidate[] {
   const candidates: FootprintCandidate[] = [];
-  for (const f of data.features ?? []) {
+  for (const f of features) {
     const ring = f.geometry?.rings?.[0];
     if (!ring || ring.length < 3) continue;
     const typedRing = ring.map((p) => [p[0], p[1]] as [number, number]);
     const areaSqm = ringAreaSqm(typedRing);
     if (areaSqm < 10) continue;
     const { centroid } = projectRing(typedRing);
+    // USA Structures carries HEIGHT in meters (LiDAR/NGA where available);
+    // absent or non-positive values stay null so heightSource honesty holds.
+    const rawH = f.attributes?.HEIGHT;
+    const heightM = source === "usa_structures" && typeof rawH === "number" && rawH > 0 ? Math.round(rawH * 100) / 100 : null;
+    const occ = typeof f.attributes?.PRIM_OCC === "string" && f.attributes.PRIM_OCC ? String(f.attributes.PRIM_OCC) : undefined;
+    const rawId = f.attributes?.BUILD_ID ?? f.attributes?.OBJECTID;
     candidates.push({
       ring: typedRing,
       areaSqft: Math.round(areaSqm * SQM_TO_SQFT),
-      heightM: null,
-      stories: null,
-      source: "microsoft",
-      osmId: f.attributes?.OBJECTID != null ? `msbfp/${f.attributes.OBJECTID}` : undefined,
+      heightM,
+      stories: heightM != null ? Math.max(1, Math.round(heightM / 3.2)) : null,
+      source,
+      occupancyClass: occ,
+      osmId: rawId != null ? `${source === "usa_structures" ? "usastruct" : "msbfp"}/${rawId}` : undefined,
       distanceM: Math.round(haversineM(point, centroid)),
     });
   }
   candidates.sort((a, b) => a.distanceM - b.distanceM);
   return candidates.slice(0, 5);
+}
+
+/**
+ * Esri-family footprints, height-aware. Primary: FEMA USA Structures (HEIGHT
+ * meters + occupancy class — the queryable sibling of the ArcGIS 3D Buildings
+ * layer). Fallback: Microsoft US Building Footprints via MSBFP2 (footprints
+ * only, no height — heightSource stays stories_estimate for those).
+ */
+export async function fetchEsriFootprints(
+  point: LatLng,
+  fetcher: EsriFetcher = defaultEsriFetch,
+): Promise<FootprintCandidate[]> {
+  try {
+    const params = esriQueryParams(point, "BUILD_ID,HEIGHT,PRIM_OCC,SQFEET");
+    const data = await fetcher(`${USA_STRUCTURES_URL}?${params.toString()}`);
+    const withHeights = esriFeaturesToCandidates(data.features ?? [], point, "usa_structures");
+    if (withHeights.length > 0) return withHeights;
+  } catch {
+    // fall through to MSBFP2 — footprints-only is better than nothing
+  }
+  const params = esriQueryParams(point, "OBJECTID");
+  const data = await fetcher(`${ESRI_MSBFP_URL}?${params.toString()}`);
+  return esriFeaturesToCandidates(data.features ?? [], point, "microsoft");
 }
 
 /**
@@ -389,6 +425,7 @@ export function deriveGeometry(cand: FootprintCandidate, neighborShadingFactor =
     footprintSource: (cand.source === "prism" ? undefined : cand.source) as
       | "osm"
       | "microsoft"
+      | "usa_structures"
       | "user_drawn"
       | undefined,
     odblDerived: cand.source === "osm",

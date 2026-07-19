@@ -503,6 +503,8 @@ export const scenarios = mysqlTable(
       "ev_charging",
       "occupancy_change",
       "hypothetical_building",
+      "gas_efficiency",
+      "water_efficiency",
     ]).notNull(),
     params: json("params").notNull(),
     /** load basis: measured_intervals | archetype_scaled */
@@ -733,7 +735,7 @@ export const siteGeometry = mysqlTable(
     userId: int("userId").notNull(),
     /** GeoJSON polygon of the building footprint */
     footprint: json("footprint"),
-    footprintSource: mysqlEnum("footprintSource", ["assessor_gis", "microsoft", "osm", "user_drawn"]),
+    footprintSource: mysqlEnum("footprintSource", ["assessor_gis", "microsoft", "usa_structures", "osm", "user_drawn"]),
     /** footprint area in sqft (derived from polygon or dataset attribute) */
     footprintSqft: double("footprintSqft"),
     heightM: double("heightM"),
@@ -851,9 +853,13 @@ export const incentives = mysqlTable(
     sectorClass: varchar("sectorClass", { length: 16 }).default("both").notNull(),
     /** tax_credit | rebate | bill_credit | dr_payment */
     kind: varchar("kind", { length: 24 }).notNull(),
-    /** percent_of_cost | fixed_usd | usd_per_year (DR) */
+    /** percent_of_cost | fixed_usd | usd_per_year (DR) | usd_per_unit_saved (custom rebates) */
     amountType: varchar("amountType", { length: 24 }).notNull(),
     amountValue: double("amountValue").notNull(),
+    /** for usd_per_unit_saved: commodity whose first-year unit savings the rate pays on (electric|gas|water) */
+    unitCommodity: varchar("unitCommodity", { length: 16 }),
+    /** for usd_per_unit_saved: the quoted unit (kWh, therm, kgal) */
+    unitLabel: varchar("unitLabel", { length: 16 }),
     amountCapUsd: double("amountCapUsd"),
     /** ms epoch; null = no legislated sunset */
     expiresAt: bigint("expiresAt", { mode: "number" }),

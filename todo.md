@@ -340,3 +340,19 @@
 - [x] FP-7: Non-rectangular drawn footprints supported end-to-end (up to 120 vertices) with live shoelace-area readout; verified a 6-vertex L-shape derives correct area/walls/exposure via the live API
 - [x] FP-8: Stories stepper in draw mode (1–120, ≈3.2 m/story) — drawn confirm sends stories+heightM so wall areas, exposure, and prism massing reflect real height
 - [x] FP-9: Root cause confirmed and fixed: overpass-api.de HTTP 406 (UA rejection) + kumi timeout — headers fixed, mirror list expanded and reordered
+
+## Multi-commodity parity + implementer savings (owner report Jul 19)
+- [x] MC-1: Audited: scenarios/tariffs/dashboard/geometry copy were electric-framed while backend already had gas/water tariffs + meters — full map recorded and closed below
+- [x] MC-2: Scenario engine gained gas_efficiency + water_efficiency kinds (server/commodityScenario.ts): measured-interval baseline when ≥60 days of data, CBECS/RECS benchmark baseline otherwise, flat ratePerUnit pricing, per-commodity CO2e, honest disclosures
+- [x] MC-3: Scenarios UI shows Gas efficiency + Water efficiency measures with therms/gallons units and de-electrified copy; reduction input covers all kinds
+- [x] MC-4: Tariffs page now commodity-aware — Electric/Natural gas/Water tabs, per-commodity rate units ($/kWh, $/therm, $/gal), meter assignment filtered by commodity; also fixed a real pricing bug: seeded water tariff stored $5.19/kgal but the engine prices gallons directly — corrected to $0.00519/gal in seed + live DB (was overpricing water 1000x)
+- [x] MC-5: Dashboard has a commodity/meter switcher (pills appear when a site has gas/water meters) with unit-aware chart title, axis, and tooltip
+- [x] MC-6: Geometry panel copy de-electrified — envelope/floor-area now framed as feeding every commodity (verified in UI screenshot)
+- [x] MC-7: Every scenario result now carries implementerSavings — first-year unit savings per commodity (kWh, kW, therms, gallons) exposed on the scenario card, typed in the shared ScenarioResults contract
+- [x] MC-8: Custom-rebate estimator on scenario cards — user-settable $/unit-saved rate prices unit savings into a rebate estimate; incentives engine gained usd_per_unit_saved amount type with seeded APS/SRP custom C&I and SW Gas therm programs; honest modeled-savings disclosures
+- [x] MC-9: Vitest — commodityScenario.test.ts (5 specs: gas benchmark baseline, water, tariff pricing, disclosures, router contract) green; full suite 328 passed; live authenticated API verification passed (gas 636 therms/yr, water 58,000 gal/yr) + UI screenshots of all four surfaces
+- [x] MV-1: M&V verified-savings view shipped — server/mv.ts (IPMVP Option C on the CalTRACK monthly fitter: pre-install baseline, reporting-period projection, avoided units, CV(RMSE)/R² with ASHRAE G14 gate badge) + MvPanel on Reports with meter + in-service-date pickers
+- [x] MV-2: M&V export — Copy-summary button (program-paperwork text with method, fit stats, gate verdict, disclosures) and CSV download (monthly predicted/measured/avoided + fit stats + method rows)
+- [x] HT-1: Footprint candidates carry dataset heights — repointed the Esri-family source to FEMA USA Structures (HEIGHT meters, LiDAR/NGA) with MSBFP2 as footprints-only fallback; OSM height/levels tags already parsed; provenance named per candidate (FEMA/MS badges)
+- [x] HT-2: Stories/height pre-fill — height-bearing candidates show "~N fl" on chips and a measured-height note; confirm sends dataset heightM + stories; manual drawing always overrides
+- [x] HT-3: Differing section heights — when nearby parts differ by >1 story, the panel surfaces an honest note to confirm the matching part or trace the tallest section (no silent averaging)

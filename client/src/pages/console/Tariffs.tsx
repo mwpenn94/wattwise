@@ -23,9 +23,10 @@ export default function Tariffs() {
   // Default the library to the active site's state so users see their own
   // utility's rates first; "all" shows the whole nationwide snapshot.
   const [stateFilter, setStateFilter] = useState<string>("");
+  const [commodity, setCommodity] = useState<"electric" | "gas" | "water">("electric");
   const activeSiteState = (sites.data ?? []).find((s) => s.id === activeSiteId)?.state ?? undefined;
   const effectiveState = stateFilter === "all" ? undefined : stateFilter || activeSiteState;
-  const tariffs = trpc.tariffs.list.useQuery({ state: effectiveState });
+  const tariffs = trpc.tariffs.list.useQuery({ state: effectiveState, commodity });
   const meters = trpc.sites.meters.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const utils = trpc.useUtils();
   const assign = trpc.sites.setMeterTariff.useMutation({
@@ -42,10 +43,24 @@ export default function Tariffs() {
     <div className="container max-w-5xl py-8">
       <h1 className="font-display text-2xl font-bold tracking-tight">Tariff library</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Nationwide representative rates (all 50 states + DC) from a URDB-style snapshot — flat, time-of-use, and
-        demand-charge structures per state. Assign a rate to a meter, then re-run analysis for an exact-rules bill
+        Nationwide representative rates (all 50 states + DC) from a URDB-style snapshot — electric, natural gas, and
+        water structures per state. Assign a rate to a meter, then re-run analysis for an exact-rules bill
         simulation. Expand any row to see its TOU windows, demand charges, ratchet, and coincident-peak terms.
       </p>
+      <div className="mt-4 flex gap-1 rounded-lg border border-border/70 bg-muted/30 p-1 w-fit">
+        {(["electric", "gas", "water"] as const).map((c) => (
+          <button
+            key={c}
+            type="button"
+            onClick={() => setCommodity(c)}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              commodity === c ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {c === "electric" ? "Electric" : c === "gas" ? "Natural gas" : "Water"}
+          </button>
+        ))}
+      </div>
       {eligibilityNote && (
         <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-relaxed text-amber-200/90">
           {eligibilityNote}
@@ -113,13 +128,21 @@ export default function Tariffs() {
               </TableHeader>
               <TableBody>
                 {(tariffs.data ?? []).map((t) => (
-                  <TariffRowGroup key={t.id} t={t} meters={meters.data ?? []} onAssign={(mid) => assign.mutate({ meterId: mid, tariffId: t.id })} />
+                  <TariffRowGroup
+                    key={t.id}
+                    t={t}
+                    rateUnit={commodity === "electric" ? "kWh" : commodity === "gas" ? "therm" : "gal"}
+                    meters={(meters.data ?? []).filter((m) => (m as { commodity?: string }).commodity === commodity || (m as { commodity?: string }).commodity == null)}
+                    onAssign={(mid) => assign.mutate({ meterId: mid, tariffId: t.id })}
+                  />
                 ))}
               </TableBody>
             </Table>
           )}
           {!tariffs.isLoading && (tariffs.data ?? []).length === 0 && (
-            <p className="py-6 text-center text-sm text-muted-foreground">No seeded rates for this state filter.</p>
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              No seeded {commodity === "gas" ? "natural gas" : commodity} rates for this state filter — the snapshot's gas and water coverage is thinner than electric; assign rates manually or broaden the state filter.
+            </p>
           )}
         </CardContent>
       </Card>
@@ -162,7 +185,7 @@ function fmtHours(hs?: number, he?: number): string {
 
 /** Gap-4: expandable tariff row — fetches full structure on expand and renders
  *  TOU windows, demand charges, ratchet, CP, and export terms explicitly. */
-function TariffRowGroup({ t, meters, onAssign }: { t: TariffListRow; meters: MeterRow[]; onAssign: (meterId: number) => void }) {
+function TariffRowGroup({ t, meters, onAssign, rateUnit }: { t: TariffListRow; meters: MeterRow[]; onAssign: (meterId: number) => void; rateUnit: string }) {
   const [openDetail, setOpenDetail] = useState(false);
   const detail = trpc.tariffs.detail.useQuery({ tariffId: t.id }, { enabled: openDetail });
   const s = (detail.data?.structure ?? null) as {
@@ -241,7 +264,7 @@ function TariffRowGroup({ t, meters, onAssign }: { t: TariffListRow; meters: Met
                         <span>
                           {p.label} · {fmtMonths(p.months)} · {fmtDays(p.daysOfWeek)} · {fmtHours(p.hourStart, p.hourEnd)}
                         </span>
-                        <span className="text-foreground">${p.ratePerUnit.toFixed(4)}/kWh</span>
+                        <span className="text-foreground">${p.ratePerUnit.toFixed(4)}/{rateUnit}</span>
                       </li>
                     ))}
                   </ul>

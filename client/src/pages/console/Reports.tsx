@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { FileText, BadgeCheck, FlaskConical, Printer, Download, Link2 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
+import MvPanel from "@/components/MvPanel";
 
 type Kind = "energy_plan" | "verified_savings" | "practitioner";
 
@@ -153,6 +154,7 @@ export default function Reports() {
           practitioner CSV includes baseline fit statistics (CVRMSE, R², months used) when a weather-normalized
           baseline exists.
         </p>
+        {activeSiteId != null && <MvPanel siteId={activeSiteId} />}
       </div>
 
       {/* print view */}

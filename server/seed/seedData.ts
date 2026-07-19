@@ -87,6 +87,9 @@ export const EUI_BENCHMARKS: Array<{
   { buildingType: "single_family", sectorClass: "residential", commodity: "site_total", medianEui: 42.1, p25Eui: 27.0, p75Eui: 62.0, unit: "kBtu/sqft/yr", source: "RECS 2020" },
   { buildingType: "single_family", sectorClass: "residential", commodity: "electric", medianEui: 5.6, p25Eui: 3.4, p75Eui: 8.7, unit: "kWh/sqft/yr", source: "RECS 2020" },
   { buildingType: "multifamily", sectorClass: "residential", commodity: "site_total", medianEui: 49.5, p25Eui: 31.0, p75Eui: 74.0, unit: "kBtu/sqft/yr", source: "RECS 2020" },
+  { buildingType: "office", sectorClass: "commercial", commodity: "gas", medianEui: 0.212, p25Eui: 0.1, p75Eui: 0.38, unit: "therms/sqft/yr", source: "CBECS 2018 (natural gas EUI 21.2 kBtu/sqft ÷ 100 kBtu/therm)" },
+  { buildingType: "retail", sectorClass: "commercial", commodity: "gas", medianEui: 0.175, p25Eui: 0.08, p75Eui: 0.33, unit: "therms/sqft/yr", source: "CBECS 2018 (natural gas EUI ÷ 100 kBtu/therm)" },
+  { buildingType: "single_family", sectorClass: "residential", commodity: "gas", medianEui: 0.22, p25Eui: 0.1, p75Eui: 0.38, unit: "therms/sqft/yr", source: "RECS 2020 (gas households ÷ 100 kBtu/therm)" },
   { buildingType: "office", sectorClass: "commercial", commodity: "water", medianEui: 14.5, p25Eui: 8.0, p75Eui: 24.0, unit: "gal/sqft/yr", source: "EPA WaterSense (approx)" },
   { buildingType: "single_family", sectorClass: "residential", commodity: "water", medianEui: 35.0, p25Eui: 22.0, p75Eui: 55.0, unit: "gal/sqft/yr", source: "EPA WaterSense (approx)" },
 ];
@@ -592,7 +595,10 @@ export const SEED_TARIFFS: SeedTariff[] = [
     structure: {
       fixedMonthly: 35.0,
       energy: [
-        { label: "Volumetric (per kgal)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 5.19 },
+        // Unit semantics: the cost engine multiplies ratePerUnit by usage in the
+        // METER'S unit (gallons for water) — the published $5.19/kgal rate is
+        // therefore stored per-gallon so a gallons meter prices correctly.
+        { label: "Volumetric ($5.19/kgal, priced per gallon)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.00519 },
       ],
       demand: [],
     },

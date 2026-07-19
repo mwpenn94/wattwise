@@ -14,7 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Battery, Lightbulb, MoreVertical, Pencil, PlugZap, Sun, Trash2 } from "lucide-react";
+import { Battery, Droplets, Flame, Lightbulb, MoreVertical, Pencil, PlugZap, Sun, Trash2 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,7 +34,12 @@ const KINDS = [
   { kind: "solar_battery", label: "Solar + battery", icon: PlugZap, plus: true },
   { kind: "efficiency", label: "Efficiency retrofit", icon: Lightbulb, plus: false },
   { kind: "ev_load", label: "EV charging", icon: PlugZap, plus: false },
+  { kind: "gas_efficiency", label: "Gas efficiency", icon: Flame, plus: false },
+  { kind: "water_efficiency", label: "Water efficiency", icon: Droplets, plus: false },
 ] as const;
+
+/** Units label per commodity for the implementer savings row. */
+const UNIT_LABELS: Record<string, string> = { electric: "kWh", gas: "therms", water: "gallons" };
 
 /**
  * Deep-link vocabulary → scenario kind. Opportunity cards and Ask Meterly
@@ -47,6 +52,8 @@ export function measureToKind(measure: string): (typeof KINDS)[number]["kind"] |
   if (m.includes("batter") || m.includes("peak_shave") || m.includes("demand")) return "battery";
   if (m.includes("solar") || m.includes("pv")) return "solar";
   if (m.startsWith("ev") || m.includes("_ev") || m.includes("charg")) return "ev_load";
+  if (m.includes("gas") || m.includes("therm") || m.includes("boiler") || m.includes("furnace") || m.includes("steam")) return "gas_efficiency";
+  if (m.includes("water") || m.includes("irrigat") || m.includes("fixture") || m.includes("leak")) return "water_efficiency";
   if (m.includes("led") || m.includes("light") || m.includes("hvac") || m.includes("cool") || m.includes("heat") || m.includes("setpoint") || m.includes("efficien") || m.includes("insulat") || m.includes("retrofit") || m.includes("schedule")) return "efficiency";
   return null;
 }
@@ -92,7 +99,12 @@ export default function Scenarios() {
       solarKwDc: ["solar", "solar_battery"].includes(kind) ? Number(params.solarKwDc) : undefined,
       batteryKwh: ["battery", "solar_battery"].includes(kind) ? Number(params.batteryKwh) : undefined,
       batteryKw: ["battery", "solar_battery"].includes(kind) ? Number(params.batteryKw) : undefined,
-      efficiencyReductions: kind === "efficiency" ? { all: Number(params.reduction) / 100 } : undefined,
+      efficiencyReductions:
+        kind === "efficiency"
+          ? { all: Number(params.reduction) / 100 }
+          : kind === "gas_efficiency" || kind === "water_efficiency"
+            ? { overall: Number(params.reduction) / 100 }
+            : undefined,
       evAnnualKwh: kind === "ev_load" ? Number(params.evAnnualKwh) : undefined,
       capexUsd: params.capexUsd ? Number(params.capexUsd) : undefined,
     });
@@ -170,7 +182,7 @@ export default function Scenarios() {
                 </div>
               </div>
             )}
-            {kind === "efficiency" && (
+            {["efficiency", "gas_efficiency", "water_efficiency"].includes(kind) && (
               <div>
                 <Label htmlFor="p-red">Usage reduction (%)</Label>
                 <Input id="p-red" className="mt-1" type="number" min={1} max={90} value={params.reduction} onChange={(e) => setParams({ ...params, reduction: e.target.value })} />
@@ -249,6 +261,7 @@ export default function Scenarios() {
                           </p>
                         </div>
                       </div>
+                      <ImplementerSavings results={r} />
                       {r.disclosures.length > 0 && (
                         <ul className="mt-4 space-y-1 border-t border-border pt-3">
                           {r.disclosures.map((d, i) => (
@@ -275,6 +288,60 @@ export default function Scenarios() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Implementer savings — first-year unit savings per commodity plus a
+ * $/unit custom-rebate estimator. These are the figures custom incentive
+ * programs (e.g. $/kWh, $/therm saved) pay on; copy exposed for filing.
+ */
+function ImplementerSavings({ results }: { results: ScenarioResults }) {
+  const [rate, setRate] = useState("");
+  const imp = (results as unknown as { implementerSavings?: { unitsSavedAnnual?: Record<string, number>; note?: string } }).implementerSavings;
+  const entries = Object.entries(imp?.unitsSavedAnnual ?? {}).filter(([, v]) => v > 0);
+  if (entries.length === 0) return null;
+  const rateNum = Number(rate);
+  return (
+    <div className="mt-4 rounded-md border border-border/70 bg-muted/30 p-3">
+      <p className="font-mono text-[10px] uppercase text-muted-foreground">Implementer savings — first-year units</p>
+      <div className="mt-1.5 flex flex-wrap gap-x-6 gap-y-1">
+        {entries.map(([cmd, units]) => (
+          <span key={cmd} className="font-display text-base font-bold">
+            {fmtNum(units)} <span className="text-xs font-normal text-muted-foreground" translate="no">{UNIT_LABELS[cmd] ?? cmd}</span>
+            <span className="ml-1 text-xs font-normal capitalize text-muted-foreground">({cmd})</span>
+          </span>
+        ))}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Label htmlFor="imp-rate" className="text-[11px] text-muted-foreground">
+          Custom rebate rate ($ per unit saved)
+        </Label>
+        <Input
+          id="imp-rate"
+          type="number"
+          step="0.01"
+          min={0}
+          placeholder="e.g. 0.05"
+          className="h-7 w-28 font-mono text-xs"
+          value={rate}
+          onChange={(e) => setRate(e.target.value)}
+        />
+        {rateNum > 0 && (
+          <span className="font-mono text-xs">
+            ≈{" "}
+            {entries.map(([cmd, units], i) => (
+              <span key={cmd}>
+                {i > 0 && " + "}
+                <strong>{fmtUsd(units * rateNum)}</strong> ({cmd})
+              </span>
+            ))}{" "}
+            <span className="text-muted-foreground">estimated rebate</span>
+          </span>
+        )}
+      </div>
+      {imp?.note && <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">{imp.note}</p>}
     </div>
   );
 }

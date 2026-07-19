@@ -62,6 +62,8 @@ import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { reconcileBill } from "./billReconciliation";
 import { assessSeedFreshness, recordParseOutcome, recordUnknownTariff, sweepUnverifiedTariffs } from "./seedLifecycle";
 import { incentiveEconomics } from "./incentives";
+import { runCommodityEfficiency } from "./commodityScenario";
+import { assessMv } from "./mv";
 import { VERTICAL_PACKS, addProductionPeriod, listProduction, deleteProductionPeriod } from "./verticals";
 
 /** GAP-D / AC16a: self-calibration on every real bill — fail-open so bill
@@ -927,9 +929,13 @@ export const appRouter = router({
           try {
             found = await geo.fetchEsriFootprints(point);
             if (found.length > 0) {
+              const heightBearing = found[0]?.source === "usa_structures";
+              const dsName = heightBearing
+                ? `the FEMA USA Structures dataset${found.some((c) => c.heightM != null) ? " (includes measured building heights)" : " (no height measured for this building — stories come from your profile)"}`
+                : "the Microsoft US Building Footprints dataset (no height data — stories come from your profile)";
               sourceNote = osmFailed
-                ? "OpenStreetMap was unreachable, so these footprints come from the Microsoft US Building Footprints dataset (no height data — stories come from your profile)."
-                : "No OSM building here — these footprints come from the Microsoft US Building Footprints dataset (no height data — stories come from your profile).";
+                ? `OpenStreetMap was unreachable, so these footprints come from ${dsName}.`
+                : `No OSM building here — these footprints come from ${dsName}.`;
             } else {
               sourceNote = osmFailed
                 ? "Both footprint sources are unreachable right now — showing a prism estimate from your floor area instead. You can also trace the building yourself below."
@@ -960,7 +966,7 @@ export const appRouter = router({
         z.object({
           siteId: z.number(),
           ring: z.array(z.tuple([z.number(), z.number()])).min(3).max(120),
-          source: z.enum(["osm", "microsoft", "user_drawn", "prism"]),
+          source: z.enum(["osm", "microsoft", "usa_structures", "user_drawn", "prism"]),
           osmId: z.string().optional(),
           heightM: z.number().positive().max(500).nullable().optional(),
           stories: z.number().int().positive().max(120).nullable().optional(),
@@ -977,7 +983,10 @@ export const appRouter = router({
           distanceM: 0,
         };
         const d = geo.deriveGeometry(cand);
-        const confidence = input.source === "user_drawn" ? 0.95 : input.source === "osm" ? 0.8 : 0.45;
+        // usa_structures footprints are LiDAR/imagery-derived federal data —
+        // between OSM (human-verified) and MSBFP (ML-only) in confidence.
+        const confidence =
+          input.source === "user_drawn" ? 0.95 : input.source === "osm" ? 0.8 : input.source === "usa_structures" ? 0.7 : 0.45;
         await h.upsertSiteGeometry(input.siteId, ctx.user.id, {
           footprint: { type: "Polygon", coordinates: [cand.ring] },
           footprintSource: input.source === "prism" ? undefined : input.source,
@@ -1864,18 +1873,20 @@ export const appRouter = router({
         rateCount: rows.length,
       };
     }),
-    list: protectedProcedure.input(z.object({ state: z.string().optional() }).optional()).query(async ({ input }) => {
-      await seeded();
-      const rows = await h.listTariffs("electric", input?.state);
-      return rows.map((t) => ({
+    list: protectedProcedure
+      .input(z.object({ state: z.string().optional(), commodity: z.enum(["electric", "gas", "water"]).optional() }).optional())
+      .query(async ({ input }) => {
+        await seeded();
+        const rows = await h.listTariffs(input?.commodity, input?.state);
+        return rows.map((t) => ({
         ...t,
         structure: undefined,
         hasRatchet: !!(t.structure as TariffStructure).ratchet,
         hasCp: !!(t.structure as TariffStructure).cp,
         eligibilityNote:
           "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.",
-      }));
-    }),
+        }));
+      }),
     detail: protectedProcedure.input(z.object({ tariffId: z.number() })).query(async ({ input }) => {
       const t = await h.getTariff(input.tariffId);
       if (!t) throw new TRPCError({ code: "NOT_FOUND" });
@@ -2110,7 +2121,7 @@ export const appRouter = router({
         z.object({
           siteId: z.number(),
           name: z.string().max(255),
-          kind: z.enum(["solar", "battery", "solar_battery", "efficiency", "ev_load"]),
+          kind: z.enum(["solar", "battery", "solar_battery", "efficiency", "ev_load", "gas_efficiency", "water_efficiency"]),
           solarKwDc: z.number().positive().max(100_000).optional(),
           batteryKwh: z.number().positive().max(1_000_000).optional(),
           batteryKw: z.number().positive().max(500_000).optional(),
@@ -2136,9 +2147,44 @@ export const appRouter = router({
             throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_SCENARIOS_PER_MONTH} scenario runs/month.` });
           }
         }
-        const site = await h.getSite(input.siteId, ctx.user.id);
+                const site = await h.getSite(input.siteId, ctx.user.id);
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
-
+        /* ---- Gas/water efficiency: commodity-native path (no electric 8760 machinery) ---- */
+        if (input.kind === "gas_efficiency" || input.kind === "water_efficiency") {
+          const commodity = input.kind === "gas_efficiency" ? ("gas" as const) : ("water" as const);
+          const reduction = input.efficiencyReductions?.overall ?? 0.1;
+          const t0gw = Date.now();
+          const gw = await runCommodityEfficiency({
+            site,
+            userId: ctx.user.id,
+            commodity,
+            reduction,
+            capexUsd: input.capexUsd,
+          });
+          const idGw = await h.withUserQuotaLock(ctx.user.id, async () => {
+            if (tier === "free") {
+              const n = await h.countScenariosThisMonth(ctx.user.id);
+              if (n >= FREE_TIER_SCENARIOS_PER_MONTH) {
+                throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_SCENARIOS_PER_MONTH} scenario runs/month.` });
+              }
+            }
+            return h.saveScenario({
+              siteId: site.id,
+              userId: ctx.user.id,
+              name: input.name,
+              transform: input.kind as "gas_efficiency" | "water_efficiency",
+              params: { kind: input.kind, reduction, capexUsd: input.capexUsd } as unknown as Record<string, unknown>,
+              loadBasis: gw.loadBasis,
+              results: gw.results as unknown as Record<string, unknown>,
+              status: "complete",
+              confidenceLabel: gw.results.confidenceLabel,
+              extrapolated: gw.results.extrapolated,
+            });
+          });
+          await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0gw, tier });
+          await h.audit(ctx.user.id, "scenario_run", "scenario", String(idGw), { kind: input.kind, siteId: site.id });
+          return { id: idGw, results: gw.results };
+        }
         // Build baseline hourly profile: measured intervals if available, else archetype
         const { hourly, loadBasis, confidence, extrapolated, structure, co2eLbPerMwh, climateZone, tariffBasisDisclosure, archetypeZoneDisclosure, nem } = await buildScenarioBasis(site, ctx.user.id);
         const t0 = Date.now();
@@ -2159,6 +2205,14 @@ export const appRouter = router({
         try {
           const measureKey = input.kind === "solar_battery" ? "solar" : input.kind === "efficiency" ? "led_retrofit" : input.kind;
           const annualSavings = Math.max(0, -((results as unknown as { siteTotalDeltaCost?: number }).siteTotalDeltaCost ?? 0));
+          // Implementer economics: first-year unit savings per commodity feed
+          // usd_per_unit_saved custom-program rebates ($/kWh, $/therm). Only
+          // genuine reductions count — added load (EV) never nets a rebate.
+          const unitsSavedAnnual: Partial<Record<"electric" | "gas" | "water", number>> = {};
+          for (const [cmd, pc] of Object.entries(results.perCommodity ?? {})) {
+            const saved = Math.max(0, -((pc as { deltaUsage?: number }).deltaUsage ?? 0));
+            if (saved > 0) unitsSavedAnnual[cmd as "electric" | "gas" | "water"] = Math.round(saved);
+          }
           const incEcon = await incentiveEconomics({
             measureKey,
             state: site.state ?? null,
@@ -2167,8 +2221,13 @@ export const appRouter = router({
               site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? ("residential" as const) : ("commercial" as const),
             capexUsd: input.capexUsd ?? 0,
             annualSavingsUsd: annualSavings,
+            unitsSavedAnnual,
             tenure: site.tenure ?? null,
           });
+          (results as unknown as Record<string, unknown>).implementerSavings = {
+            unitsSavedAnnual,
+            note: "First-year modeled unit savings by commodity — the figures custom rebate programs ($/kWh, $/therm) pay on. Verify with M&V before filing.",
+          };
           if (incEcon.matches.length) {
             (results as unknown as Record<string, unknown>).incentives = incEcon;
             results.disclosures.push(
@@ -2458,6 +2517,27 @@ export const appRouter = router({
       await h.deletePlanBasket(input.id, ctx.user.id);
       return { ok: true };
     }),
+  }),
+  /* ================= M&V — verified savings (IPMVP Option C) ================= */
+  mv: router({
+    /** Whole-facility verified savings: CalTRACK baseline on pre-install
+     * months, projected over the reporting period. The output rows are the
+     * evidence custom rebate programs ($/kWh, $/therm saved) pay on. */
+    assess: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          meterId: z.number(),
+          /** measure in-service date (epoch ms) */
+          installedAt: z.number(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        await seeded();
+        const result = await assessMv({ siteId: input.siteId, userId: ctx.user.id, meterId: input.meterId, installedAt: input.installedAt });
+        await h.audit(ctx.user.id, "mv_assess", "site", String(input.siteId), { meterId: input.meterId, installedAt: input.installedAt });
+        return result;
+      }),
   }),
   /* ================= reference / transparency ================= */
   reference: router({
