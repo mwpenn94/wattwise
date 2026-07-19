@@ -27,7 +27,7 @@ export interface FootprintCandidate {
   areaSqft: number;
   heightM: number | null;
   stories: number | null;
-  source: "osm" | "user_drawn" | "prism";
+  source: "osm" | "microsoft" | "user_drawn" | "prism";
   osmId?: string;
   /** distance from query point to polygon centroid, meters */
   distanceM: number;
@@ -214,10 +214,19 @@ export function prismFallback(center: LatLng, gfaSqft: number | null, stories: n
 /* Overpass fetch                                                      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Mirror order matters: overpass-api.de rejects requests from this runtime's
+ * IP class with HTTP 406 (verified Jul 2026), and kumi.systems times out — so
+ * the mail.ru mirror (fast, current OSM timestamp, verified reachable) leads.
+ * The others stay as backups in case routing differs in production.
+ */
 const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass-api.de/api/interpreter",
 ];
+
+const FETCH_UA = "Meterly/1.0 (building-footprint resolver; https://meterly.manus.space)";
 
 interface OverpassElement {
   type: string;
@@ -235,9 +244,13 @@ async function defaultOverpassFetch(query: string): Promise<{ elements: Overpass
     try {
       const res = await fetch(ep, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": FETCH_UA,
+          Accept: "application/json",
+        },
         body: `data=${encodeURIComponent(query)}`,
-        signal: AbortSignal.timeout(12000),
+        signal: AbortSignal.timeout(8000),
       });
       if (!res.ok) throw new Error(`Overpass ${ep} HTTP ${res.status}`);
       return (await res.json()) as { elements: OverpassElement[] };
@@ -282,6 +295,78 @@ export async function fetchOsmFootprints(
   return candidates.slice(0, 5);
 }
 
+/* ------------------------------------------------------------------ */
+/* Microsoft Building Footprints via Esri feature service              */
+/* ------------------------------------------------------------------ */
+
+const ESRI_MSBFP_URL =
+  "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/MSBFP2/FeatureServer/0/query";
+
+interface EsriFeature {
+  attributes?: Record<string, unknown>;
+  geometry?: { rings?: [number, number][][] };
+}
+
+/** Injectable fetcher for tests. */
+export type EsriFetcher = (url: string) => Promise<{ features?: EsriFeature[] }>;
+
+async function defaultEsriFetch(url: string): Promise<{ features?: EsriFeature[] }> {
+  const res = await fetch(url, {
+    headers: { "User-Agent": FETCH_UA, Accept: "application/json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`Esri footprints HTTP ${res.status}`);
+  return (await res.json()) as { features?: EsriFeature[] };
+}
+
+/**
+ * Microsoft US Building Footprints (ODbL-free, ODC-BY licensed), hosted by
+ * Esri as a public feature service. Second source in the resolution chain:
+ * used when Overpass is unreachable or has no mapped building near the point.
+ * Footprints only — no height attribute, so heightSource remains
+ * stories_estimate and honesty labels reflect that.
+ */
+export async function fetchEsriFootprints(
+  point: LatLng,
+  fetcher: EsriFetcher = defaultEsriFetch,
+): Promise<FootprintCandidate[]> {
+  const params = new URLSearchParams({
+    where: "1=1",
+    geometry: `${point.lng},${point.lat}`,
+    geometryType: "esriGeometryPoint",
+    inSR: "4326",
+    spatialRel: "esriSpatialRelIntersects",
+    distance: "60",
+    units: "esriSRUnit_Meter",
+    outFields: "OBJECTID",
+    returnGeometry: "true",
+    outSR: "4326",
+    resultRecordCount: "8",
+    f: "json",
+  });
+  const data = await fetcher(`${ESRI_MSBFP_URL}?${params.toString()}`);
+  const candidates: FootprintCandidate[] = [];
+  for (const f of data.features ?? []) {
+    const ring = f.geometry?.rings?.[0];
+    if (!ring || ring.length < 3) continue;
+    const typedRing = ring.map((p) => [p[0], p[1]] as [number, number]);
+    const areaSqm = ringAreaSqm(typedRing);
+    if (areaSqm < 10) continue;
+    const { centroid } = projectRing(typedRing);
+    candidates.push({
+      ring: typedRing,
+      areaSqft: Math.round(areaSqm * SQM_TO_SQFT),
+      heightM: null,
+      stories: null,
+      source: "microsoft",
+      osmId: f.attributes?.OBJECTID != null ? `msbfp/${f.attributes.OBJECTID}` : undefined,
+      distanceM: Math.round(haversineM(point, centroid)),
+    });
+  }
+  candidates.sort((a, b) => a.distanceM - b.distanceM);
+  return candidates.slice(0, 5);
+}
+
 /**
  * Full derivation bundle for a chosen footprint — everything the UI and the
  * dimensional-receipts panel need, computed from the ring + height.
@@ -301,7 +386,11 @@ export function deriveGeometry(cand: FootprintCandidate, neighborShadingFactor =
     heightSource: (cand.source !== "prism" && cand.heightM != null ? "footprint_dataset" : "stories_estimate") as
       | "footprint_dataset"
       | "stories_estimate",
-    footprintSource: (cand.source === "prism" ? undefined : cand.source) as "osm" | "user_drawn" | undefined,
+    footprintSource: (cand.source === "prism" ? undefined : cand.source) as
+      | "osm"
+      | "microsoft"
+      | "user_drawn"
+      | undefined,
     odblDerived: cand.source === "osm",
   };
 }

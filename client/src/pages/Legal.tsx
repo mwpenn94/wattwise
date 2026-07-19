@@ -32,7 +32,7 @@ export default function Legal() {
               <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
                 <Zap className="h-5 w-5" />
               </div>
-              <span className="font-display text-lg font-bold tracking-tight">Meterly</span>
+              <span translate="no" className="font-display text-lg font-bold tracking-tight">Meterly</span>
             </Link>
             <Link href="/" className="flex items-center gap-1 font-mono text-xs text-muted-foreground hover:text-foreground">
               <ArrowLeft className="h-3.5 w-3.5" /> Back to home
@@ -117,7 +117,7 @@ export default function Legal() {
 
         <footer className="border-t border-border/60 py-8">
           <div className="container text-xs text-muted-foreground">
-            <span className="font-mono">Meterly · modeled estimates, honestly labeled</span>
+            <span className="font-mono"><span translate="no">Meterly</span> · modeled estimates, honestly labeled</span>
           </div>
         </footer>
       </div>

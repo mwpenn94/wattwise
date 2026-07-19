@@ -116,7 +116,7 @@ export default function Home() {
               <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
                 <Zap className="h-5 w-5" />
               </div>
-              <span className="font-display text-lg font-bold tracking-tight">Meterly</span>
+              <span translate="no" className="font-display text-lg font-bold tracking-tight">Meterly</span>
               <span className="ml-2 hidden font-mono text-[10px] uppercase tracking-widest text-muted-foreground sm:inline">
                 utility data intelligence
               </span>
@@ -358,7 +358,7 @@ export default function Home() {
             Console link stays auth-only. */}
         <footer className="border-t border-border/60 py-8">
           <div className="container flex flex-col items-center justify-between gap-3 text-xs text-muted-foreground md:flex-row">
-            <span className="font-mono">Meterly · modeled estimates, honestly labeled</span>
+            <span className="font-mono"><span translate="no">Meterly</span> · modeled estimates, honestly labeled</span>
             <div className="flex flex-wrap items-center justify-center gap-4">
               <Link href="/legal#privacy" className="hover:text-foreground">
                 {t("footer.privacy")}

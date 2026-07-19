@@ -39,6 +39,7 @@ import {
   FileText,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
+import { useLang } from "@/lib/i18n";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
@@ -62,11 +63,50 @@ const DEFAULT_WIDTH = 280;
 const MIN_WIDTH = 200;
 const MAX_WIDTH = 480;
 
+/**
+ * I18N-2 — Spanish-preference console tip. The hand-crafted ES table covers
+ * the public funnel; console/analysis surfaces rely on browser-native
+ * translation (Chrome/Edge/Safari). When the user's language preference is
+ * Spanish, show a one-time dismissible banner telling them how to use it.
+ */
+const ES_TIP_DISMISS_KEY = "meterly.esTranslateTip.dismissed";
+function EsTranslateTip() {
+  const { lang, t } = useLang();
+  const [dismissed, setDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(ES_TIP_DISMISS_KEY) === "1";
+    } catch {
+      return true;
+    }
+  });
+  if (lang !== "es" || dismissed) return null;
+  return (
+    <div className="mx-4 mt-3 flex items-start justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 pr-14 text-xs text-muted-foreground md:mr-16">
+      <span>{t("lang.consoleNote")}</span>
+      <button
+        className="shrink-0 font-mono text-[11px] text-primary hover:underline"
+        onClick={() => {
+          setDismissed(true);
+          try {
+            localStorage.setItem(ES_TIP_DISMISS_KEY, "1");
+          } catch {
+            /* ignore */
+          }
+        }}
+        aria-label="Dismiss translation tip"
+      >
+        OK
+      </button>
+    </div>
+  );
+}
+
 export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     return saved ? parseInt(saved, 10) : DEFAULT_WIDTH;
@@ -201,7 +241,7 @@ function DashboardLayoutContent({
                   <div className="flex h-6 w-6 items-center justify-center rounded bg-primary text-primary-foreground shrink-0">
                     <Zap className="h-4 w-4" />
                   </div>
-                  <span className="font-semibold tracking-tight truncate font-display">
+                  <span translate="no" className="font-semibold tracking-tight truncate font-display">
                     Meterly
                   </span>
                 </button>
@@ -303,6 +343,7 @@ function DashboardLayoutContent({
             </div>
           </div>
         )}
+        <EsTranslateTip />
         <main className="flex-1 p-4">{children}</main>
         {/* §5c-1b: privacy/terms/contact reachable from every page, console included */}
         <footer className="border-t border-border/60 px-4 py-3">

@@ -5,8 +5,8 @@
  * prism 3D-style view honestly labeled as a prism estimate, orientation
  * compass + exposed-wall chips + exposure score heuristic.
  */
-import { useEffect, useRef, useState } from "react";
-import { Building2, Compass, Loader2, MapPinned, Pencil, RotateCcw, Sun } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Building2, Compass, Loader2, MapPinned, Minus, Pencil, Plus, RotateCcw, Sun, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,21 @@ import { MapView } from "@/components/Map";
 import { trpc } from "@/lib/trpc";
 
 type Ring = [number, number][];
+
+/** Shoelace area of a lng/lat ring in sqft — mirror of the server math, for the live draw readout. */
+function ringAreaSqftClient(ring: Ring): number {
+  if (ring.length < 3) return 0;
+  const lat0 = (ring[0][1] * Math.PI) / 180;
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos(lat0);
+  let sum = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const [x1, y1] = ring[i];
+    const [x2, y2] = ring[(i + 1) % ring.length];
+    sum += x1 * mPerDegLng * (y2 * mPerDegLat) - x2 * mPerDegLng * (y1 * mPerDegLat);
+  }
+  return Math.abs(sum / 2) * 10.7639;
+}
 
 interface Candidate {
   ring: Ring;
@@ -28,6 +43,7 @@ interface Candidate {
   osmId?: string;
   distanceM?: number;
   prism?: boolean;
+  source?: "osm" | "microsoft";
 }
 
 const ORDER = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const;
@@ -104,11 +120,14 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
   const [selected, setSelected] = useState<number | "prism" | null>(null);
   const [drawing, setDrawing] = useState(false);
   const [drawnRing, setDrawnRing] = useState<Ring>([]);
+  const [drawnStories, setDrawnStories] = useState(1);
   const mapRef = useRef<google.maps.Map | null>(null);
   const overlaysRef = useRef<google.maps.Polygon[]>([]);
-  const drawMarkersRef = useRef<google.maps.marker.AdvancedMarkerElement[] | google.maps.Marker[]>([]);
+  const drawMarkersRef = useRef<google.maps.Marker[]>([]);
+  const drawPreviewRef = useRef<google.maps.Polygon | null>(null);
   const clickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
   const [mapReady, setMapReady] = useState(false);
+  const drawnSqft = useMemo(() => ringAreaSqftClient(drawnRing), [drawnRing]);
 
   const geom = stored.data;
   const hasStored = geom != null && geom.footprintSqft != null;
@@ -116,8 +135,13 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
   const clearOverlays = () => {
     overlaysRef.current.forEach((p) => p.setMap(null));
     overlaysRef.current = [];
-    (drawMarkersRef.current as google.maps.Marker[]).forEach((m) => m.setMap?.(null));
+  };
+
+  const clearDrawArtifacts = () => {
+    drawMarkersRef.current.forEach((m) => m.setMap(null));
     drawMarkersRef.current = [];
+    drawPreviewRef.current?.setMap(null);
+    drawPreviewRef.current = null;
   };
 
   const paintCandidates = (cands: Candidate[], fb: Candidate | null, sel: number | "prism" | null) => {
@@ -131,6 +155,9 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
         strokeOpacity: dashed ? 0.7 : 0.95,
         fillColor: active ? "#f59e0b" : "#6b7280",
         fillOpacity: active ? 0.25 : 0.08,
+        // Never intercept taps — clickable overlays were swallowing the
+        // draw-mode taps right over the building (the exact spot users tap).
+        clickable: false,
         map: mapRef.current,
       });
       overlaysRef.current.push(poly);
@@ -150,24 +177,21 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady, candidates, fallback, selected]);
 
-  // Draw-your-own footprint: click vertices, Finish closes the ring.
+  // Draw-your-own footprint: tap vertices; markers + a live preview polygon
+  // track the ring. POI icons are disabled while drawing so taps near labeled
+  // places aren't hijacked by Google's own click targets (the mobile bug).
   useEffect(() => {
     if (!mapRef.current) return;
     if (clickListenerRef.current) {
       clickListenerRef.current.remove();
       clickListenerRef.current = null;
     }
+    mapRef.current.setOptions({ clickableIcons: !drawing, draggableCursor: drawing ? "crosshair" : undefined });
     if (drawing) {
       clickListenerRef.current = mapRef.current.addListener("click", (e: google.maps.MapMouseEvent) => {
         if (!e.latLng) return;
         const pt: [number, number] = [e.latLng.lng(), e.latLng.lat()];
         setDrawnRing((r) => [...r, pt]);
-        const marker = new google.maps.Marker({
-          position: e.latLng,
-          map: mapRef.current!,
-          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 4, fillColor: "#d97706", fillOpacity: 1, strokeWeight: 1, strokeColor: "#fff" },
-        });
-        (drawMarkersRef.current as google.maps.Marker[]).push(marker);
       });
     }
     return () => {
@@ -176,6 +200,36 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawing, mapReady]);
+
+  // Repaint draw markers + live preview polygon whenever the ring changes,
+  // so undo and adds both stay visually in sync.
+  useEffect(() => {
+    if (!mapRef.current || !mapReady) return;
+    clearDrawArtifacts();
+    if (!drawing || drawnRing.length === 0) return;
+    drawnRing.forEach(([lng, lat]) => {
+      const marker = new google.maps.Marker({
+        position: { lat, lng },
+        map: mapRef.current!,
+        clickable: false,
+        icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: "#d97706", fillOpacity: 1, strokeWeight: 1.5, strokeColor: "#fff" },
+      });
+      drawMarkersRef.current.push(marker);
+    });
+    if (drawnRing.length >= 2) {
+      drawPreviewRef.current = new google.maps.Polygon({
+        paths: drawnRing.map(([lng, lat]) => ({ lat, lng })),
+        strokeColor: "#d97706",
+        strokeWeight: 2,
+        strokeOpacity: 0.9,
+        fillColor: "#f59e0b",
+        fillOpacity: drawnRing.length >= 3 ? 0.18 : 0,
+        clickable: false,
+        map: mapRef.current,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawing, drawnRing, mapReady]);
 
   const startResolve = () => {
     resolve.mutate(
@@ -196,7 +250,13 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
 
   const confirmSelected = () => {
     if (drawing && drawnRing.length >= 3) {
-      confirm.mutate({ siteId, ring: drawnRing, source: "user_drawn" });
+      confirm.mutate({
+        siteId,
+        ring: drawnRing,
+        source: "user_drawn",
+        stories: drawnStories,
+        heightM: drawnStories * 3.2,
+      });
       setDrawing(false);
       setDrawnRing([]);
       return;
@@ -210,9 +270,9 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
       confirm.mutate({
         siteId,
         ring: c.ring,
-        source: "osm",
+        source: c.source ?? "osm",
         osmId: c.osmId,
-        heightM: c.heightM,
+        heightM: c.source === "microsoft" ? undefined : c.heightM,
         stories: c.stories ?? undefined,
       });
     }
@@ -302,6 +362,7 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
                 >
                   {Math.round(c.areaSqft).toLocaleString()} sqft
                   {c.distanceM != null ? ` · ${c.distanceM}m away` : ""}
+                  {c.source === "microsoft" ? " · MS" : ""}
                 </Button>
               ))}
               {fallback && (
@@ -322,8 +383,6 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
                 onClick={() => {
                   setDrawing((d) => !d);
                   setDrawnRing([]);
-                  (drawMarkersRef.current as google.maps.Marker[]).forEach((m) => m.setMap?.(null));
-                  drawMarkersRef.current = [];
                 }}
               >
                 <Pencil className="h-3.5 w-3.5 mr-1" /> {drawing ? "Cancel drawing" : "Draw it myself"}
@@ -331,10 +390,29 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
             </div>
 
             {drawing && (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
-                Tap the map to trace your building's corners ({drawnRing.length} point{drawnRing.length === 1 ? "" : "s"} so far — at
-                least 3), then confirm below.
-              </p>
+              <div className="space-y-2">
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  Tap the map to trace your building's corners — any shape works (L-shapes, wings, courtyards; up to 120
+                  points). {drawnRing.length} point{drawnRing.length === 1 ? "" : "s"} so far, at least 3 needed.
+                  {drawnRing.length >= 3 ? ` Enclosed area ≈ ${Math.round(drawnSqft).toLocaleString()} sqft.` : ""}
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="outline" disabled={drawnRing.length === 0} onClick={() => setDrawnRing((r) => r.slice(0, -1))}>
+                    <Undo2 className="h-3.5 w-3.5 mr-1" /> Undo last point
+                  </Button>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="text-muted-foreground">Stories:</span>
+                    <Button size="icon" variant="outline" className="h-7 w-7" disabled={drawnStories <= 1} onClick={() => setDrawnStories((s) => Math.max(1, s - 1))} aria-label="Fewer stories">
+                      <Minus className="h-3 w-3" />
+                    </Button>
+                    <span className="w-5 text-center font-medium">{drawnStories}</span>
+                    <Button size="icon" variant="outline" className="h-7 w-7" disabled={drawnStories >= 120} onClick={() => setDrawnStories((s) => Math.min(120, s + 1))} aria-label="More stories">
+                      <Plus className="h-3 w-3" />
+                    </Button>
+                    <span className="text-muted-foreground">≈ {(drawnStories * 3.2).toFixed(1)} m tall · sets wall areas &amp; massing</span>
+                  </div>
+                </div>
+              </div>
             )}
 
             {active && !drawing ? (
@@ -356,7 +434,9 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
                     </div>
                   )}
                   {!active.prism && (
-                    <div className="text-[10px] text-muted-foreground">© OpenStreetMap contributors (ODbL)</div>
+                    <div className="text-[10px] text-muted-foreground">
+                      {active.source === "microsoft" ? "Microsoft US Building Footprints (ODC-BY)" : "© OpenStreetMap contributors (ODbL)"}
+                    </div>
                   )}
                 </div>
               </div>

@@ -323,3 +323,20 @@
 
 - [x] LOOKUP-1 Address search supports place/business names like Apple/Google Maps: placeAutocomplete blends address (max 4) + establishment predictions (cap 6, dedup, graceful degradation), POI rows flagged + Landmark icon/"place" badge in dropdown, resolvePlace extracts placeName, quickCreate prefers place name for site label, preview chip shows "Verified place · <name>"
 - [x] LOOKUP-2 Vitest coverage: 5-spec placeNameLookup suite (blend order/flags/dedup/cap, graceful degradation, both-fail throw, POI placeName extraction, street-address null) + places.test.ts updated to blended contract; root-caused subtle vitest gotcha (beforeEach returning a mock treats it as cleanup fn → phantom zero-arg call)
+
+## Spanish toggle gap (owner report Jul 19)
+- [x] I18N-1 Assessed + decided: hybrid strategy — manual i18n stays authoritative for the public funnel (already at parity, CI-gated), while the console leans on browser-native translation (user's instinct was right: Chrome/Safari/Edge translate pages natively now). html lang attribute now follows the toggle so browsers auto-offer translation, and a one-time ES console tip explains this honestly
+- [x] I18N-2 Implemented: document.documentElement.lang follows the language store; EsTranslateTip banner (dismiss persisted) in the console for ES users; translate="no" guards on the brand mark, units (kW/kWh/kBtu/CCF), and tariff codes so native translation can't mangle domain identifiers (NoTranslate helper in i18n.ts)
+- [x] I18N-3 Verified via authenticated Playwright: ES pref → banner renders in console, dismiss persists across reloads, html lang=es set; i18nParity.test.ts (5 specs) stays green in the full suite
+
+## Footprint service + draw-mode fixes (owner report Jul 18, IMG_8142/8143)
+- [x] FP-1: Diagnosed: overpass-api.de 406-blocks this runtime (UA filtering) and kumi.systems mirror times out — whole chain failed, so the UI honestly fell back to prism
+- [x] FP-2: Resilient multi-source resolution: Overpass mirrors reordered by measured reliability (maps.mail.ru first, then osm.jp, private.coffee, overpass-api.de) with proper UA/Accept headers; Microsoft US Building Footprints (Esri MSBFP2 FeatureServer) added as an independent second source; prism remains the last honest fallback. Evaluated owner's ArcGIS 3D layer — SceneServer isn't point-queryable for geometry; MSBFP2 is its queryable equivalent
+- [x] FP-3: OSM height/building:levels tags feed prism + wall-area derivations when present (heightSource=footprint_dataset); microsoft candidates carry no height and honestly derive from stories estimate
+- [x] FP-4: Draw-mode taps fixed — root cause: clickable candidate polygons painted over the building swallowed map clicks (POI icons also hijacked taps); overlays now clickable:false, clickableIcons off + crosshair cursor while drawing; verified 4/4 taps register on a 390px touch viewport
+- [x] FP-5: Fallback UX — source note names which dataset answered (OSM · ODbL / Microsoft · ODC-BY / prism), MS badge on chips, live draw preview polygon + point markers + undo button
+- [x] FP-6: Vitest — new fetchEsriFootprints suite (ring parsing, noise filter, nearest-first, microsoft provenance, empty case); full 320-test run green; mobile Playwright verified resolve (no "unreachable"), tap registration, live sqft, stories stepper, undo
+- [x] I18N-3: EsTranslateTip OK button overlapped by sticky alerts bell on desktop — fixed (pr-14/md:mr-16), verified via authenticated Playwright (banner renders, dismiss persists)
+- [x] FP-7: Non-rectangular drawn footprints supported end-to-end (up to 120 vertices) with live shoelace-area readout; verified a 6-vertex L-shape derives correct area/walls/exposure via the live API
+- [x] FP-8: Stories stepper in draw mode (1–120, ≈3.2 m/story) — drawn confirm sends stories+heightM so wall areas, exposure, and prism massing reflect real height
+- [x] FP-9: Root cause confirmed and fixed: overpass-api.de HTTP 406 (UA rejection) + kumi timeout — headers fixed, mirror list expanded and reordered

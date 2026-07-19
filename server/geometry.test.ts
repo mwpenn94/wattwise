@@ -130,3 +130,53 @@ describe("fetchOsmFootprints (mocked Overpass)", () => {
     expect(cands).toEqual([]);
   });
 });
+
+describe("fetchEsriFootprints (mocked Esri MSBFP feature service)", () => {
+  it("parses esri rings into sorted microsoft-source candidates and filters noise", async () => {
+    const { fetchEsriFootprints } = await import("./geometry");
+    const lat = 32.2226;
+    const lng = -110.9747;
+    const ringNear = rectRing(lat, lng);
+    const ringFar = rectRing(lat + 0.0004, lng, 30, 15);
+    const tiny = rectRing(lat, lng, 2, 1.5);
+    const fetcher = async (url: string) => {
+      expect(url).toContain("esriGeometryPoint");
+      expect(url).toContain("MSBFP2");
+      return {
+        features: [
+          { attributes: { OBJECTID: 22 }, geometry: { rings: [ringFar] } },
+          { attributes: { OBJECTID: 11 }, geometry: { rings: [ringNear] } },
+          { attributes: { OBJECTID: 33 }, geometry: { rings: [tiny] } },
+        ],
+      };
+    };
+    const cands = await fetchEsriFootprints({ lat, lng }, fetcher);
+    expect(cands).toHaveLength(2); // tiny (<10 sqm) filtered
+    expect(cands[0].osmId).toBe("msbfp/11"); // nearest first
+    expect(cands[0].source).toBe("microsoft");
+    expect(cands[0].heightM).toBeNull(); // dataset carries no heights
+    expect(cands[0].areaSqft).toBeGreaterThan(2000);
+  });
+
+  it("returns [] when the service finds nothing nearby", async () => {
+    const { fetchEsriFootprints } = await import("./geometry");
+    const cands = await fetchEsriFootprints({ lat: 32, lng: -110 }, async () => ({ features: [] }));
+    expect(cands).toEqual([]);
+  });
+
+  it("deriveGeometry keeps microsoft provenance honest: no ODbL flag, stories-estimate height", () => {
+    const cand: FootprintCandidate = {
+      ring: rectRing(),
+      areaSqft: 2150,
+      heightM: null,
+      stories: null,
+      source: "microsoft",
+      osmId: "msbfp/11",
+      distanceM: 5,
+    };
+    const d = deriveGeometry(cand);
+    expect(d.odblDerived).toBe(false);
+    expect(d.footprintSource).toBe("microsoft");
+    expect(d.heightSource).toBe("stories_estimate");
+  });
+});

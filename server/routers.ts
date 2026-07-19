@@ -910,18 +910,44 @@ export const appRouter = router({
           };
         }
         const point = { lat: site.lat, lng: site.lng };
-        let osm: import("./geometry").FootprintCandidate[] = [];
+        // Two-source chain: OSM Overpass (mirror-rotated) first for its height/
+        // levels tags, then Microsoft US Building Footprints (Esri-hosted) when
+        // Overpass is unreachable or has no mapped building here. Prism last.
+        let found: import("./geometry").FootprintCandidate[] = [];
         let sourceNote = "";
+        let osmFailed = false;
         try {
-          osm = await geo.fetchOsmFootprints(point);
-          sourceNote = osm.length > 0 ? "OpenStreetMap building footprints near your point (ODbL)." : "No mapped building found within ~60 m on OpenStreetMap.";
+          found = await geo.fetchOsmFootprints(point);
         } catch {
-          sourceNote = "The footprint service is unreachable right now — showing a prism estimate from your floor area instead.";
+          osmFailed = true;
+        }
+        if (found.length > 0) {
+          sourceNote = "OpenStreetMap building footprints near your point (ODbL).";
+        } else {
+          try {
+            found = await geo.fetchEsriFootprints(point);
+            if (found.length > 0) {
+              sourceNote = osmFailed
+                ? "OpenStreetMap was unreachable, so these footprints come from the Microsoft US Building Footprints dataset (no height data — stories come from your profile)."
+                : "No OSM building here — these footprints come from the Microsoft US Building Footprints dataset (no height data — stories come from your profile).";
+            } else {
+              sourceNote = osmFailed
+                ? "Both footprint sources are unreachable right now — showing a prism estimate from your floor area instead. You can also trace the building yourself below."
+                : "No mapped building found within ~60 m in either OpenStreetMap or the Microsoft footprints dataset — you can trace it yourself below.";
+            }
+          } catch {
+            sourceNote = osmFailed
+              ? "Both footprint sources are unreachable right now — showing a prism estimate from your floor area instead. You can also trace the building yourself below."
+              : "No OSM building here, and the backup footprint source is unreachable — showing a prism estimate instead. You can also trace the building yourself below.";
+          }
         }
         const prism = geo.prismFallback(point, site.sqft ?? null, null);
-        await h.audit(ctx.user.id, "geometry_resolved", "site", String(input.siteId), { osmCandidates: osm.length });
+        await h.audit(ctx.user.id, "geometry_resolved", "site", String(input.siteId), {
+          candidates: found.length,
+          source: found[0]?.source ?? "none",
+        });
         return {
-          candidates: osm.map((c) => ({ ...geo.deriveGeometry(c), ring: c.ring, osmId: c.osmId, distanceM: c.distanceM, areaSqft: c.areaSqft })),
+          candidates: found.map((c) => ({ ...geo.deriveGeometry(c), ring: c.ring, osmId: c.osmId, distanceM: c.distanceM, areaSqft: c.areaSqft, source: c.source })),
           fallback: { ...geo.deriveGeometry(prism), ring: prism.ring, areaSqft: prism.areaSqft, prism: true as const },
           note: sourceNote,
         };
@@ -934,7 +960,7 @@ export const appRouter = router({
         z.object({
           siteId: z.number(),
           ring: z.array(z.tuple([z.number(), z.number()])).min(3).max(120),
-          source: z.enum(["osm", "user_drawn", "prism"]),
+          source: z.enum(["osm", "microsoft", "user_drawn", "prism"]),
           osmId: z.string().optional(),
           heightM: z.number().positive().max(500).nullable().optional(),
           stories: z.number().int().positive().max(120).nullable().optional(),

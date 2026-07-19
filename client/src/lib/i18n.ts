@@ -8,6 +8,14 @@
  * CTAs). Console/analysis surfaces stay EN until the string table grows —
  * honestly labeled below, never machine-translated silently.
  *
+ * Strategy (owner decision, Jul 19): hand-crafted ES stays for the public
+ * funnel where first-impression quality matters; console/analysis surfaces
+ * lean on BROWSER-NATIVE translation (Chrome/Edge/Safari full-page
+ * translate). To make that work well we: (1) keep <html lang> accurate from
+ * first paint and on toggle, (2) never block translation globally, and
+ * (3) mark untranslatable tokens (brand, units, IDs) with translate="no"
+ * via the NoTranslate helper below.
+ *
  * Contract:
  *  - `t(key)` returns the active-language string, falling back to EN so a
  *    missing translation NEVER renders a raw key or empty text.
@@ -16,7 +24,7 @@
  *  - Adding a language = adding a column to STRINGS; TypeScript enforces
  *    every EN key exists (ES may be partial by design, EN is the fallback).
  */
-import { useSyncExternalStore } from "react";
+import React, { useSyncExternalStore } from "react";
 
 export type Lang = "en" | "es";
 const LS_KEY = "meterly.lang";
@@ -41,7 +49,7 @@ const EN = {
   "estimator.disclaimer": "Modeled estimate — not a guarantee. Ranges narrow as you add real data.",
   // language switcher
   "lang.label": "Language",
-  "lang.consoleNote": "Analysis pages are English-only for now — Spanish coverage is expanding.",
+  "lang.consoleNote": "Analysis pages are written in English — your browser can translate them: right-click and choose Translate (Chrome/Edge) or tap the translate icon in the address bar (Safari/mobile).",
   // §5c nav + footer
   "nav.howItWorks": "How it works",
   "nav.pricing": "Pricing",
@@ -73,7 +81,7 @@ const ES: Partial<Record<StringKey, string>> = {
   "estimator.addressPrompt": "Escribe una dirección para ver cuánto probablemente gasta tu edificio",
   "estimator.disclaimer": "Estimado modelado — no es una garantía. Los rangos se ajustan al agregar datos reales.",
   "lang.label": "Idioma",
-  "lang.consoleNote": "Las páginas de análisis están solo en inglés por ahora — la cobertura en español está creciendo.",
+  "lang.consoleNote": "Las páginas de análisis están escritas en inglés — tu navegador puede traducirlas: haz clic derecho y elige Traducir (Chrome/Edge) o toca el ícono de traducción en la barra de direcciones (Safari/móvil).",
   "nav.howItWorks": "Cómo funciona",
   "nav.pricing": "Precios",
   "footer.privacy": "Política de privacidad",
@@ -135,6 +143,15 @@ let current: Lang = (() => {
   }
 })();
 
+// Keep <html lang> accurate from first paint so browser-native translation
+// (Chrome/Edge/Safari) detects the page language correctly and offers to
+// translate console surfaces the hand-crafted table doesn't cover.
+try {
+  document.documentElement.lang = current;
+} catch {
+  /* SSR/test env */
+}
+
 const listeners = new Set<() => void>();
 
 export function getLang(): Lang {
@@ -156,6 +173,15 @@ export function setLang(l: Lang) {
 export function t(key: StringKey, lang?: Lang): string {
   const l = lang ?? current;
   return TABLES[l][key] ?? EN[key];
+}
+
+/**
+ * Wrap tokens that must NEVER be machine-translated by browser-native
+ * translation: the brand name, units (kW, kWh, kBtu, CCF), tariff codes,
+ * and identifiers. Renders an inline <span translate="no">.
+ */
+export function NoTranslate({ children, className }: { children: React.ReactNode; className?: string }) {
+  return React.createElement("span", { translate: "no", className }, children);
 }
 
 /** React hook: re-renders on language change. */
