@@ -1,0 +1,1 @@
+ALTER TABLE `uploads` MODIFY COLUMN `format` enum('xlsx','csv','espi_xml','zip','auto','bill_pdf','bill_image','manual') NOT NULL;

@@ -218,7 +218,7 @@ export const uploads = mysqlTable(
     fileKey: varchar("fileKey", { length: 512 }),
     fileUrl: text("fileUrl"),
     sha256: varchar("sha256", { length: 64 }).notNull(),
-    format: mysqlEnum("format", ["xlsx", "csv", "espi_xml", "bill_pdf", "bill_image", "manual"]).notNull(),
+    format: mysqlEnum("format", ["xlsx", "csv", "espi_xml", "zip", "auto", "bill_pdf", "bill_image", "manual"]).notNull(),
     parser: varchar("parser", { length: 64 }),
     parserVersion: varchar("parserVersion", { length: 32 }),
     parseConfidence: double("parseConfidence"),

@@ -9,12 +9,30 @@
  */
 import { MAX_UPLOAD_BYTES, PARSE_TIMEOUT_MS } from "../../shared/wattwise";
 
-export type DetectedType = "xlsx" | "xls" | "csv_text" | "xml" | "pdf" | "png" | "jpeg" | "zip_unknown" | "unknown";
+export type DetectedType = "xlsx" | "xls" | "csv_text" | "xml" | "pdf" | "png" | "jpeg" | "zip" | "zip_unknown" | "unknown";
+
+/** An OOXML workbook is a zip containing `[Content_Types].xml` and `xl/…`
+ * members; generic archives (utility Green Button bundles etc.) are not.
+ * Member names appear verbatim in local-file headers AND in the central
+ * directory at the END of the archive — writers order members differently
+ * (Excel puts [Content_Types].xml first; SheetJS puts xl/_rels first and
+ * [Content_Types].xml last), so scan a head window plus a tail window (the
+ * central directory always lists every member) without inflating anything.
+ * Ingest-fix ING-2 (owner report Jul 19): a raw .zip used to detect as
+ * "xlsx", route into XLSX.read, and die with "Unsupported ZIP file". */
+function zipLooksLikeOoxml(buf: Buffer): boolean {
+  const head = buf.slice(0, 8192).toString("latin1");
+  const tail = buf.length > 8192 ? buf.slice(-65536).toString("latin1") : "";
+  const w = head + tail;
+  return w.includes("[Content_Types].xml") || w.includes("xl/workbook.xml") || w.includes("xl/_rels/workbook.xml.rels");
+}
 
 export function detectMagicBytes(buf: Buffer): DetectedType {
   if (buf.length >= 4) {
-    // ZIP container (xlsx is a zip)
-    if (buf[0] === 0x50 && buf[1] === 0x4b && (buf[2] === 0x03 || buf[2] === 0x05 || buf[2] === 0x07)) return "xlsx";
+    // ZIP container — could be an xlsx workbook OR a generic archive
+    if (buf[0] === 0x50 && buf[1] === 0x4b && (buf[2] === 0x03 || buf[2] === 0x05 || buf[2] === 0x07)) {
+      return zipLooksLikeOoxml(buf) ? "xlsx" : "zip";
+    }
     // Legacy xls (OLE compound file)
     if (buf[0] === 0xd0 && buf[1] === 0xcf && buf[2] === 0x11 && buf[3] === 0xe0) return "xls";
     // PDF
@@ -39,6 +57,10 @@ const EXPECTED: Record<string, DetectedType[]> = {
   xlsx: ["xlsx", "xls"],
   csv: ["csv_text"],
   espi_xml: ["xml"],
+  zip: ["zip", "xlsx"], // a zip-labeled upload that is really a workbook is still safe to accept
+  // "auto": extensionless or unknown-extension files (e.g. Green Button
+  // "HourlyIntervalData" members) — any parseable interval content type.
+  auto: ["xlsx", "xls", "csv_text", "xml", "zip"],
   bill_pdf: ["pdf"],
   bill_image: ["png", "jpeg"],
 };

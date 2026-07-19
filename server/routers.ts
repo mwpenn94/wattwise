@@ -31,6 +31,7 @@ import { emitDeadEndPersona } from "./personaFingerprint";
 import { ensureSeeded } from "./seed/runSeeders";
 import { STATE_PROFILES } from "./seed/nationalData";
 import { preParseGate, rejectXxe, withParseTimeout } from "./ingest/hardening";
+import { extractZipMembers } from "./ingest/archive";
 import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, type ParsedMeterSeries } from "./ingest/parsers";
 import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
@@ -1484,7 +1485,9 @@ export const appRouter = router({
         z.object({
           siteId: z.number(),
           filename: z.string().max(512),
-          format: z.enum(["xlsx", "csv", "espi_xml"]),
+          // "zip" = archive of interval files (Green Button bundles etc.);
+          // "auto" = unknown/missing extension — route by content detection.
+          format: z.enum(["xlsx", "csv", "espi_xml", "zip", "auto"]),
           // Batch-14 (pass 126): layered size caps — Express json body limit (50mb)
           // rejects oversized payloads BEFORE zod/base64 decode; this zod max
           // (≈50MB decoded: 50MiB × 4/3 base64 expansion ≈ 69.9M chars) matches
@@ -1507,8 +1510,13 @@ export const appRouter = router({
         // Parser routing is based on the gate-verified DETECTED content type, not
         // the user-supplied format label — a mislabeled upload cannot steer content
         // into a parser that never inspected it (defense-in-depth on top of the gate).
-        const verifiedFormat: "xlsx" | "csv" | "espi_xml" =
-          gate.detected === "xlsx" || gate.detected === "xls" ? "xlsx" : gate.detected === "csv_text" ? "csv" : "espi_xml";
+        // ING-2 (owner report Jul 19): "zip" routes through archive extraction —
+        // each data-bearing member is content-detected and parsed individually.
+        const verifiedFormat: "xlsx" | "csv" | "espi_xml" | "zip" =
+          gate.detected === "zip" ? "zip"
+          : gate.detected === "xlsx" || gate.detected === "xls" ? "xlsx"
+          : gate.detected === "csv_text" ? "csv"
+          : "espi_xml";
 
         const sha256 = createHash("sha256").update(buf).digest("hex");
         const dup = await h.findUploadByHash(ctx.user.id, sha256);
@@ -1533,7 +1541,7 @@ export const appRouter = router({
             filename: input.filename,
             sha256,
             format: input.format,
-            parser: verifiedFormat === "xlsx" ? "excel_build0103" : verifiedFormat === "csv" ? "csv_build0103" : "espi_xml",
+            parser: verifiedFormat === "xlsx" ? "excel_build0103" : verifiedFormat === "csv" ? "csv_build0103" : verifiedFormat === "zip" ? "zip_multi" : "espi_xml",
             parserVersion: PARSER_VERSION,
             status: "pending",
           });
@@ -1561,9 +1569,45 @@ export const appRouter = router({
             throw new TRPCError({ code: "BAD_REQUEST", message: xxe.reason ?? "XML rejected (XXE protection)" });
           }
         }
+        // Zip path: extract members, then parse each data-bearing member through
+        // the SAME parser family the single-file path uses. Skipped members
+        // (stylesheets, OS metadata) are disclosed in the validation notes.
+        const memberNotes: string[] = [];
         let series: ParsedMeterSeries[] = [];
         try {
           series = await withParseTimeout(() => {
+            if (verifiedFormat === "zip") {
+              const zx = extractZipMembers(buf);
+              if (!zx.ok) throw new Error(zx.reason ?? "Could not read the zip archive");
+              const all: ParsedMeterSeries[] = [];
+              for (const m of zx.members) {
+                const base = m.name.split("/").pop() ?? m.name;
+                if (m.route === null) {
+                  memberNotes.push(`Skipped "${base}": ${m.skipReason}`);
+                  continue;
+                }
+                if (m.route === "espi_xml") {
+                  const xxe = rejectXxe(m.bytes.toString("utf8"));
+                  if (!xxe.ok) throw new Error(`"${base}": ${xxe.reason}`);
+                }
+                const parsed =
+                  m.route === "xlsx" ? parseExcelIntervals(m.bytes)
+                  : m.route === "csv" ? parseCsvIntervals(m.bytes.toString("utf8"), base)
+                  : parseEspiXml(m.bytes.toString("utf8"));
+                if (parsed.length === 0 || parsed.every((s) => s.points.length === 0)) {
+                  memberNotes.push(`"${base}": no interval data recognized`);
+                  continue;
+                }
+                // Prefix series keys with the member name so multi-file archives
+                // produce distinguishable meter labels (single-member bundles keep
+                // the parser's own label — usually the sheet/usage-point name).
+                for (const s of parsed) {
+                  all.push(zx.members.filter((x: { route: unknown }) => x.route !== null).length > 1 ? { ...s, sourceKey: `${base}: ${s.sourceKey}` } : s);
+                }
+                memberNotes.push(`Parsed "${base}" (${m.route === "espi_xml" ? "Green Button XML" : m.route})`);
+              }
+              return all;
+            }
             if (verifiedFormat === "xlsx") return parseExcelIntervals(buf);
             if (verifiedFormat === "csv") return parseCsvIntervals(buf.toString("utf8"), input.filename);
             return parseEspiXml(buf.toString("utf8"));
@@ -1577,9 +1621,14 @@ export const appRouter = router({
           throw new TRPCError({ code: "BAD_REQUEST", message: `Parse failed: ${msg}` });
         }
         if (series.length === 0 || series.every((s) => s.points.length === 0)) {
-          await h.updateUpload(uploadId, { status: "failed", error: "No interval data found in file" });
+          const detail = memberNotes.length > 0 ? ` (${memberNotes.join("; ")})` : "";
+          await h.updateUpload(uploadId, { status: "failed", error: `No interval data found in file${detail}`.slice(0, 1024) });
           await emitDeadEndPersona({ deadEnd: `empty_file_${verifiedFormat}` });
-          throw new TRPCError({ code: "BAD_REQUEST", message: "No interval data recognized in this file." });
+          throw new TRPCError({ code: "BAD_REQUEST", message: `No interval data recognized in this file.${detail}`.slice(0, 1024) });
+        }
+        // Surface member-level dispositions on every parsed series' notes.
+        if (memberNotes.length > 0) {
+          for (const s of series) s.validation.notes.push(...memberNotes);
         }
 
         // one meter per parsed series (sheet/UsagePoint)

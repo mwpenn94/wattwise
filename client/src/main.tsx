@@ -62,11 +62,26 @@ const trpcClient = trpc.createClient({
         }
         return {};
       },
-      fetch(input, init) {
-        return globalThis.fetch(input, {
+      async fetch(input, init) {
+        const res = await globalThis.fetch(input, {
           ...(init ?? {}),
           credentials: "include",
         });
+        // ING-1 (owner report Jul 19): a stale/unbound domain or edge proxy
+        // failure returns empty non-JSON bodies — tRPC then dies with the
+        // baffling "Unexpected end of JSON input". Detect it here and raise a
+        // clear, actionable error instead.
+        const ct = res.headers.get("content-type") ?? "";
+        if (!ct.includes("application/json")) {
+          const reason =
+            res.status === 404
+              ? "The server can't be reached at this address — you may be on an outdated domain. Please use the site's current URL."
+              : res.status === 413
+                ? "The upload is too large for the server to accept."
+                : `The server returned an unexpected ${res.status} response. Please try again — if it persists, reload the page.`;
+          throw new Error(reason);
+        }
+        return res;
       },
     }),
   ],

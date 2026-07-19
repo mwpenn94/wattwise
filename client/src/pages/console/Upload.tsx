@@ -13,14 +13,18 @@ import { fileToBase64 } from "@/lib/wattwiseUi";
 import { DisclaimerBanner } from "@/components/Honesty";
 import { Link } from "wouter";
 
-type Fmt = "xlsx" | "csv" | "espi_xml";
+type Fmt = "xlsx" | "csv" | "espi_xml" | "zip" | "auto";
 
-function detectFormat(name: string): Fmt | null {
+// Extension is only a HINT — the server re-verifies content via magic bytes
+// and routes accordingly, so extensionless Green Button files ("HourlyIntervalData")
+// and mislabeled exports still ingest via "auto".
+function detectFormat(name: string): Fmt {
   const n = name.toLowerCase();
   if (n.endsWith(".xlsx") || n.endsWith(".xls")) return "xlsx";
   if (n.endsWith(".csv")) return "csv";
   if (n.endsWith(".xml")) return "espi_xml";
-  return null;
+  if (n.endsWith(".zip")) return "zip";
+  return "auto";
 }
 
 export default function Upload() {
@@ -55,10 +59,6 @@ export default function Upload() {
     try {
       for (const f of Array.from(files)) {
         const fmt = detectFormat(f.name);
-        if (!fmt) {
-          toast.error(`${f.name}: unsupported format (need .xlsx, .csv, or ESPI .xml)`);
-          continue;
-        }
         const b64 = await fileToBase64(f);
         const res = await ingest.mutateAsync({ siteId: Number(siteId), filename: f.name, format: fmt, contentBase64: b64 });
         if (res.duplicate) toast.info(`${f.name}: already ingested (duplicate checksum) — skipped`);
@@ -144,7 +144,7 @@ export default function Upload() {
     <div className="container max-w-5xl py-8">
       <h1 className="font-display text-2xl font-bold tracking-tight">Upload data</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Interval files (Excel, CSV, Green Button XML) and utility bills. Every point is stored with provenance.
+        Interval files (Excel, CSV, Green Button XML, or the zip bundle straight from your utility's download portal) and utility bills. Every point is stored with provenance.
       </p>
       <div className="mt-4">
         <DisclaimerBanner />
@@ -180,11 +180,11 @@ export default function Upload() {
             <CardContent className="flex flex-col items-center py-8 text-center">
               <FileSpreadsheet className="h-8 w-8 text-primary" />
               <p className="mt-3 font-medium">Interval files</p>
-              <p className="mt-1 text-xs text-muted-foreground">.xlsx multi-sheet · .csv · Green Button .xml</p>
+              <p className="mt-1 text-xs text-muted-foreground">.xlsx multi-sheet · .csv · Green Button .xml · .zip bundles</p>
               <Button size="sm" className="mt-4" disabled={busy || !siteId}>
                 <FileUp className="mr-1 h-4 w-4" /> {busy ? "Parsing…" : "Choose files"}
               </Button>
-              <input ref={fileRef} type="file" hidden multiple accept=".xlsx,.xls,.csv,.xml" onChange={(e) => onFiles(e.target.files)} />
+              <input ref={fileRef} type="file" hidden multiple accept=".xlsx,.xls,.csv,.xml,.zip" onChange={(e) => onFiles(e.target.files)} />
             </CardContent>
           </Card>
 
