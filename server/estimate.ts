@@ -58,6 +58,16 @@ export interface PublicEstimate {
   percentileBand: string | null;
   betterThanMedian: boolean | null;
   benchmarkSource: string | null;
+  /** cross-commodity parity (owner report Jul 19): gas is benchmark-imputed the
+   * same honest way electric is archetype-imputed — present only when a gas
+   * benchmark exists for the building type. Never fabricated when absent. */
+  gasEstimate: {
+    annualTherms: number;
+    annualCostUsd: number;
+    monthlyCostUsd: number;
+    tariffName: string | null;
+    basis: string;
+  } | null;
   /** top opportunity teaser */
   topOpportunity: { title: string; estimatedSavingsUsd: number; basis: string } | null;
   /** grounding provenance — every value states where it came from */
@@ -183,6 +193,39 @@ export async function computeAddressEstimate(input: {
             : "bottom quartile";
   }
 
+  // 5b. Gas estimate — benchmark intensity × sqft, priced on the first seeded
+  //     state gas tariff's flat rate, else a disclosed national average. Water
+  //     is deliberately omitted from the public teaser (rates vary too much by
+  //     district to be honest without an address-verified utility).
+  let gasEstimate: PublicEstimate["gasEstimate"] = null;
+  const gasBench = await h.getBenchmark(input.buildingType, "gas");
+  if (gasBench && sqft > 0) {
+    const annualTherms = gasBench.medianEui * sqft;
+    let gasRate: number | null = null;
+    let gasTariffName: string | null = null;
+    const gasTariffs = state ? await h.listTariffs("gas", state) : [];
+    for (const t of gasTariffs) {
+      const s = t.structure as TariffStructure;
+      const r = s.energy?.[0]?.ratePerUnit;
+      if (typeof r === "number" && r > 0) {
+        gasRate = r;
+        gasTariffName = t.name;
+        break;
+      }
+    }
+    const NATIONAL_AVG_PER_THERM = 1.2; // EIA 2025 blended commercial/residential — disclosed fallback
+    const rate = gasRate ?? NATIONAL_AVG_PER_THERM;
+    const fixed = 0; // public teaser: usage charge only, disclosed in basis
+    const annualGasCost = annualTherms * rate + fixed;
+    gasEstimate = {
+      annualTherms: Math.round(annualTherms),
+      annualCostUsd: Math.round(annualGasCost),
+      monthlyCostUsd: Math.round(annualGasCost / 12),
+      tariffName: gasTariffName,
+      basis: `${gasBench.medianEui} therms/sqft-yr median (${gasBench.source}) × ${sqft.toLocaleString()} sqft, priced at ${gasTariffName ? `the seeded ${gasTariffName} rate` : `a national average $${NATIONAL_AVG_PER_THERM.toFixed(2)}/therm`} — benchmark-imputed, not your bill`,
+    };
+  }
+
   // 6. Top opportunity teaser — largest generic lever for the type, honestly
   //    framed as archetype-based until real data lands.
   const coolingHeavy = ["1A", "1B", "2A", "2B", "3B"].includes(climateZone);
@@ -206,6 +249,7 @@ export async function computeAddressEstimate(input: {
     percentileBand,
     betterThanMedian,
     benchmarkSource: bench ? `${bench.source} (${bench.sourceVersion})` : null,
+    gasEstimate,
     topOpportunity,
     grounding: {
       location: {

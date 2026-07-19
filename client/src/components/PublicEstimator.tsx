@@ -292,9 +292,18 @@ export function PublicEstimator() {
             <span className="text-base font-semibold text-muted-foreground">/yr</span>
           </p>
           <p className="text-xs text-muted-foreground">
-            ≈ ${est.estimatedMonthlyCostUsd.toLocaleString()}/mo · {est.estimatedAnnualKwh.toLocaleString()} kWh —{" "}
+            electric ≈ ${est.estimatedMonthlyCostUsd.toLocaleString()}/mo · {est.estimatedAnnualKwh.toLocaleString()} kWh —{" "}
             {est.accuracy.label}
           </p>
+
+          {/* cross-commodity parity: benchmark-imputed gas teaser */}
+          {est.gasEstimate && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              <span className="font-semibold text-foreground">+ natural gas ≈ ${est.gasEstimate.annualCostUsd.toLocaleString()}/yr</span>{" "}
+              · {est.gasEstimate.annualTherms.toLocaleString()} <span translate="no">therms</span> — benchmark-imputed
+              <span className="block text-[10px] text-muted-foreground/70">{est.gasEstimate.basis}</span>
+            </p>
+          )}
 
           {est.topOpportunity && (
             <div className="mt-3 rounded-md border border-primary/30 bg-primary/5 p-3">

@@ -39,6 +39,7 @@ import { computeVacantBaseline, evaluateAwayWatchdog, tsInAwayWindow } from "../
 import { detectPvSignature, PV_GATED_INSIGHT_KINDS, pvGateMessage } from "./pvDetection";
 import { staleSeedsForDomain } from "../seedLifecycle";
 import type { Site, Meter } from "../../drizzle/schema";
+import { generateCommodityOpportunities } from "../commodityOpportunities"; // cross-commodity parity (stage 7)
 
 /**
  * Unoccupied hours per year for a typical single-shift commercial facility:
@@ -302,6 +303,82 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         : "Built archetype-synthetic baseline for this building type and climate"
       : "No baseline possible — missing both interval data and square footage",
   );
+
+  /* Cross-commodity stage-2 parity (owner report Jul 19): gas/water baselines
+     were never persisted — the archetype path above is electric-only (only
+     electric 8760 shapes are seeded). For each non-electric commodity this
+     site can support, persist an annual baseline with the SAME
+     measured-vs-imputed discipline as electric: ≥60 days of that commodity's
+     meter data → annualized measured; else benchmark intensity × sqft
+     (CBECS/RECS/WaterSense), disclosed in confidenceLabel. Gas params carry an
+     HDD-weighted monthly heating split (55% heating share weighted by HDD,
+     45% flat — EIA end-use prior); no fabricated hourly shape, since no gas
+     8760 archetypes are seeded and inventing one would violate the honesty
+     rule. Skipped when analyzing that commodity's own meter directly (the
+     block above already persisted its real baseline). */
+  try {
+    const allMeters = await h.listMeters(site.id, userId);
+    for (const com of ["gas", "water"] as const) {
+      if (meter?.commodity === com) continue; // already handled above with full fit
+      const cMeter =
+        allMeters.find((m) => m.commodity === com && m.meterRole !== "submeter") ??
+        allMeters.find((m) => m.commodity === com) ??
+        null;
+      let annual: number | null = null;
+      let basisLabel = "";
+      let trainStart: number | null = null;
+      let trainEnd: number | null = null;
+      if (cMeter) {
+        const pts = await h.getIntervalPoints(cMeter.id, userId);
+        if (pts.length >= 2) {
+          const span = Math.max(1, (pts[pts.length - 1].ts - pts[0].ts) / 86_400_000);
+          const tot = pts.reduce((s, p) => s + p.usage, 0);
+          if (span >= 60 && tot > 0) {
+            annual = (tot / span) * 365;
+            basisLabel = `measured — annualized from ${Math.round(span)} days of ${com} data`;
+            trainStart = pts[0].ts;
+            trainEnd = pts[pts.length - 1].ts;
+          }
+        }
+      }
+      if (annual == null && site.sqft && site.buildingType) {
+        const bm = await h.getBenchmark(site.buildingType, com);
+        if (bm) {
+          annual = bm.medianEui * site.sqft;
+          basisLabel = `benchmark-imputed — ${bm.medianEui} ${bm.unit} (${bm.source}) × ${site.sqft.toLocaleString()} sqft; screening-grade`;
+        }
+      }
+      if (annual != null && annual > 0) {
+        const totalHdd = normals.reduce((s, n) => s + (n.hddBase65 ?? 0), 0);
+        const monthlySplit =
+          com === "gas" && totalHdd > 0
+            ? normals.map((n) => ({
+                month: n.month,
+                units: Math.round(annual! * (0.45 / 12 + 0.55 * ((n.hddBase65 ?? 0) / totalHdd))),
+              }))
+            : normals.map((n) => ({ month: n.month, units: Math.round(annual! / 12) }));
+        await h.saveBaseline({
+          siteId: site.id,
+          meterId: cMeter?.id ?? null,
+          method: basisLabel.startsWith("measured") ? "billing_hdd_cdd" : "archetype_synthetic",
+          commodity: com,
+          params: { annualUnits: Math.round(annual), monthlySplit, split: com === "gas" ? "hdd_weighted_55pct_heating" : "flat" },
+          rSquared: null,
+          cvrmse: null,
+          trainStart,
+          trainEnd,
+          weatherBasis: LABEL_NORMAL_YEAR,
+          confidenceLabel: basisLabel,
+          source: basisLabel.startsWith("measured") ? "measured_intervals" : "benchmark_intensity",
+        });
+        narrate(
+          `${com === "gas" ? "Gas" : "Water"} baseline persisted (${basisLabel.split(" — ")[0]}): ${Math.round(annual).toLocaleString()} ${com === "gas" ? "therms" : "gallons"}/yr`,
+        );
+      }
+    }
+  } catch (e) {
+    narrate(`Cross-commodity baseline persistence skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   /* ---------- stage 3: tariff check (current + sweep) ---------- */
   const costPoints = hasIntervals ? points : archetypeHourly ? hourlyPoints(archetypeHourly) : [];
@@ -1162,7 +1239,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   narrate(`Wrote ${persistedInsightRows.length} insight${persistedInsightRows.length === 1 ? "" : "s"} — every figure carries its provenance`);
 
   /* ---------- stage 7: opportunities ---------- */
-  const oppCands: OpportunityCandidate[] = [];
+  // Parity fix (owner report Jul 19): candidates may carry implementer-grade
+  // unit savings + commodity so gas/water measures rank alongside electric
+  // with honest per-unit figures for custom rebate programs.
+  type OppCand = OpportunityCandidate & { estUnitsSavedPerYr?: number; unit?: string; commodity?: string };
+  const oppCands: OppCand[] = [];
   // §2.57 sewer-on-winter-water linkage (water meters only): most municipal
   // sewer charges are set from WINTER water usage (winter-quarter-average
   // convention — winter use ≈ indoor-only, proxying what actually reaches the
@@ -1383,6 +1464,30 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   const tenure = (site as { tenure?: "own" | "rent" | "condo_hoa" }).tenure ?? "own";
   const isOwnerCapex = (c: OpportunityCandidate) =>
     OWNER_CAPEX_KEYS.has(c.key) || c.capexBand === "medium" || c.capexBand === "high";
+  /* Cross-commodity parity (owner report Jul 19): gas/water opportunities are
+     generated HERE, in the SAME run, because replaceOpportunities wipes the
+     site's rows per analysis — a separate run would let an electric re-run
+     silently clobber the gas/water cards. Baselines follow the same
+     imputed-vs-measured discipline as electric: measured when ≥60 days of
+     that commodity's meter data exists, else benchmark-imputed
+     (CBECS/RECS/WaterSense intensity × sqft), disclosed verbatim on every
+     card. Injected BEFORE tenure filtering so renter/HOA rules apply to
+     gas/water capex measures identically. */
+  try {
+    const currentCommodity = meter?.commodity ?? "electric";
+    const xc = (
+      await generateCommodityOpportunities(
+        { id: site.id, buildingType: site.buildingType, sqft: site.sqft, state: site.state },
+        userId,
+        normals,
+        narrate,
+      )
+    ).filter((c) => c.commodity !== currentCommodity);
+    const existingKeys = new Set(oppCands.map((c) => c.key));
+    for (const c of xc) if (!existingKeys.has(c.key)) oppCands.push(c);
+  } catch (e) {
+    narrate(`Cross-commodity opportunity generation skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
   const tenureFiltered = tenure === "own" ? oppCands : oppCands.filter((c) => !isOwnerCapex(c));
   const landlordBucket = tenure === "own" ? [] : oppCands.filter(isOwnerCapex);
   if (landlordBucket.length > 0) {
@@ -1390,19 +1495,19 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       `Tenure-aware feed (${tenure === "rent" ? "renter" : "condo/HOA"}): ${landlordBucket.length} owner-capex measure${landlordBucket.length === 1 ? "" : "s"} moved to 'worth raising with your landlord' — your feed leads with dollars in your control`,
     );
   }
-  const ranked = rankOpportunities(tenureFiltered);
+  const ranked = rankOpportunities(tenureFiltered) as OppCand[];
   // Landlord-bucket items are persisted AFTER the in-control ranking with a
   // provenance audience marker so the UI renders them in a separate card and
   // never as a payback the renter is asked to buy.
-  const landlordRows = landlordBucket.map((c, i) => ({
+  const landlordRows = (landlordBucket as OppCand[]).map((c, i) => ({
     siteId: site.id,
     analysisId,
     measure: c.key,
     title: c.title,
     description: c.rationale,
     estCostSavingsPerYr: (c.annualSavingsUsdLo + c.annualSavingsUsdHi) / 2,
-    estEnergySavingsPerYr: null,
-    energyUnit: COMMODITY_UNITS.electric.usageUnit,
+    estEnergySavingsPerYr: c.estUnitsSavedPerYr ?? null,
+    energyUnit: c.unit ?? COMMODITY_UNITS.electric.usageUnit,
     estDemandSavingsKw: null,
     paybackBandYears: c.capexBand === "none" ? "immediate" : c.capexBand === "low" ? "0.5–2 yr" : "2–6 yr",
     confidence: c.confidence,
@@ -1418,6 +1523,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         tenure === "rent"
           ? "Capital measure — your landlord pays, the building benefits. Pre-drafted ask available; worth raising at lease renewal."
           : "Shared-system measure — raise with your HOA/board; savings accrue to the building.",
+      commodity: c.commodity ?? "electric",
     },
   }));
   await h.replaceOpportunities(
@@ -1433,15 +1539,15 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       // provenance where the card's "where this comes from" expander shows them.
       description: c.rationale,
       estCostSavingsPerYr: (c.annualSavingsUsdLo + c.annualSavingsUsdHi) / 2,
-      estEnergySavingsPerYr: null,
-      energyUnit: COMMODITY_UNITS.electric.usageUnit,
+      estEnergySavingsPerYr: c.estUnitsSavedPerYr ?? null,
+      energyUnit: c.unit ?? COMMODITY_UNITS.electric.usageUnit,
       estDemandSavingsKw: c.key === "peak_management" && demand ? demand.peakKw * 0.1 : null,
       paybackBandYears: c.capexBand === "none" ? "immediate" : c.capexBand === "low" ? "0.5–2 yr" : "2–6 yr",
       confidence: c.confidence,
       disaggregationMethod: disaggMethod,
       ratchetAware: c.key === "peak_management",
       rank: i + 1,
-      provenance: { savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi], category: c.category, disclosures: c.disclosures, audience: "occupant" as "occupant" | "landlord" },
+      provenance: { savingsRange: [c.annualSavingsUsdLo, c.annualSavingsUsdHi], category: c.category, disclosures: c.disclosures, audience: "occupant" as "occupant" | "landlord", commodity: c.commodity ?? "electric" },
     })).concat(landlordRows),
   );
     narrate(`Ranked ${ranked.length} opportunit${ranked.length === 1 ? "y" : "ies"} by estimated annual dollar impact`);

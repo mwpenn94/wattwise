@@ -356,3 +356,15 @@
 - [x] HT-1: Footprint candidates carry dataset heights — repointed the Esri-family source to FEMA USA Structures (HEIGHT meters, LiDAR/NGA) with MSBFP2 as footprints-only fallback; OSM height/levels tags already parsed; provenance named per candidate (FEMA/MS badges)
 - [x] HT-2: Stories/height pre-fill — height-bearing candidates show "~N fl" on chips and a measured-height note; confirm sends dataset heightM + stories; manual drawing always overrides
 - [x] HT-3: Differing section heights — when nearby parts differ by >1 story, the panel surfaces an honest note to confirm the matching part or trace the tallest section (no silent averaging)
+
+## Production visibility gap (reported Jul 18)
+- [x] VIS-1: Reproduced/explained — user explored prod BEFORE the 7cb6c73b deploy finished (~04:43); the build they saw (4286753c, deployed 03:25) predated all multi-commodity/M&V work
+- [x] VIS-2: Root cause = deployment timing, not gating: checkpoint saved 04:37, deploy completed ~04:43, user report arrived 04:40. Current prod bundle verified to contain Gas/Water efficiency, tariff tabs, M&V panel, rebate estimator strings; prod DB has gas/water tariffs + benchmarks; prod logs clean
+- [x] VIS-3: Verified live: prod bundle index-BfGoGYCV.js carries all feature strings, API healthy, DB seeded; UI screenshots confirm Scenarios (gas/water kinds), Tariffs (commodity tabs), Reports (M&V card). Remaining visibility is data-dependent (Dashboard pills need gas/water meters; implementer savings appears after a run)
+
+## Commodity parity in imputed usage + auto opportunities (reported Jul 19)
+- [ ] OPP-1: Stage-2 parity — per-commodity imputed baselines for gas/water meters without data (benchmark intensity × sqft, HDD-weighted monthly split for gas heating, disclosed), saved with correct commodity (remove electric hardcode)
+- [ ] OPP-2: Stage-7 parity — auto-generated gas opportunities (heating tune-up/controls, hot-water efficiency, weatherization tied to envelope) and water opportunities (fixture efficiency, leak screening), priced at assigned/seeded gas-water rates, ranked with electric, with implementer unit savings
+- [ ] OPP-3: Analysis runs cover gas/water meters (metered AND imputed) and surfaces show cross-commodity opportunities together
+- [ ] OPP-4: Public estimate funnel gains gas imputed usage/cost alongside electric with benchmark provenance
+- [ ] OPP-5: Vitest coverage + live end-to-end verification of all parity paths
