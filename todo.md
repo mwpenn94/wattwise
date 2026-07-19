@@ -423,13 +423,13 @@
 - [x] PROV-3: Scenario/implementation pricing ($0.12/kWh hardcodes) upgraded: actual blended rate when available, else state-average imputed with notation, national assumption only as last resort
 
 ## Upload ingestion failures (owner report, Jul 19 — production)
-- [ ] ING-1: Diagnose "Unexpected end of JSON input" on production upload (payload limits / crash before JSON response)
-- [ ] ING-2: Support .zip uploads — extract and ingest contained interval files (Green Button XML + XSLT bundles, multi-file archives)
-- [ ] ING-3: Green Button XML with companion XSLT stylesheet ingests (skip non-data members gracefully)
-- [ ] ING-4: CSV interval exports ingest (user's utility hourly format)
-- [ ] ING-5: CSV data saved as .xlsx ingests (Excel-converted Green Button CSVs)
-- [ ] ING-6: Upload endpoint always returns structured JSON errors (no HTML/empty-body responses that break the client)
-- [ ] ING-7: Tests for all repro formats + live production verification + checkpoint
+- [x] ING-1: Diagnose "Unexpected end of JSON input" on production upload (payload limits / crash before JSON response)
+- [x] ING-2: Support .zip uploads — extract and ingest contained interval files (Green Button XML + XSLT bundles, multi-file archives)
+- [x] ING-3: Green Button XML with companion XSLT stylesheet ingests (skip non-data members gracefully)
+- [x] ING-4: CSV interval exports ingest (user's utility hourly format)
+- [x] ING-5: CSV data saved as .xlsx ingests (Excel-converted Green Button CSVs)
+- [x] ING-6: Upload endpoint always returns structured JSON errors (no HTML/empty-body responses that break the client)
+- [x] ING-7: Tests for all repro formats + live production verification + checkpoint
 
 ## Upload ingestion fixes (owner report Jul 19)
 - [x] ING-1: Diagnose "Unexpected end of JSON input" — root cause: stale wattwise.manus.space domain returning empty 404s; client now surfaces a clear "outdated domain" error for non-JSON API responses
