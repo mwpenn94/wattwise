@@ -956,45 +956,40 @@ export const appRouter = router({
           };
         }
         const point = { lat: site.lat, lng: site.lng };
-        // Two-source chain: OSM Overpass (mirror-rotated) first for its height/
-        // levels tags, then Microsoft US Building Footprints (Esri-hosted) when
-        // Overpass is unreachable or has no mapped building here. Prism last.
-        let found: import("./geometry").FootprintCandidate[] = [];
+        // Raced two-family resolve: OSM Overpass mirrors and the Esri layers
+        // (FEMA USA Structures → MSBFP2) are queried IN PARALLEL with a short
+        // per-source budget, first family with candidates wins (OSM preferred
+        // for tags/ODbL handling). Results are cached ~6h per point so retries
+        // and re-opens never depend on upstream throttling. Prism last.
+        const resolved = await geo.resolveFootprints(point);
+        const found = resolved.candidates;
         let sourceNote = "";
-        let osmFailed = false;
-        try {
-          found = await geo.fetchOsmFootprints(point);
-        } catch {
-          osmFailed = true;
-        }
-        if (found.length > 0) {
+        if (resolved.provider === "osm") {
           sourceNote = "OpenStreetMap building footprints near your point (ODbL).";
+        } else if (resolved.provider === "esri") {
+          const heightBearing = found[0]?.source === "usa_structures";
+          const dsName = heightBearing
+            ? `the FEMA USA Structures dataset${found.some((c) => c.heightM != null) ? " (includes measured building heights)" : " (no height measured for this building — stories come from your profile)"}`
+            : "the Microsoft US Building Footprints dataset (no height data — stories come from your profile)";
+          sourceNote = resolved.osmFailed
+            ? `OpenStreetMap was unreachable, so these footprints come from ${dsName}.`
+            : `No OSM building here — these footprints come from ${dsName}.`;
+        } else if (resolved.osmFailed && resolved.esriFailed) {
+          sourceNote =
+            "Both footprint sources are unreachable right now — showing a prism estimate from your floor area instead. You can also trace the building yourself below.";
         } else {
-          try {
-            found = await geo.fetchEsriFootprints(point);
-            if (found.length > 0) {
-              const heightBearing = found[0]?.source === "usa_structures";
-              const dsName = heightBearing
-                ? `the FEMA USA Structures dataset${found.some((c) => c.heightM != null) ? " (includes measured building heights)" : " (no height measured for this building — stories come from your profile)"}`
-                : "the Microsoft US Building Footprints dataset (no height data — stories come from your profile)";
-              sourceNote = osmFailed
-                ? `OpenStreetMap was unreachable, so these footprints come from ${dsName}.`
-                : `No OSM building here — these footprints come from ${dsName}.`;
-            } else {
-              sourceNote = osmFailed
-                ? "Both footprint sources are unreachable right now — showing a prism estimate from your floor area instead. You can also trace the building yourself below."
-                : "No mapped building found within ~60 m in either OpenStreetMap or the Microsoft footprints dataset — you can trace it yourself below.";
-            }
-          } catch {
-            sourceNote = osmFailed
-              ? "Both footprint sources are unreachable right now — showing a prism estimate from your floor area instead. You can also trace the building yourself below."
-              : "No OSM building here, and the backup footprint source is unreachable — showing a prism estimate instead. You can also trace the building yourself below.";
-          }
+          sourceNote =
+            "No mapped building found within ~60 m in OpenStreetMap or the federal footprint datasets — you can trace it yourself below.";
         }
+        if (resolved.cached && found.length > 0) sourceNote += " (cached result)";
         const prism = geo.prismFallback(point, site.sqft ?? null, null);
         await h.audit(ctx.user.id, "geometry_resolved", "site", String(input.siteId), {
           candidates: found.length,
           source: found[0]?.source ?? "none",
+          provider: resolved.provider,
+          cached: resolved.cached,
+          osmFailed: resolved.osmFailed,
+          esriFailed: resolved.esriFailed,
         });
         return {
           candidates: found.map((c) => ({ ...geo.deriveGeometry(c), ring: c.ring, osmId: c.osmId, distanceM: c.distanceM, areaSqft: c.areaSqft, source: c.source })),

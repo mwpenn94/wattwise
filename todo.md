@@ -466,3 +466,8 @@
 - [x] PRINT-3: Global @media print CSS — app chrome hidden, white/black forced, scroll containers unclipped, page margins, print-color-adjust
 - [x] PRINT-4: site_insights report kind in DB enum + router + Verify page title map
 - [x] PRINT-5: Print-emulation verification via headless Chromium PDF (2 clean pages, charts + heatmap render)
+
+## Building geometry regression (Jul 19)
+- [x] GEO-1: Diagnose why building geometry fails on previously-working addresses (prod logs + pipeline trace)
+- [x] GEO-2: Fix root cause; add resilience (retry/fallback/graceful degradation) so geometry failure never blocks the flow
+- [x] GEO-3: Tests + live verification against previously-working addresses

@@ -217,15 +217,18 @@ export function prismFallback(center: LatLng, gfaSqft: number | null, stories: n
 /* ------------------------------------------------------------------ */
 
 /**
- * Mirror order matters: overpass-api.de rejects requests from this runtime's
- * IP class with HTTP 406 (verified Jul 2026), and kumi.systems times out — so
- * the mail.ru mirror (fast, current OSM timestamp, verified reachable) leads.
- * The others stay as backups in case routing differs in production.
+ * Mirror health is volatile (re-verified Jul 19 2026): mail.ru throttles after
+ * ~1 request/min then hangs; kumi.systems hard-429s from this runtime class;
+ * overpass-api.de answers in ~2s with the Meterly UA (the old 406 was
+ * browser-UA-specific). No single mirror can be trusted to stay healthy, so
+ * they are RACED IN PARALLEL — first success wins — instead of walked
+ * serially, which previously burned 8s per dead mirror and made resolves
+ * "fail on addresses that worked before" once the lead mirror throttled.
  */
 const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass-api.de/api/interpreter",
 ];
 
 const FETCH_UA = "Meterly/1.0 (building-footprint resolver; https://meterly.manus.space)";
@@ -240,27 +243,32 @@ interface OverpassElement {
 /** Injectable fetcher for tests. */
 export type OverpassFetcher = (query: string) => Promise<{ elements: OverpassElement[] }>;
 
+const OVERPASS_TIMEOUT_MS = 6000;
+
+async function overpassFetchOne(ep: string, query: string): Promise<{ elements: OverpassElement[] }> {
+  const res = await fetch(ep, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": FETCH_UA,
+      Accept: "application/json",
+    },
+    body: `data=${encodeURIComponent(query)}`,
+    signal: AbortSignal.timeout(OVERPASS_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`Overpass ${ep} HTTP ${res.status}`);
+  return (await res.json()) as { elements: OverpassElement[] };
+}
+
+/** Race all mirrors in parallel; first successful JSON wins. Total wall time
+ * is bounded by the slowest single mirror (6s), not the sum of all three. */
 async function defaultOverpassFetch(query: string): Promise<{ elements: OverpassElement[] }> {
-  let lastErr: unknown;
-  for (const ep of OVERPASS_ENDPOINTS) {
-    try {
-      const res = await fetch(ep, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": FETCH_UA,
-          Accept: "application/json",
-        },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!res.ok) throw new Error(`Overpass ${ep} HTTP ${res.status}`);
-      return (await res.json()) as { elements: OverpassElement[] };
-    } catch (e) {
-      lastErr = e;
-    }
+  try {
+    return await Promise.any(OVERPASS_ENDPOINTS.map((ep) => overpassFetchOne(ep, query)));
+  } catch (e) {
+    const first = e instanceof AggregateError ? e.errors[0] : e;
+    throw first instanceof Error ? first : new Error("Overpass unavailable");
   }
-  throw lastErr instanceof Error ? lastErr : new Error("Overpass unavailable");
 }
 
 /**
@@ -401,6 +409,95 @@ export async function fetchEsriFootprints(
   const params = esriQueryParams(point, "OBJECTID");
   const data = await fetcher(`${ESRI_MSBFP_URL}?${params.toString()}`);
   return esriFeaturesToCandidates(data.features ?? [], point, "microsoft");
+}
+
+/* ------------------------------------------------------------------ */
+/* Combined raced resolver + short-lived cache                         */
+/* ------------------------------------------------------------------ */
+
+export interface ResolvedFootprints {
+  candidates: FootprintCandidate[];
+  /** which source family produced the winning candidates */
+  provider: "osm" | "esri" | "none";
+  /** true when the OSM transport failed entirely (all mirrors) */
+  osmFailed: boolean;
+  /** true when the Esri transport failed entirely (both services) */
+  esriFailed: boolean;
+  /** true when this result came from the in-memory cache */
+  cached: boolean;
+}
+
+/** In-memory per-point cache. Footprints change on the timescale of years;
+ * 6h TTL means a user re-opening the panel (or retrying after a flaky first
+ * attempt) never re-hits throttled upstreams. Keyed to ~11m grid so tiny
+ * pin jitter still hits. Bounded to 500 entries (FIFO eviction). */
+const RESOLVE_CACHE = new Map<string, { at: number; value: ResolvedFootprints }>();
+const RESOLVE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const RESOLVE_CACHE_MAX = 500;
+
+function cacheKey(p: LatLng): string {
+  return `${p.lat.toFixed(4)},${p.lng.toFixed(4)}`;
+}
+
+/** test hook */
+export function _clearResolveCache(): void {
+  RESOLVE_CACHE.clear();
+}
+
+/**
+ * Resolve footprints by racing BOTH source families in parallel:
+ *   - OSM Overpass (itself a parallel mirror race) — richest tags, ODbL
+ *   - Esri (FEMA USA Structures → MSBFP2) — LiDAR heights, reliable transport
+ * OSM wins ties (height/levels tags + established ODbL flagging); Esri fills
+ * in whenever OSM is throttled, slow, or has no building mapped. Neither
+ * failing blocks the other; only a dual transport failure yields provider
+ * "none" (caller then shows the prism estimate). Successful results are
+ * cached ~6h per ~11m grid cell so retries never depend on upstream mood.
+ */
+export async function resolveFootprints(
+  point: LatLng,
+  opts: { osmFetcher?: OverpassFetcher; esriFetcher?: EsriFetcher; skipCache?: boolean } = {},
+): Promise<ResolvedFootprints> {
+  const key = cacheKey(point);
+  if (!opts.skipCache) {
+    const hit = RESOLVE_CACHE.get(key);
+    if (hit && Date.now() - hit.at < RESOLVE_CACHE_TTL_MS) {
+      return { ...hit.value, cached: true };
+    }
+  }
+
+  const osmP: Promise<FootprintCandidate[] | null> = fetchOsmFootprints(point, opts.osmFetcher ?? defaultOverpassFetch)
+    .then((c) => c)
+    .catch(() => null);
+  const esriP: Promise<FootprintCandidate[] | null> = (
+    opts.esriFetcher ? fetchEsriFootprints(point, opts.esriFetcher) : fetchEsriFootprints(point)
+  ).catch(() => null);
+
+  const [osm, esri] = await Promise.all([osmP, esriP]);
+  const osmFailed = osm === null;
+  const esriFailed = esri === null;
+
+  let candidates: FootprintCandidate[] = [];
+  let provider: ResolvedFootprints["provider"] = "none";
+  if (osm && osm.length > 0) {
+    candidates = osm;
+    provider = "osm";
+  } else if (esri && esri.length > 0) {
+    candidates = esri;
+    provider = "esri";
+  }
+
+  const value: ResolvedFootprints = { candidates, provider, osmFailed, esriFailed, cached: false };
+  // Cache successes AND confirmed empty-with-both-sources-reachable results
+  // (a genuinely unmapped building); never cache transport failures.
+  if (provider !== "none" || (!osmFailed && !esriFailed)) {
+    if (RESOLVE_CACHE.size >= RESOLVE_CACHE_MAX) {
+      const oldest = RESOLVE_CACHE.keys().next().value;
+      if (oldest != null) RESOLVE_CACHE.delete(oldest);
+    }
+    RESOLVE_CACHE.set(key, { at: Date.now(), value });
+  }
+  return value;
 }
 
 /**
