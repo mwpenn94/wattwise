@@ -202,7 +202,7 @@ function DashboardLayoutContent({
                     <Zap className="h-4 w-4" />
                   </div>
                   <span className="font-semibold tracking-tight truncate font-display">
-                    WattWise
+                    Meterly
                   </span>
                 </button>
               ) : null}

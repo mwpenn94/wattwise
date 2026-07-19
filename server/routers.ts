@@ -26,6 +26,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import * as h from "./dbHelpers";
+import * as geo from "./geometry";
 import { emitDeadEndPersona } from "./personaFingerprint";
 import { ensureSeeded } from "./seed/runSeeders";
 import { preParseGate, rejectXxe, withParseTimeout } from "./ingest/hardening";
@@ -282,7 +283,7 @@ export const appRouter = router({
     }),
     /** GAP-L — membership management (owner only). Roles:
      * facility_manager = can act (refine, mark measures); read_only = can look.
-     * The invitee must already have a WattWise account (invite-by-email lookup);
+     * The invitee must already have a Meterly account (invite-by-email lookup);
      * we say so honestly instead of pretending an email invitation was sent. */
     members: router({
       list: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
@@ -295,7 +296,7 @@ export const appRouter = router({
           if (!target) {
             throw new TRPCError({
               code: "NOT_FOUND",
-              message: "No WattWise account exists for that email yet. Ask them to sign in once first — no email invitation is sent from here (we don't pretend otherwise).",
+              message: "No Meterly account exists for that email yet. Ask them to sign in once first — no email invitation is sent from here (we don't pretend otherwise).",
             });
           }
           const id = await h.upsertSiteMember(input.siteId, ctx.user.id, target.id, input.role);
@@ -539,6 +540,10 @@ export const appRouter = router({
             userId: ctx.user.id,
             name:
               input.name?.trim() ||
+              // Owner request Jul 19: when the user searched by PLACE NAME
+              // ("Emmanuel Baptist Church"), the site should be called that —
+              // not a generic "Tucson building".
+              verified?.placeName ||
               (parse.city
                 ? `${parse.city} ${input.buildingType === "single_family" ? "home" : input.buildingType === "multifamily" ? "apartment" : "building"}`
                 : parse.raw.slice(0, 60) || "My building"),
@@ -887,6 +892,92 @@ export const appRouter = router({
           thresholdPct: DIVERGENCE_QUESTION_THRESHOLD * 100,
         };
       }),
+    /** GEO — stage 2b geometry & exposure (handoff v1.22, cycles 4/8/10).
+     * Resolve footprint candidates for a site: OSM Overpass first (free, ODbL
+     * flagged), prism fallback synthesized from GFA + stories. Candidates are
+     * returned for tap-to-confirm — nothing is silently asserted. */
+    geometryResolve: protectedProcedure
+      .input(z.object({ siteId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        if (site.lat == null || site.lng == null) {
+          return {
+            candidates: [] as ReturnType<typeof geo.deriveGeometry>[],
+            raw: [] as import("./geometry").FootprintCandidate[],
+            fallback: null,
+            note: "This site has no coordinates yet — confirm the address (or drop a pin) first, then geometry can be resolved.",
+          };
+        }
+        const point = { lat: site.lat, lng: site.lng };
+        let osm: import("./geometry").FootprintCandidate[] = [];
+        let sourceNote = "";
+        try {
+          osm = await geo.fetchOsmFootprints(point);
+          sourceNote = osm.length > 0 ? "OpenStreetMap building footprints near your point (ODbL)." : "No mapped building found within ~60 m on OpenStreetMap.";
+        } catch {
+          sourceNote = "The footprint service is unreachable right now — showing a prism estimate from your floor area instead.";
+        }
+        const prism = geo.prismFallback(point, site.sqft ?? null, null);
+        await h.audit(ctx.user.id, "geometry_resolved", "site", String(input.siteId), { osmCandidates: osm.length });
+        return {
+          candidates: osm.map((c) => ({ ...geo.deriveGeometry(c), ring: c.ring, osmId: c.osmId, distanceM: c.distanceM, areaSqft: c.areaSqft })),
+          fallback: { ...geo.deriveGeometry(prism), ring: prism.ring, areaSqft: prism.areaSqft, prism: true as const },
+          note: sourceNote,
+        };
+      }),
+    /** GEO — tap-to-confirm: persist the chosen footprint (an OSM candidate,
+     * the prism estimate, or a user-drawn ring). user_drawn wins precedence and
+     * is never overwritten by re-resolves; every field carries provenance. */
+    geometryConfirm: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          ring: z.array(z.tuple([z.number(), z.number()])).min(3).max(120),
+          source: z.enum(["osm", "user_drawn", "prism"]),
+          osmId: z.string().optional(),
+          heightM: z.number().positive().max(500).nullable().optional(),
+          stories: z.number().int().positive().max(120).nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const cand: import("./geometry").FootprintCandidate = {
+          ring: input.ring as [number, number][],
+          areaSqft: Math.round(geo.ringAreaSqm(input.ring as [number, number][]) * 10.7639),
+          heightM: input.heightM ?? null,
+          stories: input.stories ?? null,
+          source: input.source,
+          osmId: input.osmId,
+          distanceM: 0,
+        };
+        const d = geo.deriveGeometry(cand);
+        const confidence = input.source === "user_drawn" ? 0.95 : input.source === "osm" ? 0.8 : 0.45;
+        await h.upsertSiteGeometry(input.siteId, ctx.user.id, {
+          footprint: { type: "Polygon", coordinates: [cand.ring] },
+          footprintSource: input.source === "prism" ? undefined : input.source,
+          footprintSqft: d.footprintSqft,
+          heightM: d.heightM,
+          heightSource: d.heightSource,
+          stories: d.stories ?? undefined,
+          orientationDeg: d.orientationDeg,
+          exposedWallAreaByOrientation: d.exposedWallAreaByOrientation,
+          exposureScore: d.exposureScore,
+          neighborShadingFactor: 1,
+          geometryConfidence: {
+            footprint: { source: input.source, confidence },
+            height: { source: d.heightSource, confidence: input.heightM != null ? 0.8 : 0.5 },
+            orientation: { source: "derived_longest_edge", confidence: 0.7 },
+            exposure: { source: "heuristic", confidence: 0.5 },
+          },
+          odblDerived: d.odblDerived,
+        });
+        await h.audit(ctx.user.id, "geometry_confirmed", "site", String(input.siteId), { source: input.source, sqft: d.footprintSqft });
+        return { ok: true as const, derived: d };
+      }),
+    /** GEO — read the stored geometry row (viewer-scoped like sites.get). */
+    geometryGet: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      return h.getSiteGeometry(input.siteId, ctx.user.id);
+    }),
     /** v1.19 §5 stage 4 — away mode as a promise: one toggle (with optional
      * dates) flips the product's voice. The watchdog itself runs inside the
      * analysis pipeline; this mutation just records the window and audits it. */
@@ -2376,12 +2467,12 @@ export const appRouter = router({
   }),
 
   /* ================= account: usage metering + data export ================= */
-  /* ================= §3k Ask WattWise — NL entrance to existing engines ================= */
+  /* ================= §3k Ask Meterly — NL entrance to existing engines ================= */
   ask: router({
     question: protectedProcedure
       .input(z.object({ siteId: z.number(), question: z.string().min(3).max(500) }))
       .mutation(async ({ ctx, input }) => {
-        requireTier(tierOf(ctx.user), "plus", "Ask WattWise");
+        requireTier(tierOf(ctx.user), "plus", "Ask Meterly");
         const site = await h.getSite(input.siteId, ctx.user.id);
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
@@ -2495,7 +2586,7 @@ export const appRouter = router({
                 name: `digest-u${ctx.user.id}`,
                 cron: `0 0 15 ${input.anchorDay} * *`,
                 path: "/api/scheduled/digest",
-                description: `Monthly WattWise digest (bill-cycle day ${input.anchorDay}) — sends only when a material dollar figure exists`,
+                description: `Monthly Meterly digest (bill-cycle day ${input.anchorDay}) — sends only when a material dollar figure exists`,
               },
               sessionToken,
             );

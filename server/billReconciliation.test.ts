@@ -13,7 +13,7 @@
  *     error.
  *  5. tariffTrustDisclosure maps each status to honest user-facing copy.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appRouter } from "./routers";
 import { reconcileBill, tariffTrustDisclosure } from "./billReconciliation";
 import { getDb } from "./db";
@@ -67,6 +67,10 @@ describe("GAP-D bill reconciliation (AC16a)", () => {
     const [ins] = await db.insert(tariffs).values({
       name: "Recon Flat 10",
       utilityName: "Recon Test Utility",
+      // CLEAN-3 (owner report Jul 19): fixture tariffs are tagged so the
+      // listTariffs query-layer guard hides them from every user-facing
+      // surface even if cleanup fails; afterAll below removes the row too.
+      source: "test_fixture",
       sector: "commercial",
       commodity: "electric",
       state: "AZ",
@@ -87,6 +91,16 @@ describe("GAP-D bill reconciliation (AC16a)", () => {
     } as typeof tariffs.$inferInsert);
     tariffId = ins.insertId;
     await caller.sites.setMeterTariff({ meterId, tariffId });
+  });
+
+  // CLEAN-2 (owner report Jul 19): this suite previously left its fixture
+  // tariff + user data in the shared database, which leaked "Recon Flat 10"
+  // rows into the live rate check. Tests MUST clean up after themselves.
+  afterAll(async () => {
+    const db = await getDbOrFail();
+    await h.deleteAllUserData(userId).catch(() => {});
+    await db.delete(tariffs).where(eq(tariffs.id, tariffId)).catch(() => {});
+    await db.delete(users).where(eq(users.id, userId));
   });
 
   async function addBill(opts: { start: string; end: string; usage: number; cost: number; readType?: "actual" | "estimated" }) {

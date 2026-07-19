@@ -32,7 +32,7 @@ export default function Legal() {
               <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
                 <Zap className="h-5 w-5" />
               </div>
-              <span className="font-display text-lg font-bold tracking-tight">WattWise</span>
+              <span className="font-display text-lg font-bold tracking-tight">Meterly</span>
             </Link>
             <Link href="/" className="flex items-center gap-1 font-mono text-xs text-muted-foreground hover:text-foreground">
               <ArrowLeft className="h-3.5 w-3.5" /> Back to home
@@ -78,12 +78,12 @@ export default function Legal() {
             <h2 className="font-display text-xl font-bold">Terms of use</h2>
             <div className="mt-3 space-y-4 text-sm leading-relaxed text-muted-foreground">
               <p>
-                <strong className="text-foreground">What WattWise is.</strong> WattWise turns your utility data into modeled estimates, comparisons,
+                <strong className="text-foreground">What Meterly is.</strong> Meterly turns your utility data — electric, gas, water, sewer — into modeled estimates, comparisons,
                 and scenarios. Every number carries a confidence label (Estimated / Good / Measured) and a provenance trail showing
                 how it was calculated.
               </p>
               <p>
-                <strong className="text-foreground">What WattWise is not.</strong> Outputs are modeled estimates — not a professional energy audit,
+                <strong className="text-foreground">What Meterly is not.</strong> Outputs are modeled estimates — not a professional energy audit,
                 engineering study, or financial, tax, or legal advice. Savings projections carry stated confidence ranges and are
                 not guarantees. Verify material decisions (equipment purchases, rate switches, solar contracts) with your utility
                 and qualified professionals.
@@ -94,7 +94,7 @@ export default function Legal() {
                 as-is while billing is off; features marked beta may change.
               </p>
               <p>
-                <strong className="text-foreground">Liability.</strong> To the maximum extent permitted by law, WattWise is provided "as is" and we
+                <strong className="text-foreground">Liability.</strong> To the maximum extent permitted by law, Meterly is provided "as is" and we
                 are not liable for decisions made on modeled estimates. Nothing in these terms limits rights you hold under
                 applicable consumer law.
               </p>
@@ -117,7 +117,7 @@ export default function Legal() {
 
         <footer className="border-t border-border/60 py-8">
           <div className="container text-xs text-muted-foreground">
-            <span className="font-mono">WattWise · modeled estimates, honestly labeled</span>
+            <span className="font-mono">Meterly · modeled estimates, honestly labeled</span>
           </div>
         </footer>
       </div>

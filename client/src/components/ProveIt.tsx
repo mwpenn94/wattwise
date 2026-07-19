@@ -83,7 +83,7 @@ export function MarkImplementedDialog(props: {
         <DialogHeader>
           <DialogTitle className="font-display">I did this</DialogTitle>
           <DialogDescription>
-            Mark “{o.title}” as implemented. WattWise will compare your actual usage against the
+            Mark “{o.title}” as implemented. Meterly will compare your actual usage against the
             weather-adjusted counterfactual each month and tell you honestly whether the savings are showing up.
           </DialogDescription>
         </DialogHeader>

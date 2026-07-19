@@ -21,7 +21,7 @@ export default function Convergence() {
         <header className="border-b border-border/60">
           <div className="container flex h-14 items-center gap-3">
             <Link href="/" className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-              <ArrowLeft className="h-4 w-4" /> WattWise
+              <ArrowLeft className="h-4 w-4" /> Meterly
             </Link>
             <span className="font-mono text-xs uppercase tracking-widest text-muted-foreground">/ methodology & convergence log</span>
           </div>
@@ -30,7 +30,7 @@ export default function Convergence() {
         <main className="container max-w-4xl py-10">
           <h1 className="font-display text-3xl font-bold tracking-tight">Convergence log</h1>
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-            WattWise's specification and build were reviewed by a recursive, fresh-context expert protocol (UHOP). Every cycle
+            Meterly's specification and build were reviewed by a recursive, fresh-context expert protocol (UHOP). Every cycle
             below records confirmed-material findings that were integrated before the next review pass. Reference data
             provenance is listed underneath — every seeded dataset carries a source, version, and checksum.
           </p>

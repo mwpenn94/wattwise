@@ -14,7 +14,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import { Building2, Check, Factory, Home as HomeIcon, Hotel, MapPin, Receipt, ShoppingCart, Sparkles, Store, Warehouse } from "lucide-react";
+import { Building2, Check, Factory, Home as HomeIcon, Hotel, Landmark, MapPin, Receipt, ShoppingCart, Sparkles, Store, Warehouse } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { fileToBase64 } from "@/lib/wattwiseUi";
 import AnalysisProgress from "@/components/AnalysisProgress";
@@ -349,7 +349,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
             <MapPin className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               className="pl-8"
-              placeholder="Start typing an address…"
+              placeholder="Type an address or place name…"
               value={address}
               onChange={(e) => {
                 setAddress(e.target.value);
@@ -420,15 +420,20 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
                       setHighlightIdx(-1);
                     }}
                   >
-                    <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    {s.isPlaceName ? (
+                      <Landmark className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                    ) : (
+                      <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    )}
                     <span>
                       <span className="font-medium">{s.mainText}</span>
                       {s.secondaryText && <span className="text-muted-foreground"> — {s.secondaryText}</span>}
+                      {s.isPlaceName && <span className="ml-1.5 rounded border border-primary/40 px-1 text-[9px] uppercase text-primary">place</span>}
                     </span>
                   </button>
                 ))}
                 <p className="border-t px-3 py-1.5 text-[10px] text-muted-foreground">
-                  Pick a suggestion to ground the analysis in a verified address — or keep typing free-text.
+                  Addresses or place names both work (“123 Main St” or “Emmanuel Baptist Church”) — pick one to ground the analysis, or keep typing free-text.
                 </p>
               </div>
             )}
@@ -444,8 +449,13 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
         {selectedPlace && (
           <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
             <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-600 dark:text-emerald-400">
-              <Check className="h-3 w-3" /> Verified address
+              <Check className="h-3 w-3" /> {resolved.data?.place.placeName ? "Verified place" : "Verified address"}
             </span>
+            {resolved.data?.place.placeName && (
+              <span className="inline-flex items-center gap-1 font-medium">
+                <Landmark className="h-3 w-3 text-primary" /> {resolved.data.place.placeName}
+              </span>
+            )}
             {resolved.data && (
               <span className="text-muted-foreground">
                 {[resolved.data.place.city, resolved.data.place.state, resolved.data.place.zip].filter(Boolean).join(", ")}

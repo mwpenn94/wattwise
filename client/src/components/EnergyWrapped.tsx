@@ -23,7 +23,7 @@ export default function EnergyWrapped({ siteId }: { siteId: number }) {
     const lines = [
       `⚡ My ${d.year} Energy Wrapped — ${d.siteName}`,
       ...d.stats.map((s) => `${s.label}: ${s.value} (${s.chip})`),
-      `via WattWise — every figure labeled with its basis`,
+      `via Meterly — every figure labeled with its basis`,
     ];
     try {
       await navigator.clipboard.writeText(lines.join("\n"));

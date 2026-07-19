@@ -302,9 +302,9 @@ function SharePanel({ siteId, open, onClose }: { siteId: number; open: boolean; 
           </DialogTitle>
         </DialogHeader>
         <p className="text-xs text-muted-foreground">
-          Grant another WattWise account access. <strong>Facility manager</strong> can refine attributes and mark measures;{" "}
+          Grant another Meterly account access. <strong>Facility manager</strong> can refine attributes and mark measures;{" "}
           <strong>read-only</strong> can view analyses and insights but change nothing. The person must have signed in to
-          WattWise at least once — no invitation email is sent from here.
+          Meterly at least once — no invitation email is sent from here.
         </p>
         <div className="flex flex-col gap-2">
           <Input placeholder="their-email@example.com" value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Member email" />

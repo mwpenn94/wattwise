@@ -15,5 +15,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["server/**/*.test.ts", "server/**/*.spec.ts"],
+    // CLEAN-2: sweep all test users + fixture tariffs from the shared DB
+    // after every run so residue can never leak into the live product.
+    globalSetup: ["server/testCleanup.globalTeardown.ts"],
   },
 });

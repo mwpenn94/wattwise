@@ -70,7 +70,7 @@ export default function Reports() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `wattwise-practitioner-${res.data.site.name.replace(/\W+/g, "-")}.csv`;
+        a.download = `meterly-practitioner-${res.data.site.name.replace(/\W+/g, "-")}.csv`;
         a.click();
         URL.revokeObjectURL(url);
         toast.success("Practitioner CSV downloaded", { description: `Verify link: /verify/${res.token}` });
@@ -213,7 +213,7 @@ function PrintReport({ kind, token, data, origin }: { kind: Kind; token: string;
   return (
     <div className="max-w-[720px] mx-auto space-y-6 py-4">
       <header className="border-b pb-4">
-        <div className="text-xs uppercase tracking-widest text-neutral-500">WattWise · {KIND_META[kind].title}</div>
+        <div className="text-xs uppercase tracking-widest text-neutral-500">Meterly · {KIND_META[kind].title}</div>
         <h1 className="text-2xl font-semibold mt-1">{data.site.name}</h1>
         <p className="text-sm text-neutral-600">
           {data.site.buildingType ?? "building"} · {data.site.sqft != null ? `${data.site.sqft.toLocaleString()} sqft` : "size not set"} ·{" "}
@@ -247,7 +247,7 @@ function PrintReport({ kind, token, data, origin }: { kind: Kind; token: string;
             </section>
           ))}
           <section className="text-sm text-neutral-700">
-            <strong>What we'll verify:</strong> after you implement a measure, mark it "I did this" in WattWise. Each
+            <strong>What we'll verify:</strong> after you implement a measure, mark it "I did this" in Meterly. Each
             month with a full bill cycle of data, we compare actual usage against the weather-adjusted baseline and
             report verified savings — or tell you plainly when the change is inside the model's noise band.
           </section>

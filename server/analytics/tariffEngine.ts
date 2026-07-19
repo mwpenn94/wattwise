@@ -32,6 +32,19 @@ export interface DemandAnalytics {
     topN: number;
     events: Array<{ ts: number; kw: number }>;
   } | null;
+  /** PEAK-2 (handoff demand module): normalized load duration curve — kW at
+   * each percentile of hours (0 = highest). 101 points, percentile 0..100.
+   * Answers "how many hours a year are we anywhere near peak": a steep cliff
+   * near 0% means the peak is rare and shaveable; a flat curve means high
+   * baseload where demand-charge reduction must come from equipment. */
+  loadDurationCurve: Array<{ pctOfHours: number; kw: number }>;
+  /** Share of total hours within 90% of the annual peak — the "peak rarity"
+   * number the duration curve summarizes. */
+  hoursNearPeakPct: number;
+  /** PEAK-4: per-monthly-peak contributing-load hypothesis. Heuristic and
+   * labeled as such — derived only from when the peak lands (month, hour,
+   * weekday/weekend) relative to this site's own heatmap; never asserted. */
+  peakHypotheses: Array<{ month: string; ts: number; kw: number; hypothesis: string; basis: string }>;
 }
 
 export function computeDemandAnalytics(points: IntervalPoint[], cpTopN = 4, cpSeasonMonths: number[] = [6, 7, 8, 9], tz: string = DEFAULT_TZ): DemandAnalytics | null {
@@ -95,17 +108,74 @@ export function computeDemandAnalytics(points: IntervalPoint[], cpTopN = 4, cpSe
   }
   const cpEvents = Array.from(byDay.values()).sort((a, b) => b.kw - a.kw).slice(0, cpTopN);
 
+  // PEAK-2: load duration curve — duration-weighted kW percentiles. Sort all
+  // readings by kW descending, walk cumulative duration, and sample kW at each
+  // percent of total hours. O(n log n) once; 101 transport points.
+  const totalMin = withDemand.reduce((s, p) => s + (p.durationMin > 0 ? p.durationMin : 1), 0);
+  const ldc: Array<{ pctOfHours: number; kw: number }> = [];
+  {
+    let cum = 0;
+    let idx = 0;
+    for (let pct = 0; pct <= 100; pct++) {
+      const targetMin = (pct / 100) * totalMin;
+      while (idx < sorted.length - 1 && cum + (sorted[idx].durationMin > 0 ? sorted[idx].durationMin : 1) < targetMin) {
+        cum += sorted[idx].durationMin > 0 ? sorted[idx].durationMin : 1;
+        idx++;
+      }
+      ldc.push({ pctOfHours: pct, kw: sorted[Math.min(idx, sorted.length - 1)].kw });
+    }
+  }
+  const nearPeakMin = withDemand.reduce((s, p) => s + (p.kw >= 0.9 * peakKw ? (p.durationMin > 0 ? p.durationMin : 1) : 0), 0);
+  const hoursNearPeakPct = totalMin > 0 ? nearPeakMin / totalMin : 0;
+
+  const monthlyPeaksArr = Array.from(monthly.entries())
+    .map(([month, r]) => ({ month, peakKw: r.peakKw, peakTs: r.peakTs }))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
+  // PEAK-4: contributing-load hypothesis per monthly peak. Purely positional
+  // heuristics (month/hour/daytype vs this site's own heatmap) — the copy is
+  // explicit that these are hypotheses to check, not measured attributions.
+  const peakHypotheses = monthlyPeaksArr.map((mp) => {
+    const lp = localParts(mp.peakTs, tz);
+    const isSummer = [6, 7, 8, 9].includes(lp.month);
+    const isWinter = [12, 1, 2].includes(lp.month);
+    const isWeekend = lp.dow === 0 || lp.dow === 6;
+    const isAfternoon = lp.hour >= 12 && lp.hour <= 18;
+    const isMorning = lp.hour >= 5 && lp.hour <= 10;
+    const isOvernight = lp.hour >= 22 || lp.hour <= 4;
+    let hypothesis: string;
+    let basis: string;
+    if (isSummer && isAfternoon) {
+      hypothesis = "Cooling-driven: lands on a summer afternoon, the classic AC-coincident window.";
+      basis = `hits ${lp.hour}:00 local in month ${lp.month} — check whether HVAC staging or pre-cooling could shift it`;
+    } else if (isWinter && isMorning) {
+      hypothesis = "Morning warm-up: winter morning spike consistent with heating recovery / startup surge after setback.";
+      basis = `hits ${lp.hour}:00 local — check staggered equipment starts and setback recovery ramp`;
+    } else if (isOvernight) {
+      hypothesis = "Baseload or scheduled equipment: an overnight peak points to always-on or timer-driven load, not occupancy.";
+      basis = `hits ${lp.hour}:00 local — check timers, batch processes, EV/thermal charging schedules`;
+    } else if (isWeekend) {
+      hypothesis = "Off-schedule load: a weekend peak suggests equipment running outside occupied hours.";
+      basis = "weekend timing — check schedules and BMS weekend modes";
+    } else {
+      hypothesis = "Occupancy-coincident: a weekday business-hours peak tracking normal operations.";
+      basis = `hits ${lp.hour}:00 local on a weekday — check simultaneous large-load overlap in that hour`;
+    }
+    return { month: mp.month, ts: mp.peakTs, kw: mp.peakKw, hypothesis, basis };
+  });
+
   return {
     peakKw,
     peakTimestamp,
     avgKw,
     loadFactor: peakKw > 0 ? avgKw / peakKw : 0,
     topDecilePeaks,
-    monthlyPeaks: Array.from(monthly.entries())
-      .map(([month, r]) => ({ month, peakKw: r.peakKw, peakTs: r.peakTs }))
-      .sort((a, b) => a.month.localeCompare(b.month)),
+    monthlyPeaks: monthlyPeaksArr,
     heatmap: heat,
     cpProxy: cpEvents.length > 0 ? { label: LABEL_CP_ESTIMATED, topN: cpTopN, events: cpEvents } : null,
+    loadDurationCurve: ldc,
+    hoursNearPeakPct,
+    peakHypotheses,
   };
 }
 

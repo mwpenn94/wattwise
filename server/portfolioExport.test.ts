@@ -1,7 +1,7 @@
 /**
  * GAP-N portfolio export contracts:
  *  1. portfolioManagerCsv: ESPM header vocabulary, known types map to PM's
- *     picklist, unknown types export as "Other" (WattWise type preserved),
+ *     picklist, unknown types export as "Other" (Meterly type preserved),
  *     unanalyzed sites keep figures BLANK (never fabricated zeros), and the
  *     modeled-estimates disclaimer rides the final row.
  *  2. reports.portfolioExport (Pro): builds one row per owned site from
@@ -88,7 +88,7 @@ describe("GAP-N portfolioManagerCsv shaper", () => {
     expect(lines[0]).toContain("Annual Electricity Use (kWh)");
   });
 
-  it("maps known types to the PM picklist and unknown types to Other with the WattWise type preserved", () => {
+  it("maps known types to the PM picklist and unknown types to Other with the Meterly type preserved", () => {
     expect(lines[1]).toContain("Office");
     expect(lines[2]).toContain("Other");
     expect(lines[2]).toContain("car_wash");

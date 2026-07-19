@@ -2,7 +2,7 @@
  * Feature query helpers — every tenant-scoped read/write goes through
  * ownership-asserting wrappers (Cycle 5 multi-tenancy enforcement).
  */
-import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, ne, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { STATE_SUBREGION } from "./seed/nationalData";
 import {
@@ -579,10 +579,15 @@ export async function countUploadsThisMonth(userId: number): Promise<number> {
 /* ---------------- reference data (global, not tenant-scoped) ---------------- */
 export async function listTariffs(commodity?: "electric" | "gas" | "water", state?: string) {
   const db = await requireDb();
-  const conds = [];
+  /* CLEAN-3 guard (owner report Jul 19): test fixtures must NEVER reach real
+   * users. Every tariff written by a test suite carries source="test_fixture"
+   * (enforced in testUtils.createFixtureTariff); this query layer excludes
+   * them, so no rate sweep, tariff browser, or estimate can render one even
+   * if a suite forgets cleanup. */
+  const conds = [ne(tariffs.source, "test_fixture")];
   if (commodity) conds.push(eq(tariffs.commodity, commodity));
   if (state) conds.push(eq(tariffs.state, state));
-  return conds.length > 0 ? db.select().from(tariffs).where(and(...conds)) : db.select().from(tariffs);
+  return db.select().from(tariffs).where(and(...conds));
 }
 
 export async function getTariff(id: number) {

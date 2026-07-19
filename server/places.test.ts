@@ -11,7 +11,9 @@ vi.mock("./_core/map", () => ({
 
 import { placeAutocomplete, resolvePlace } from "./places";
 
-beforeEach(() => makeRequestMock.mockReset());
+beforeEach(() => {
+  makeRequestMock.mockReset();
+});
 
 describe("placeAutocomplete", () => {
   it("returns [] without calling the API for short queries", async () => {
@@ -19,29 +21,38 @@ describe("placeAutocomplete", () => {
     expect(makeRequestMock).not.toHaveBeenCalled();
   });
 
-  it("maps predictions to suggestions (top 5, address-scoped, US-biased)", async () => {
-    makeRequestMock.mockResolvedValue({
-      status: "OK",
-      predictions: Array.from({ length: 7 }, (_, i) => ({
-        place_id: `pid-${i}`,
-        description: `${i} Main St, Phoenix, AZ, USA`,
-        structured_formatting: { main_text: `${i} Main St`, secondary_text: "Phoenix, AZ, USA" },
-      })),
-    });
+  it("maps predictions to suggestions (addresses capped at 4, both scopes queried, US-biased)", async () => {
+    // Jul 19: autocomplete became blended (address + establishment). Address
+    // predictions are capped at 4 to leave room for named places.
+    makeRequestMock.mockImplementation((_endpoint: string, params: Record<string, string>) =>
+      Promise.resolve(
+        params.types === "address"
+          ? {
+              status: "OK",
+              predictions: Array.from({ length: 7 }, (_, i) => ({
+                place_id: `pid-${i}`,
+                description: `${i} Main St, Phoenix, AZ, USA`,
+                structured_formatting: { main_text: `${i} Main St`, secondary_text: "Phoenix, AZ, USA" },
+              })),
+            }
+          : { status: "ZERO_RESULTS", predictions: [] },
+      ),
+    );
     const out = await placeAutocomplete("main st");
-    expect(out).toHaveLength(5);
-    expect(out[0]).toEqual({ placeId: "pid-0", description: "0 Main St, Phoenix, AZ, USA", mainText: "0 Main St", secondaryText: "Phoenix, AZ, USA" });
-    const [endpoint, params] = makeRequestMock.mock.calls[0] as [string, Record<string, string>];
-    expect(endpoint).toBe("/maps/api/place/autocomplete/json");
-    expect(params.types).toBe("address");
-    expect(params.components).toBe("country:us");
+    expect(out).toHaveLength(4);
+    expect(out[0]).toEqual({ placeId: "pid-0", description: "0 Main St, Phoenix, AZ, USA", mainText: "0 Main St", secondaryText: "Phoenix, AZ, USA", isPlaceName: false });
+    const calls = makeRequestMock.mock.calls as Array<[string, Record<string, string>]>;
+    expect(calls.every(([endpoint]) => endpoint === "/maps/api/place/autocomplete/json")).toBe(true);
+    expect(new Set(calls.map(([, p]) => p.types))).toEqual(new Set(["address", "establishment"]));
+    expect(calls.every(([, p]) => p.components === "country:us")).toBe(true);
   });
 
-  it("returns [] on ZERO_RESULTS and throws on hard API errors", async () => {
-    makeRequestMock.mockResolvedValueOnce({ status: "ZERO_RESULTS", predictions: [] });
+  it("returns [] on ZERO_RESULTS and throws when both scopes hard-fail", async () => {
+    makeRequestMock.mockResolvedValue({ status: "ZERO_RESULTS", predictions: [] });
     expect(await placeAutocomplete("nowhere xyz")).toEqual([]);
-    makeRequestMock.mockResolvedValueOnce({ status: "REQUEST_DENIED", error_message: "bad key" });
-    await expect(placeAutocomplete("main st")).rejects.toThrow(/REQUEST_DENIED/);
+    makeRequestMock.mockReset();
+    makeRequestMock.mockResolvedValue({ status: "REQUEST_DENIED", error_message: "bad key" });
+    await expect(placeAutocomplete("main st")).rejects.toThrow(/bad key|REQUEST_DENIED/);
   });
 });
 

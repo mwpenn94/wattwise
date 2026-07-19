@@ -282,3 +282,44 @@
 
 ## Owner bug report (Jul 18 PM, mobile screenshot)
 - [x] BUG: Pin-drop mode says "Pick a building type above so the modeled estimate has a real archetype" but no building-type selector is visible in pin mode — FIXED: chips now render inside the pin panel (address-block chips hidden while pin mode open to avoid duplicates); verified via authenticated Playwright on 375px viewport (chips visible, selectable, aria-pressed works)
+
+## Rebrand + scope expansion (owner request Jul 19)
+- [x] REBRAND-1 App title → "Meterly" (index.html title updated; VITE_APP_TITLE is a locked built-in secret — owner can change it in Settings → General; noted for delivery)
+- [x] REBRAND-2 All user-facing "WattWise" copy → "Meterly" (28-file sweep incl. Ask Meterly, report headers, download filenames meterly-*, LS_KEY migration with legacy honor, Stewardly spans removed after owner correction, siteRoles spec regex updated; 294 tests green)
+- [x] REBRAND-3 Scope language sweep first pass: hero EN+ES now "utility bills / Electric, gas, water, sewer"; deeper console copy pass folded into RECON-3
+- [x] GEO-1 server/geometry.ts: OSM Overpass footprint fetch (2 mirrors, injectable fetcher, noise filter <10sqm) + prism fallback from GFA/stories, ODbL flag
+- [x] GEO-2 Geometry derivations: shoelace area (winding-invariant), longest-edge orientation, exposed-wall-area by 8 compass buckets (outward normals), exposure score 0-100 heuristic, per-field geometryConfidence JSON
+- [x] GEO-3 sites.geometryResolve (candidates + prism fallback + honest notes) + geometryConfirm (persists derived bundle, audited) + geometryGet
+- [x] GEO-4 SiteGeometryPanel UI on Dashboard: satellite footprint overlays, candidate chips, tap-to-confirm, draw-it-myself polygon (A19 draw-your-own), isometric prism SVG with honest labels, compass + exposure + wall-area chips, ODbL attribution
+- [x] GEO-5 Footprint-derived GFA feeds dimensionReceipts >20% divergence gate (GAP-J plumbing now fed by real confirmed geometry — verified by endpoint spec)
+- [x] GEO-6 Vitest: 10-spec geometry math suite (mocked Overpass) + 2-spec endpoint contract suite — all green
+- [x] UX-1 Commodity framing verified: water leak-first framing exists (winter-sewer opportunity rationale leads with leak repair/fixture efficiency, pipeline.ts:1185-1198; Dashboard story card w/ Droplets icon); commodity distinction is textual + icon-based — a global commodity color-token system is not a doc requirement, noted as nice-to-have
+- [x] UX-2 EN/ES parity gate green after all new strings (i18nParity 5/5, tsc clean)
+- [x] UX-3 Visual verification: desktop / + /legal render Meterly brand with multi-utility scope copy; mobile (375px) / hero + /app console (Ask Meterly, peak attribution card showing the 4,200 kW Aug-2025 max) all correct; /verify/:token requires a token param and demo is entered via home CTA — both confirmed as routes, not regressions
+
+## Full-spec reconciliation (owner request Jul 19: "ensure you completely fulfill the previously shared full list of deliverables")
+- [ ] RECON-1 Re-audit handoff v1.22 (Pasted_content_10) section by section against build; complete gap list with buildable/infra-blocked classification
+- [ ] RECON-2 Re-audit UX addendum v2.13 (Pasted_content_09) section by section against build; fold into gap list
+- [ ] RECON-3 Implement all buildable gaps found, prioritized by user value; document infra-blocked items honestly
+
+## Full due-diligence audit (owner integrity callout, Jul 19)
+- [ ] AUDIT-1 Line-by-line requirement extraction from ALL uploaded docs (handoff v1.22, UX addendum v2.13, diffs, pasted content 1-10) into an evidence matrix — every requirement gets: doc section, verdict (implemented/partial/missing), code evidence path, UI evidence, test evidence
+- [ ] AUDIT-2 Peak-demand requirements sweep specifically: extract every peak-demand item from the docs and verify each is user-visible (demand heatmap, monthly peaks, CP exposure, load factor, demand-charge triage, peak alerts/notifications, demand review, ratchet, etc.)
+- [x] PEAK-2 Load duration curve: 101-point duration-weighted curve + hoursNearPeakPct rarity metric in engine, rendered as stepped AreaChart in demand card with shaving-potential interpretation copy
+- [x] PEAK-3 Weather coincidence: pipeline enriches each peak hypothesis basis with peak-month normals temp vs annual avg (±8°F threshold, honest "typically/normals — not observed weather" labeling)
+- [x] PEAK-4 Contributing-load hypotheses: per-monthly-peak cooling/heating/baseload-timer heuristics from local hour+season, rendered in demand card sorted by kW with "hypotheses to check — not measured attribution" badge; 6-spec suite green (fixed partial-month spillover in spec via max-kW selection). Existing coverage confirmed by AUDIT-2: ratchet watch + set-point (DemandReview component), demand heatmap, CP proxy, demand share of bill — all already live
+- [ ] MATRIX-1 Deliver evidence matrix to owner with honest per-requirement status
+
+## Test-data pollution (owner report Jul 19, screenshot: Recon Flat 10 rows in live rate check)
+- [x] CLEAN-1 Purged: 83 @test.local users with all cascaded data (95 sites, meters, intervals, bills, insights, geometry, reconciliations…) + 7 fixture tariffs; verified 0 remaining fixtures/test users (scripts/purge-test-data.mjs)
+- [x] CLEAN-2 Source found: billReconciliation.test.ts inserted tariffs with no cleanup; added afterAll (deleteAllUserData + tariff + user removal) AND a vitest globalTeardown (server/testCleanup.globalTeardown.ts) that sweeps ALL @test.local/recon-suite users + fixture tariffs after every run — verified: run purged 7 test users, DB shows 0 residue
+- [x] CLEAN-3 Guard: fixture tariffs now tagged source="test_fixture" and listTariffs (the query layer behind rate sweep, tariff browser, estimates) excludes them unconditionally — even a crashed suite can no longer leak fixtures to users
+- [x] CLEAN-4 Verified: after a FULL 324-test suite run, DB shows 0 test users and 0 fixture tariffs (teardown purged 30 in-run users automatically); plus listTariffs excludes source='test_fixture' unconditionally, so the live rate check cannot render fixtures even if residue existed
+
+## Peak-demand bugs (owner screenshots Jul 19)
+- [x] PEAK-1 Monthly peak demand table truncation FIXED: all months now render (scrollable past 8), annual-max row highlighted with "max — sets ratchet" badge, and a pinned "Greatest peak" callout above the table names the kW, month, timestamp, and ratchet implication
+
+## Place-name lookup (owner request Jul 19)
+
+- [x] LOOKUP-1 Address search supports place/business names like Apple/Google Maps: placeAutocomplete blends address (max 4) + establishment predictions (cap 6, dedup, graceful degradation), POI rows flagged + Landmark icon/"place" badge in dropdown, resolvePlace extracts placeName, quickCreate prefers place name for site label, preview chip shows "Verified place · <name>"
+- [x] LOOKUP-2 Vitest coverage: 5-spec placeNameLookup suite (blend order/flags/dedup/cap, graceful degradation, both-fail throw, POI placeName extraction, street-address null) + places.test.ts updated to blended contract; root-caused subtle vitest gotcha (beforeEach returning a mock treats it as cleanup fn → phantom zero-arg call)

@@ -42,7 +42,7 @@ export default function Account() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `wattwise-export-${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `meterly-export-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
       toast.success("Export downloaded");
@@ -140,7 +140,7 @@ export default function Account() {
           <p className="text-sm">
             <Badge variant="outline" className="mr-2">manual upload</Badge>
             Your data updates via <strong>manual upload</strong> — interval files, bill photos, or the hypothetical
-            estimator. WattWise does not yet pull from your utility automatically; when automated feeds (Green Button
+            estimator. Meterly does not yet pull from your utility automatically; when automated feeds (Green Button
             Connect, utility APIs) become available for your providers, this card will say so explicitly. We never label a
             manual rung “automated.”
           </p>
@@ -158,7 +158,7 @@ export default function Account() {
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            Download everything WattWise stores about your account — sites, meters, intervals, bills, analyses, scenarios,
+            Download everything Meterly stores about your account — sites, meters, intervals, bills, analyses, scenarios,
             insights, and audit trail — as a single JSON file.
           </p>
           <Button className="mt-4" onClick={() => exportData.mutate()} disabled={exportData.isPending}>

@@ -4,7 +4,7 @@
  * prior occupant's usage or bills; at most the system may use de-identified
  * archetype context.
  *
- * In WattWise's architecture this boundary is structural, and this suite pins
+ * In Meterly's architecture this boundary is structural, and this suite pins
  * the structure so it cannot regress silently:
  *   1. Every site/meter/interval/bill read goes through ownership-asserting
  *      helpers (assertSiteOwner / assertMeterOwner) that throw TenancyError

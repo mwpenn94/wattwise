@@ -157,7 +157,7 @@ export async function cohortInsightFor(site: {
     median: Math.round(stat.median * 100) / 100,
     p75: Math.round(stat.p75 * 100) / 100,
     standing,
-    message: `Compared with ${stat.n} similar buildings on WattWise (${key.replace(/\|/g, ", ")}), your site is ${verb} the group — ${Math.round(eui * 100) / 100} vs a median ${Math.round(stat.median * 100) / 100} kWh/sqft/yr. De-identified cohort; shown only because the group has at least ${MIN_COHORT_N} members.`,
+    message: `Compared with ${stat.n} similar buildings on Meterly (${key.replace(/\|/g, ", ")}), your site is ${verb} the group — ${Math.round(eui * 100) / 100} vs a median ${Math.round(stat.median * 100) / 100} kWh/sqft/yr. De-identified cohort; shown only because the group has at least ${MIN_COHORT_N} members.`,
   };
 }
 

@@ -1,5 +1,5 @@
 /**
- * WattWise shared types & constants — commodity-agnostic core.
+ * Meterly shared types & constants — commodity-agnostic core.
  * Verbatim label constants live here so UI and engine can never drift.
  */
 

@@ -6,7 +6,7 @@
  * (3) one suggested action. The greeting number is YOURS: cumulative
  * verified savings, or projected (chip-labeled) when nothing is verified yet.
  * Charts live inside stories only; the full analytics live one tap away on
- * the Explore page — never the default. Ask WattWise (Plus) is a question
+ * the Explore page — never the default. Ask Meterly (Plus) is a question
  * box that answers in the card grammar by dispatching to existing engines.
  * Empty of data ≠ empty of value: pre-upload the feed runs on the ladder
  * invite, an advisor's plan instead of zeros.
@@ -49,7 +49,7 @@ export default function HomeFeed() {
   const isAway = Boolean((activeSite as { awayMode?: boolean } | null)?.awayMode);
   const setAway = trpc.sites.setAway.useMutation({
     onSuccess: async (_d, vars) => {
-      toast.success(vars.awayMode ? "Away mode on — WattWise will stay quiet unless something needs you" : "Welcome back — full feed restored");
+      toast.success(vars.awayMode ? "Away mode on — Meterly will stay quiet unless something needs you" : "Welcome back — full feed restored");
       await utils.sites.list.invalidate();
     },
     onError: (e) => toast.error(e.message),
@@ -98,7 +98,7 @@ export default function HomeFeed() {
         <h1 className="font-display text-3xl font-bold tracking-tight">Hi {firstName} —</h1>
         <p className="mt-2 max-w-xl text-sm text-muted-foreground">
           You don't have data here yet, but that doesn't mean there's nothing to show. Start with just an address or a
-          bill photo and WattWise will produce an estimated plan immediately — every added detail moves you up the
+          bill photo and Meterly will produce an estimated plan immediately — every added detail moves you up the
           accuracy ladder: <span className="font-semibold text-foreground">Estimate → Good → Great → Measured</span>.
         </p>
         <div className="mt-6">
@@ -186,7 +186,7 @@ export default function HomeFeed() {
         </div>
       )}
 
-      {/* ---------- Ask WattWise ---------- */}
+      {/* ---------- Ask Meterly ---------- */}
       <AskWattwise siteId={activeSiteId} tier={usage.data?.tier ?? "free"} />
 
       {/* ---------- away mode: the watchdog card replaces the feed's voice ---------- */}
@@ -333,7 +333,7 @@ function StoryLabel(props: { icon: React.ReactNode; text: string }) {
   );
 }
 
-/* ---------- Ask WattWise (Plus, agentic entrance to engines) ---------- */
+/* ---------- Ask Meterly (Plus, agentic entrance to engines) ---------- */
 
 function AskWattwise({ siteId, tier }: { siteId: number | null; tier: string }) {
   const [q, setQ] = useState("");
@@ -351,7 +351,7 @@ function AskWattwise({ siteId, tier }: { siteId: number | null; tier: string }) 
         onSubmit={(e) => {
           e.preventDefault();
           if (!isPlus) {
-            toast.info("Ask WattWise is a Plus feature", {
+            toast.info("Ask Meterly is a Plus feature", {
               description: "Upgrade on the Account page — during the beta, switching tiers is free.",
               action: { label: "Account", onClick: () => navigate("/app/account") },
             });
@@ -366,7 +366,7 @@ function AskWattwise({ siteId, tier }: { siteId: number | null; tier: string }) 
           <Input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder={isPlus ? "Ask WattWise — “Why was July high?” · “What if I add a battery?”" : "Ask WattWise (Plus) — “Why was July high?”"}
+            placeholder={isPlus ? "Ask Meterly — “Why was July high?” · “What if I add a battery?”" : "Ask Meterly (Plus) — “Why was July high?”"}
             className="pl-9"
             maxLength={500}
           />

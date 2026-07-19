@@ -1,7 +1,7 @@
 /**
  * Analysis pipeline orchestrator — one full run over a site (handoff §5).
  * Stages: intervals → demand analytics → baseline → tariff check → benchmarking
- * → emissions → insights → opportunities. Metered per stage (AC5), wrapped in
+ * → emissions → insights → opportunities. Meterly per stage (AC5), wrapped in
  * the per-analysis compute timeout.
  */
 import {
@@ -198,6 +198,27 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     }
   }
   const demand = hasIntervals ? computeDemandAnalytics(points, 4, [6, 7, 8, 9], tz) : null;
+  /* PEAK-3 weather coincidence: annotate each monthly peak with the weather
+   * context of its month from station normals. We only have NORMALS (typical
+   * temps), not observed weather on the peak day — so the copy says "typically"
+   * and never claims the actual temperature at the peak timestamp. */
+  if (demand && demand.peakHypotheses.length > 0 && normals.length > 0) {
+    const annualAvg = normals.reduce((s, n) => s + (n.avgTempF ?? 0), 0) / normals.length;
+    for (const ph of demand.peakHypotheses) {
+      const mNum = Number(ph.month.split("-")[1]);
+      const norm = normals.find((n) => n.month === mNum);
+      if (norm?.avgTempF != null) {
+        const delta = norm.avgTempF - annualAvg;
+        const weatherNote =
+          delta >= 8
+            ? `weather-coincident: this month typically runs ${Math.round(delta)}°F hotter than the annual average (normals, not observed weather)`
+            : delta <= -8
+              ? `weather-coincident: this month typically runs ${Math.round(-delta)}°F colder than the annual average (normals, not observed weather)`
+              : `weather-neutral month: typical temps within ${Math.abs(Math.round(delta))}°F of the annual average — the peak is more likely schedule- or equipment-driven`;
+        ph.basis = `${ph.basis}; ${weatherNote}`;
+      }
+    }
+  }
   narrate(
     hasIntervals
       ? `Analyzed ${points.length.toLocaleString()} interval readings — peak ${demand ? demand.peakKw.toFixed(1) : "?"} kW, load factor ${demand ? Math.round(demand.loadFactor * 100) : "?"}%`
@@ -1176,7 +1197,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
           confidence: "low",
           rationale: `Your winter monthly average (${winterAvg.toFixed(0)} ${COMMODITY_UNITS.water.usageUnit}/mo over ${winter.length} winter months) is what most municipal utilities use to set sewer charges for the entire following year (winter-quarter-average convention). Reducing winter indoor use 10–20% — leak repair, fixture efficiency — saves on the water bill now AND on 12 months of sewer billing set by that window.`,
           disclosures: [
-            "Sewer-side savings assume your municipality sets sewer charges from winter water usage and bills sewer volume at 0.8–1.0× your water volumetric rate — WattWise does not have your sewer tariff on file; verify the convention on your sewer bill before counting these dollars.",
+            "Sewer-side savings assume your municipality sets sewer charges from winter water usage and bills sewer volume at 0.8–1.0× your water volumetric rate — Meterly does not have your sewer tariff on file; verify the convention on your sewer bill before counting these dollars.",
             MODELED_ESTIMATES_DISCLAIMER,
           ],
         });

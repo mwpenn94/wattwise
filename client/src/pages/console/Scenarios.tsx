@@ -37,7 +37,7 @@ const KINDS = [
 ] as const;
 
 /**
- * Deep-link vocabulary → scenario kind. Opportunity cards and Ask WattWise
+ * Deep-link vocabulary → scenario kind. Opportunity cards and Ask Meterly
  * link here as /app/scenarios?site=N&measure=X so the right measure arrives
  * preselected (§3k "add to plan" continuity — no re-picking what you clicked).
  */

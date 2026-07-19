@@ -184,7 +184,7 @@ export interface PortfolioExportRow {
 }
 
 /** ENERGY STAR Portfolio Manager building-type mapping. PM's picklist is
- * finite; anything we can't map cleanly exports as "Other" with the WattWise
+ * finite; anything we can't map cleanly exports as "Other" with the Meterly
  * type preserved in its own column — never silently mislabeled. */
 const ESPM_TYPE: Record<string, string> = {
   office: "Office",
@@ -215,7 +215,7 @@ export function portfolioManagerCsv(rows: PortfolioExportRow[]): string {
     [
       "Property Name",
       "Primary Function",
-      "WattWise Building Type",
+      "Meterly Building Type",
       "State/Province",
       "Postal Code",
       "Gross Floor Area (ft2)",

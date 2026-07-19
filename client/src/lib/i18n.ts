@@ -19,12 +19,14 @@
 import { useSyncExternalStore } from "react";
 
 export type Lang = "en" | "es";
-const LS_KEY = "wattwise.lang";
+const LS_KEY = "meterly.lang";
+/** legacy key from the WattWise era — read once so existing users keep their choice */
+const LEGACY_LS_KEY = "wattwise.lang";
 
 const EN = {
   // landing / hero
-  "hero.tagline": "See the dollars hiding in your utility data",
-  "hero.sub": "Address in, estimate out — every added detail moves you up the accuracy ladder.",
+  "hero.tagline": "See the dollars hiding in your utility bills",
+  "hero.sub": "Electric, gas, water, sewer — address in, estimate out. Every added detail moves you up the accuracy ladder.",
   "cta.tryFree": "Try it free",
   "cta.seeEstimate": "See your estimate",
   "cta.signIn": "Sign in",
@@ -57,8 +59,8 @@ const EN = {
 export type StringKey = keyof typeof EN;
 
 const ES: Partial<Record<StringKey, string>> = {
-  "hero.tagline": "Descubre los dólares escondidos en tus datos de energía",
-  "hero.sub": "Ingresa una dirección y recibe un estimado — cada detalle adicional te sube en la escalera de precisión.",
+  "hero.tagline": "Descubre los dólares escondidos en tus facturas de servicios",
+  "hero.sub": "Electricidad, gas, agua, drenaje — ingresa una dirección y recibe un estimado. Cada detalle adicional te sube en la escalera de precisión.",
   "cta.tryFree": "Pruébalo gratis",
   "cta.seeEstimate": "Ver tu estimado",
   "cta.signIn": "Iniciar sesión",
@@ -125,7 +127,7 @@ export const I18N_TABLES = { EN, ES } as const;
 /* ---------- store ---------- */
 let current: Lang = (() => {
   try {
-    const saved = localStorage.getItem(LS_KEY);
+    const saved = localStorage.getItem(LS_KEY) ?? localStorage.getItem(LEGACY_LS_KEY);
     if (saved === "en" || saved === "es") return saved;
     return navigator.language?.toLowerCase().startsWith("es") ? "es" : "en";
   } catch {

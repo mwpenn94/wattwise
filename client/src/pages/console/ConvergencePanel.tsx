@@ -17,7 +17,7 @@ export default function ConvergencePanel() {
     <div className="container max-w-5xl py-8">
       <h1 className="font-display text-2xl font-bold tracking-tight">Convergence log</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        WattWise is built under the Universal Holistic Optimization Protocol: recursive expert review with fresh-context
+        Meterly is built under the Universal Holistic Optimization Protocol: recursive expert review with fresh-context
         passes until a clean streak confirms convergence. This log is public and updated every cycle.
       </p>
 

@@ -262,7 +262,7 @@ function PortfolioExports() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `wattwise-portfolio-manager-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `meterly-portfolio-manager-${new Date().toISOString().slice(0, 10)}.csv`;
       a.click();
       URL.revokeObjectURL(url);
       toast.success(`Exported ${r.siteCount} site${r.siteCount === 1 ? "" : "s"} — Portfolio Manager–compatible CSV`);
@@ -305,7 +305,7 @@ function PortfolioVerifiedDialog({ open, onClose }: { open: boolean; onClose: ()
             </div>
             {data.data.perSite.length === 0 ? (
               <p className="mt-4 text-sm text-muted-foreground">
-                No implemented measures yet. Mark a recommendation “I did this” on any site and WattWise will start verifying savings against its weather-adjusted baseline.
+                No implemented measures yet. Mark a recommendation “I did this” on any site and Meterly will start verifying savings against its weather-adjusted baseline.
               </p>
             ) : (
               data.data.perSite.map((s) => (

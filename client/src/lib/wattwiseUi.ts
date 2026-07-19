@@ -1,5 +1,5 @@
 /**
- * Client-side helpers for WattWise UI.
+ * Client-side helpers for Meterly UI.
  * decimateForChart is the BUILD-010.3 peak-preserving decimation, reused per
  * owner constraint (see shared/build0103.ts port — logic identical).
  */

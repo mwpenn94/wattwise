@@ -24,6 +24,7 @@ import { InsightCard, chipFromConfidence } from "@/components/InsightCard";
 import QuickStart from "@/components/QuickStart";
 import { MarkImplementedDialog, ProveItSection } from "@/components/ProveIt";
 import RefineChips from "@/components/RefineChips";
+import SiteGeometryPanel from "@/components/SiteGeometryPanel";
 import { Link, useSearch } from "wouter";
 
 type Demand = {
@@ -34,6 +35,11 @@ type Demand = {
   heatmap: number[][];
   monthlyPeaks: Array<{ month: string; peakKw: number; peakTs: number }>;
   cpProxy: { label: string; topN: number; events: Array<{ ts: number; kw: number }> } | null;
+  /** PEAK-2/3/4 (Jul 19) — present on analyses run after the demand-module
+   * upgrade; older analysis rows lack them, so all render paths must guard. */
+  loadDurationCurve?: Array<{ pctOfHours: number; kw: number }>;
+  hoursNearPeakPct?: number;
+  peakHypotheses?: Array<{ month: string; ts: number; kw: number; hypothesis: string; basis: string }>;
 };
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -144,7 +150,7 @@ export default function Dashboard() {
     return (
       <div className="container max-w-2xl py-16 text-center">
         <Activity className="mx-auto h-10 w-10 text-muted-foreground" />
-        <h1 className="mt-4 font-display text-2xl font-bold">Welcome to WattWise</h1>
+        <h1 className="mt-4 font-display text-2xl font-bold">Welcome to Meterly</h1>
         <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
           The fastest start needs only an address — or a bill photo. Detailed forms exist too, but they are always
           optional.
@@ -214,6 +220,13 @@ export default function Dashboard() {
           placeholders remain in effect — each names what refining unlocks. */}
       {activeSite?.attrSource === "quick_start_defaults" && activeSiteId != null && (
         <RefineChips siteId={activeSiteId} site={activeSite} onRefined={() => run.mutate({ siteId: activeSiteId })} />
+      )}
+
+      {/* GEO stage 2b: footprint resolve + tap-to-confirm + prism massing view */}
+      {activeSiteId != null && (
+        <div className="mt-4">
+          <SiteGeometryPanel siteId={activeSiteId} />
+        </div>
       )}
 
       {latest.data == null && !latest.isLoading && (
@@ -399,32 +412,57 @@ export default function Dashboard() {
             <div className="grid gap-4 lg:grid-cols-3">
               <div className="lg:col-span-2">
                 <p className="font-mono text-[10px] uppercase text-muted-foreground">Monthly peak demand</p>
-                {demand.monthlyPeaks && demand.monthlyPeaks.length > 0 ? (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="text-xs">Month</TableHead>
-                        <TableHead className="text-right text-xs">Peak kW</TableHead>
-                        <TableHead className="text-right text-xs">When</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {demand.monthlyPeaks.slice(-6).map((mp) => (
-                        <TableRow key={mp.month}>
-                          <TableCell className="py-1.5 font-mono text-xs">{mp.month}</TableCell>
-                          <TableCell className="py-1.5 text-right font-mono text-xs">{fmtNum(mp.peakKw)}</TableCell>
-                          <TableCell className="py-1.5 text-right font-mono text-[11px] text-muted-foreground">
-                            {new Date(mp.peakTs).toLocaleString([], { month: "short", day: "numeric", hour: "numeric" })}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                ) : (
+                {demand.monthlyPeaks && demand.monthlyPeaks.length > 0 ? (() => {
+                  /* PEAK-1 (owner bug, Jul 19): the table previously sliced to the
+                     6 most recent months, HIDING the annual maximum — the single
+                     most important row for demand charges (it sets any ratchet
+                     minimum). Now: all months render (scrollable past 8), and the
+                     max row is pinned visually with a “sets ratchet” badge. */
+                  const maxPeakKw = Math.max(...demand.monthlyPeaks.map((m) => m.peakKw));
+                  const maxRow = demand.monthlyPeaks.find((m) => m.peakKw === maxPeakKw);
+                  return (
+                    <>
+                      <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 my-1.5 text-xs flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className="font-medium">Greatest peak: {fmtNum(maxPeakKw)} kW</span>
+                        <span className="text-muted-foreground">
+                          {maxRow ? `in ${maxRow.month} (${new Date(maxRow.peakTs).toLocaleString([], { month: "short", day: "numeric", hour: "numeric" })})` : ""} — on ratcheted rates this sets your minimum billing demand for months after
+                        </span>
+                      </div>
+                      <div className={demand.monthlyPeaks.length > 8 ? "max-h-64 overflow-y-auto" : undefined}>
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Month</TableHead>
+                              <TableHead className="text-right text-xs">Peak kW</TableHead>
+                              <TableHead className="text-right text-xs">When</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {demand.monthlyPeaks.map((mp) => {
+                              const isMax = mp.peakKw === maxPeakKw;
+                              return (
+                                <TableRow key={mp.month} className={isMax ? "bg-primary/10 hover:bg-primary/15" : undefined}>
+                                  <TableCell className="py-1.5 font-mono text-xs">
+                                    {mp.month}
+                                    {isMax && (
+                                      <Badge variant="outline" className="ml-1.5 border-primary/50 text-[9px] text-primary">max — sets ratchet</Badge>
+                                    )}
+                                  </TableCell>
+                                  <TableCell className={`py-1.5 text-right font-mono text-xs ${isMax ? "font-semibold text-primary" : ""}`}>{fmtNum(mp.peakKw)}</TableCell>
+                                  <TableCell className="py-1.5 text-right font-mono text-[11px] text-muted-foreground">
+                                    {new Date(mp.peakTs).toLocaleString([], { month: "short", day: "numeric", hour: "numeric" })}
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </TableBody>
+                        </Table>
+                      </div>
+                      <p className="mt-1 text-[10px] text-muted-foreground">All {demand.monthlyPeaks.length} months shown — the highlighted row is the annual maximum.</p>
+                    </>
+                  );
+                })() : (
                   <p className="py-4 text-sm text-muted-foreground">No monthly peak series in the latest analysis.</p>
-                )}
-                {demand.monthlyPeaks && demand.monthlyPeaks.length > 6 && (
-                  <p className="mt-1 text-[10px] text-muted-foreground">Showing the 6 most recent of {demand.monthlyPeaks.length} months.</p>
                 )}
               </div>
               <div className="space-y-3">
@@ -466,6 +504,72 @@ export default function Dashboard() {
                 )}
               </div>
             </div>
+
+            {/* PEAK-2: load duration curve — “how rare is the peak”. Older
+                analyses lack the field; a re-run adds it. */}
+            {demand.loadDurationCurve && demand.loadDurationCurve.length > 0 && (
+              <div className="mt-5 border-t border-border pt-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-mono text-[10px] uppercase text-muted-foreground">Load duration curve</p>
+                  {demand.hoursNearPeakPct != null && (
+                    <Badge variant="outline" className="text-[10px]">
+                      {(demand.hoursNearPeakPct * 100).toFixed(1)}% of hours within 90% of peak
+                    </Badge>
+                  )}
+                </div>
+                <div className="mt-2 h-36">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={demand.loadDurationCurve} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                      <XAxis dataKey="pctOfHours" tick={{ fontSize: 10 }} tickFormatter={(v: number) => `${v}%`} interval={24} />
+                      <YAxis tick={{ fontSize: 10 }} tickFormatter={(v: number) => `${fmtNum(v)}`} width={48} />
+                      <Tooltip
+                        formatter={(v: number) => [`${fmtNum(v)} kW`, "demand"]}
+                        labelFormatter={(l: number) => `top ${l}% of hours`}
+                        contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", fontSize: 11 }}
+                      />
+                      <Area type="stepAfter" dataKey="kw" stroke="var(--primary)" fill="var(--primary)" fillOpacity={0.15} strokeWidth={1.5} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  {demand.hoursNearPeakPct != null && demand.hoursNearPeakPct < 0.02
+                    ? "A steep cliff at the left: your peak occurs in a tiny share of hours — short-duration peak shaving (staggered starts, brief load shifting, pre-cooling) can plausibly cut billed demand."
+                    : "A flatter curve: demand stays near peak for many hours — sustained baseload dominates, so demand savings need equipment or schedule changes, not brief shaving."}
+                </p>
+              </div>
+            )}
+
+            {/* PEAK-3/4: per-month contributing-load hypotheses with weather
+                coincidence — explicitly labeled hypotheses, never assertions. */}
+            {demand.peakHypotheses && demand.peakHypotheses.length > 0 && (
+              <div className="mt-5 border-t border-border pt-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-mono text-[10px] uppercase text-muted-foreground">What likely drove each peak</p>
+                  <Badge variant="outline" className="text-[10px]">hypotheses to check — not measured attribution</Badge>
+                </div>
+                <ul className="mt-2 space-y-2">
+                  {[...demand.peakHypotheses]
+                    .sort((a, b) => b.kw - a.kw)
+                    .slice(0, 4)
+                    .map((ph) => (
+                      <li key={ph.month} className="rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+                        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                          <span className="font-mono text-xs font-medium">{ph.month} — {fmtNum(ph.kw)} kW</span>
+                          <span className="font-mono text-[10px] text-muted-foreground">
+                            {new Date(ph.ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric" })}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-[11px] leading-relaxed">{ph.hypothesis}</p>
+                        <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">{ph.basis}</p>
+                      </li>
+                    ))}
+                </ul>
+                {demand.peakHypotheses.length > 4 && (
+                  <p className="mt-1 text-[10px] text-muted-foreground">Showing the 4 highest peaks of {demand.peakHypotheses.length} months.</p>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

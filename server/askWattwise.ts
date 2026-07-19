@@ -1,5 +1,5 @@
 /**
- * §3k Ask WattWise — natural language as an ENTRANCE to existing engines.
+ * §3k Ask Meterly — natural language as an ENTRANCE to existing engines.
  *
  * The question box never produces free-text answers. It classifies the
  * question into one of the engine intents and returns a dispatch card that
@@ -166,7 +166,7 @@ const RUN_FIRST: AskCard = {
   confidence: "estimated",
   extraChips: [],
   action: { label: "Go to Explore", href: "/app/explore" },
-  provenance: ["No stored analysis rows exist for this site yet — WattWise never answers from generated text."],
+  provenance: ["No stored analysis rows exist for this site yet — Meterly never answers from generated text."],
 };
 
 /**
@@ -252,7 +252,7 @@ export async function buildAskCard(intent: AskIntent, ctx: AskContext): Promise<
         why:
           ctx.verifiedTotalUsd > 0
             ? "Sum of band-clearing months across your implemented measures — actual usage vs the weather-adjusted counterfactual."
-            : "Mark a measure “I did this” on an opportunity card and WattWise will verify savings month by month against the weather-adjusted counterfactual.",
+            : "Mark a measure “I did this” on an opportunity card and Meterly will verify savings month by month against the weather-adjusted counterfactual.",
         confidence: ctx.verifiedTotalUsd > 0 ? "measured" : "estimated",
         extraChips: ["prove-it loop"],
         action: { label: "See the verification ledger", href: `/app/explore?site=${siteId}` },
@@ -292,11 +292,11 @@ export async function buildAskCard(intent: AskIntent, ctx: AskContext): Promise<
         dollars: null,
         framing: null,
         headlineFallback: "I can't route that question yet",
-        why: "Ask WattWise answers from your stored analysis engines. Try: “Why was my peak high?”, “Is there a cheaper rate?”, “What if I add a battery?”, “What should I do first?”, “How much have I saved?”, or “How do I compare?”.",
+        why: "Ask Meterly answers from your stored analysis engines. Try: “Why was my peak high?”, “Is there a cheaper rate?”, “What if I add a battery?”, “What should I do first?”, “How much have I saved?”, or “How do I compare?”.",
         confidence: "estimated",
         extraChips: [],
         action: null,
-        provenance: ["The question didn't match any engine intent — WattWise never answers with generated text, so no answer is safer than a made-up one."],
+        provenance: ["The question didn't match any engine intent — Meterly never answers with generated text, so no answer is safer than a made-up one."],
       };
   }
 }

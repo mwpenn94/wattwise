@@ -30,7 +30,7 @@ export default function Verify() {
       <header className="border-b">
         <div className="container flex items-center justify-between h-14">
           <Link href="/" className="flex items-center gap-2 font-semibold">
-            <Zap className="h-5 w-5 text-primary" /> WattWise
+            <Zap className="h-5 w-5 text-primary" /> Meterly
           </Link>
           <Badge variant="outline" className="gap-1"><ShieldCheck className="h-3.5 w-3.5" /> Report verification</Badge>
         </div>

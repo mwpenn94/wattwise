@@ -65,7 +65,7 @@ beforeAll(async () => {
 describe("GAP-L site roles", () => {
   it("owner: honest error adding a non-existent account; members list shows both roles", async () => {
     const oc = appRouter.createCaller(ctxFor(owner));
-    await expect(oc.sites.members.add({ siteId, email: "nobody-here@example.com", role: "read_only" })).rejects.toThrow(/no wattwise account/i);
+    await expect(oc.sites.members.add({ siteId, email: "nobody-here@example.com", role: "read_only" })).rejects.toThrow(/no meterly account/i);
     const members = await oc.sites.members.list({ siteId });
     expect(members.length).toBe(2);
     expect(members.map((m) => m.role).sort()).toEqual(["facility_manager", "read_only"]);

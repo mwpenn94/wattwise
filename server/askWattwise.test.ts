@@ -1,5 +1,5 @@
 /**
- * §3k Ask WattWise — routing + dispatch honesty tests.
+ * §3k Ask Meterly — routing + dispatch honesty tests.
  *
  * The NL box is an ENTRANCE to engines: the router only classifies; every
  * displayed number must come from stored rows. Unknown intents get an honest
