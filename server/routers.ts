@@ -29,6 +29,7 @@ import * as h from "./dbHelpers";
 import * as geo from "./geometry";
 import { emitDeadEndPersona } from "./personaFingerprint";
 import { ensureSeeded } from "./seed/runSeeders";
+import { STATE_PROFILES } from "./seed/nationalData";
 import { preParseGate, rejectXxe, withParseTimeout } from "./ingest/hardening";
 import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, type ParsedMeterSeries } from "./ingest/parsers";
 import { writeIntervals } from "./ingest/writer";
@@ -2057,8 +2058,19 @@ export const appRouter = router({
       };
 
       if (!meter) {
-        const empty = evaluateImplementation([], null, 0.12, impl.expectedSavingsUsd ?? null);
+        // Owner directive (Jul 19): actual as able, imputed where required,
+        // notated accordingly — no meter means no actual rate, so impute the
+        // site's state-average commercial rate (EIA-861 2024) and say so;
+        // only fall to the $0.12 national assumption when the state is unknown.
+        const sp = site.state ? STATE_PROFILES.find((p) => p.state === site.state) : null;
+        const imputedRate = sp ? sp.commRateCents / 100 : 0.12;
+        const empty = evaluateImplementation([], null, imputedRate, impl.expectedSavingsUsd ?? null);
         empty.disclosures.push("No electric meter with interval data exists on this site yet — add data to start the verification clock.");
+        empty.disclosures.push(
+          sp
+            ? `Dollar figures use the ${sp.state} state-average commercial rate ($${(sp.commRateCents / 100).toFixed(3)}/kWh, EIA-861 2024 — state-average imputed) until your meter provides an actual rate.`
+            : "Dollar figures use a $0.12/kWh national-average assumption — no state on file to impute a closer rate.",
+        );
         return persistAndReturn(empty);
       }
 

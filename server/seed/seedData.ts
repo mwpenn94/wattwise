@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.5"; // National coverage: 51-state representative tariffs + zone stations + eGRID
+export const SEED_VERSION = "2026.07.6"; // National gas/water representative rates (state-average imputed, territory-aligned LDC names)
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{

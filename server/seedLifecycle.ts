@@ -35,6 +35,7 @@ export const SEED_CADENCES: Array<{ source: string; cadenceDays: number; label: 
   { source: "urdb_snapshot", cadenceDays: 91, label: "OpenEI URDB bulk tariff snapshot" },
   { source: "incentives_dsire", cadenceDays: 30, label: "DSIRE + utility programs + compliance tables" },
   { source: "gas_water_templates", cadenceDays: 182, label: "Gas/water tariff templates (major providers)" },
+  { source: "national_rate_averages", cadenceDays: 365, label: "EIA-861/EIA-176/AWWA state-average representative rates (electric + gas + water)" },
   { source: "overture_buildings", cadenceDays: 30, label: "Overture buildings/places extracts" },
   { source: "archetype_profiles", cadenceDays: 365, label: "ResStock/ComStock archetypes + benchmarks" },
   { source: "weather_normals", cadenceDays: 365, label: "NOAA normals / TMY profiles" },
@@ -133,7 +134,7 @@ export async function staleSeedsForDomain(
 ): Promise<SeedStaleness[]> {
   const domainSeeds: Record<string, string[]> = {
     emissions: ["egrid_emissions"],
-    tariffs: ["urdb_snapshot", "gas_water_templates", "eia861_utilities", "water_gas_registries"],
+    tariffs: ["urdb_snapshot", "gas_water_templates", "eia861_utilities", "water_gas_registries", "national_rate_averages"],
     benchmark: ["archetype_profiles"],
     archetype: ["archetype_profiles"],
     weather: ["weather_normals"],

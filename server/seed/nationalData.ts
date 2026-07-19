@@ -36,60 +36,72 @@ export interface StateProfile {
   subregion: string;
   /** typical commercial demand charge $/kW for the region */
   demandPerKw: number;
+  /** Dominant gas LDC — MUST match the territory registry's gas utility name
+   * (scripts/generate-territories.mjs STATE_UTILITIES) so ZIP → territory
+   * attribution → tariff lookup chains by name. Omitted where no meaningful
+   * piped-gas distribution exists. */
+  gasUtilityName?: string;
+  /** EIA-176 / Natural Gas Navigator 2024 state-average residential price, $/therm */
+  gasResPerTherm?: number;
+  /** EIA 2024 state-average commercial price, $/therm */
+  gasCommPerTherm?: number;
+  /** State-representative municipal water volumetric rate, $/kgal (AWWA/state
+   * rate-survey derived; water+volumetric only, sewer excluded). */
+  waterPerKgal?: number;
 }
 
 export const STATE_PROFILES: StateProfile[] = [
-  { state: "AL", utilityName: "Alabama Power Co", resRateCents: 14.9, commRateCents: 13.0, subregion: "SRSO", demandPerKw: 12 },
-  { state: "AK", utilityName: "Chugach Electric Assn", resRateCents: 24.5, commRateCents: 21.0, subregion: "AKGD", demandPerKw: 14 },
-  { state: "AZ", utilityName: "Arizona Public Service Co (APS)", resRateCents: 14.0, commRateCents: 11.5, subregion: "AZNM", demandPerKw: 17 },
-  { state: "AR", utilityName: "Entergy Arkansas", resRateCents: 12.5, commRateCents: 10.5, subregion: "SRMV", demandPerKw: 11 },
-  { state: "CA", utilityName: "Pacific Gas & Electric Co (PG&E)", resRateCents: 31.0, commRateCents: 26.0, subregion: "CAMX", demandPerKw: 22 },
-  { state: "CO", utilityName: "Public Service Co of Colorado (Xcel)", resRateCents: 15.0, commRateCents: 12.0, subregion: "RMPA", demandPerKw: 16 },
-  { state: "CT", utilityName: "Eversource Energy (CT)", resRateCents: 28.5, commRateCents: 22.5, subregion: "NEWE", demandPerKw: 18 },
-  { state: "DE", utilityName: "Delmarva Power", resRateCents: 16.5, commRateCents: 12.5, subregion: "RFCE", demandPerKw: 13 },
-  { state: "DC", utilityName: "Potomac Electric Power Co (Pepco)", resRateCents: 17.5, commRateCents: 14.0, subregion: "RFCE", demandPerKw: 14 },
-  { state: "FL", utilityName: "Florida Power & Light Co (FPL)", resRateCents: 15.5, commRateCents: 11.5, subregion: "FRCC", demandPerKw: 12 },
-  { state: "GA", utilityName: "Georgia Power Co", resRateCents: 14.5, commRateCents: 11.5, subregion: "SRSO", demandPerKw: 13 },
-  { state: "HI", utilityName: "Hawaiian Electric Co (HECO)", resRateCents: 41.0, commRateCents: 37.0, subregion: "HIOA", demandPerKw: 25 },
-  { state: "ID", utilityName: "Idaho Power Co", resRateCents: 11.0, commRateCents: 9.0, subregion: "NWPP", demandPerKw: 10 },
-  { state: "IL", utilityName: "Commonwealth Edison Co (ComEd)", resRateCents: 16.0, commRateCents: 11.5, subregion: "RFCW", demandPerKw: 14 },
-  { state: "IN", utilityName: "Duke Energy Indiana", resRateCents: 15.5, commRateCents: 12.5, subregion: "RFCW", demandPerKw: 13 },
-  { state: "IA", utilityName: "MidAmerican Energy Co", resRateCents: 12.5, commRateCents: 9.5, subregion: "MROW", demandPerKw: 11 },
-  { state: "KS", utilityName: "Evergy Kansas", resRateCents: 13.5, commRateCents: 11.0, subregion: "SPNO", demandPerKw: 12 },
-  { state: "KY", utilityName: "Kentucky Utilities Co", resRateCents: 12.5, commRateCents: 11.0, subregion: "SRTV", demandPerKw: 11 },
-  { state: "LA", utilityName: "Entergy Louisiana", resRateCents: 11.5, commRateCents: 10.0, subregion: "SRMV", demandPerKw: 10 },
-  { state: "ME", utilityName: "Central Maine Power Co", resRateCents: 23.0, commRateCents: 17.5, subregion: "NEWE", demandPerKw: 15 },
-  { state: "MD", utilityName: "Baltimore Gas & Electric Co (BGE)", resRateCents: 17.0, commRateCents: 13.0, subregion: "RFCE", demandPerKw: 13 },
-  { state: "MA", utilityName: "Eversource Energy (MA)", resRateCents: 29.5, commRateCents: 21.5, subregion: "NEWE", demandPerKw: 19 },
-  { state: "MI", utilityName: "DTE Electric Co", resRateCents: 18.5, commRateCents: 13.5, subregion: "RFCM", demandPerKw: 14 },
-  { state: "MN", utilityName: "Xcel Energy (NSP-Minnesota)", resRateCents: 14.5, commRateCents: 11.5, subregion: "MROW", demandPerKw: 13 },
-  { state: "MS", utilityName: "Mississippi Power Co", resRateCents: 13.5, commRateCents: 11.5, subregion: "SRMV", demandPerKw: 11 },
-  { state: "MO", utilityName: "Ameren Missouri", resRateCents: 12.5, commRateCents: 9.5, subregion: "SRMW", demandPerKw: 11 },
-  { state: "MT", utilityName: "NorthWestern Energy (MT)", resRateCents: 12.5, commRateCents: 11.0, subregion: "NWPP", demandPerKw: 11 },
-  { state: "NE", utilityName: "Omaha Public Power District", resRateCents: 11.5, commRateCents: 9.5, subregion: "MROW", demandPerKw: 10 },
-  { state: "NV", utilityName: "NV Energy", resRateCents: 14.5, commRateCents: 10.5, subregion: "NWPP", demandPerKw: 13 },
-  { state: "NH", utilityName: "Eversource Energy (NH)", resRateCents: 25.5, commRateCents: 19.5, subregion: "NEWE", demandPerKw: 16 },
-  { state: "NJ", utilityName: "Public Service Electric & Gas (PSE&G)", resRateCents: 18.5, commRateCents: 14.0, subregion: "RFCE", demandPerKw: 14 },
-  { state: "NM", utilityName: "Public Service Co of New Mexico (PNM)", resRateCents: 14.0, commRateCents: 11.0, subregion: "AZNM", demandPerKw: 12 },
-  { state: "NY", utilityName: "Consolidated Edison Co (ConEd)", resRateCents: 24.5, commRateCents: 19.0, subregion: "NYCW", demandPerKw: 20 },
-  { state: "NC", utilityName: "Duke Energy Carolinas", resRateCents: 13.5, commRateCents: 10.0, subregion: "SRVC", demandPerKw: 12 },
-  { state: "ND", utilityName: "Xcel Energy (NSP-North Dakota)", resRateCents: 11.5, commRateCents: 9.5, subregion: "MROW", demandPerKw: 10 },
-  { state: "OH", utilityName: "Ohio Edison (FirstEnergy)", resRateCents: 15.5, commRateCents: 11.0, subregion: "RFCW", demandPerKw: 12 },
-  { state: "OK", utilityName: "Oklahoma Gas & Electric Co (OG&E)", resRateCents: 12.0, commRateCents: 9.5, subregion: "SPSO", demandPerKw: 10 },
-  { state: "OR", utilityName: "Portland General Electric Co", resRateCents: 14.5, commRateCents: 12.0, subregion: "NWPP", demandPerKw: 12 },
-  { state: "PA", utilityName: "PECO Energy Co", resRateCents: 17.5, commRateCents: 12.5, subregion: "RFCE", demandPerKw: 13 },
-  { state: "RI", utilityName: "Rhode Island Energy", resRateCents: 27.0, commRateCents: 20.5, subregion: "NEWE", demandPerKw: 17 },
-  { state: "SC", utilityName: "Dominion Energy South Carolina", resRateCents: 14.5, commRateCents: 11.5, subregion: "SRVC", demandPerKw: 12 },
-  { state: "SD", utilityName: "Black Hills Energy (SD)", resRateCents: 12.5, commRateCents: 10.5, subregion: "MROW", demandPerKw: 11 },
-  { state: "TN", utilityName: "Nashville Electric Service (TVA)", resRateCents: 12.5, commRateCents: 11.5, subregion: "SRTV", demandPerKw: 11 },
-  { state: "TX", utilityName: "Oncor Electric Delivery (TDU) / REP avg", resRateCents: 15.0, commRateCents: 10.5, subregion: "ERCT", demandPerKw: 12 },
-  { state: "UT", utilityName: "Rocky Mountain Power (PacifiCorp)", resRateCents: 11.5, commRateCents: 9.5, subregion: "NWPP", demandPerKw: 11 },
-  { state: "VT", utilityName: "Green Mountain Power Corp", resRateCents: 21.5, commRateCents: 17.5, subregion: "NEWE", demandPerKw: 15 },
-  { state: "VA", utilityName: "Dominion Energy Virginia", resRateCents: 14.5, commRateCents: 10.0, subregion: "SRVC", demandPerKw: 12 },
-  { state: "WA", utilityName: "Puget Sound Energy", resRateCents: 11.5, commRateCents: 10.5, subregion: "NWPP", demandPerKw: 11 },
-  { state: "WV", utilityName: "Appalachian Power Co (WV)", resRateCents: 14.0, commRateCents: 11.5, subregion: "RFCW", demandPerKw: 12 },
-  { state: "WI", utilityName: "We Energies (Wisconsin Electric)", resRateCents: 17.0, commRateCents: 13.0, subregion: "MROE", demandPerKw: 14 },
-  { state: "WY", utilityName: "Rocky Mountain Power (WY)", resRateCents: 11.5, commRateCents: 10.0, subregion: "RMPA", demandPerKw: 10 },
+  { state: "AL", utilityName: "Alabama Power Co", resRateCents: 14.9, commRateCents: 13.0, subregion: "SRSO", demandPerKw: 12, gasUtilityName: "Spire Alabama", gasResPerTherm: 2.05, gasCommPerTherm: 1.55, waterPerKgal: 4.5 },
+  { state: "AK", utilityName: "Chugach Electric Assn", resRateCents: 24.5, commRateCents: 21.0, subregion: "AKGD", demandPerKw: 14, gasUtilityName: "ENSTAR Natural Gas", gasResPerTherm: 1.15, gasCommPerTherm: 0.95, waterPerKgal: 8.0 },
+  { state: "AZ", utilityName: "Arizona Public Service Co (APS)", resRateCents: 14.0, commRateCents: 11.5, subregion: "AZNM", demandPerKw: 17, gasUtilityName: "Southwest Gas", gasResPerTherm: 1.55, gasCommPerTherm: 1.1, waterPerKgal: 5.2 },
+  { state: "AR", utilityName: "Entergy Arkansas", resRateCents: 12.5, commRateCents: 10.5, subregion: "SRMV", demandPerKw: 11, gasUtilityName: "Summit Utilities Arkansas (CenterPoint)", gasResPerTherm: 1.45, gasCommPerTherm: 1.05, waterPerKgal: 4.0 },
+  { state: "CA", utilityName: "Pacific Gas & Electric Co (PG&E)", resRateCents: 31.0, commRateCents: 26.0, subregion: "CAMX", demandPerKw: 22, gasUtilityName: "SoCalGas", gasResPerTherm: 2.25, gasCommPerTherm: 1.65, waterPerKgal: 7.5 },
+  { state: "CO", utilityName: "Public Service Co of Colorado (Xcel)", resRateCents: 15.0, commRateCents: 12.0, subregion: "RMPA", demandPerKw: 16, gasUtilityName: "Xcel Energy Colorado", gasResPerTherm: 1.1, gasCommPerTherm: 0.9, waterPerKgal: 5.5 },
+  { state: "CT", utilityName: "Eversource Energy (CT)", resRateCents: 28.5, commRateCents: 22.5, subregion: "NEWE", demandPerKw: 18, gasUtilityName: "Eversource Gas (Yankee Gas)", gasResPerTherm: 1.75, gasCommPerTherm: 1.25, waterPerKgal: 6.0 },
+  { state: "DE", utilityName: "Delmarva Power", resRateCents: 16.5, commRateCents: 12.5, subregion: "RFCE", demandPerKw: 13, gasUtilityName: "Delmarva Power (gas)", gasResPerTherm: 1.55, gasCommPerTherm: 1.15, waterPerKgal: 5.0 },
+  { state: "DC", utilityName: "Potomac Electric Power Co (Pepco)", resRateCents: 17.5, commRateCents: 14.0, subregion: "RFCE", demandPerKw: 14, gasUtilityName: "Washington Gas", gasResPerTherm: 1.65, gasCommPerTherm: 1.2, waterPerKgal: 6.5 },
+  { state: "FL", utilityName: "Florida Power & Light Co (FPL)", resRateCents: 15.5, commRateCents: 11.5, subregion: "FRCC", demandPerKw: 12, gasUtilityName: "TECO Peoples Gas", gasResPerTherm: 2.55, gasCommPerTherm: 1.35, waterPerKgal: 4.5 },
+  { state: "GA", utilityName: "Georgia Power Co", resRateCents: 14.5, commRateCents: 11.5, subregion: "SRSO", demandPerKw: 13, gasUtilityName: "Atlanta Gas Light", gasResPerTherm: 1.85, gasCommPerTherm: 1.2, waterPerKgal: 5.5 },
+  { state: "HI", utilityName: "Hawaiian Electric Co (HECO)", resRateCents: 41.0, commRateCents: 37.0, subregion: "HIOA", demandPerKw: 25, gasUtilityName: "Hawaii Gas", gasResPerTherm: 4.85, gasCommPerTherm: 3.6, waterPerKgal: 6.5 },
+  { state: "ID", utilityName: "Idaho Power Co", resRateCents: 11.0, commRateCents: 9.0, subregion: "NWPP", demandPerKw: 10, gasUtilityName: "Intermountain Gas", gasResPerTherm: 0.95, gasCommPerTherm: 0.8, waterPerKgal: 3.0 },
+  { state: "IL", utilityName: "Commonwealth Edison Co (ComEd)", resRateCents: 16.0, commRateCents: 11.5, subregion: "RFCW", demandPerKw: 14, gasUtilityName: "Nicor Gas", gasResPerTherm: 1.05, gasCommPerTherm: 0.9, waterPerKgal: 4.5 },
+  { state: "IN", utilityName: "Duke Energy Indiana", resRateCents: 15.5, commRateCents: 12.5, subregion: "RFCW", demandPerKw: 13, gasUtilityName: "CenterPoint Energy Indiana", gasResPerTherm: 1.1, gasCommPerTherm: 0.9, waterPerKgal: 4.5 },
+  { state: "IA", utilityName: "MidAmerican Energy Co", resRateCents: 12.5, commRateCents: 9.5, subregion: "MROW", demandPerKw: 11, gasUtilityName: "MidAmerican Energy (gas)", gasResPerTherm: 1.05, gasCommPerTherm: 0.8, waterPerKgal: 5.0 },
+  { state: "KS", utilityName: "Evergy Kansas", resRateCents: 13.5, commRateCents: 11.0, subregion: "SPNO", demandPerKw: 12, gasUtilityName: "Kansas Gas Service", gasResPerTherm: 1.15, gasCommPerTherm: 0.9, waterPerKgal: 4.5 },
+  { state: "KY", utilityName: "Kentucky Utilities Co", resRateCents: 12.5, commRateCents: 11.0, subregion: "SRTV", demandPerKw: 11, gasUtilityName: "Louisville Gas & Electric (gas)", gasResPerTherm: 1.2, gasCommPerTherm: 0.95, waterPerKgal: 4.5 },
+  { state: "LA", utilityName: "Entergy Louisiana", resRateCents: 11.5, commRateCents: 10.0, subregion: "SRMV", demandPerKw: 10, gasUtilityName: "Atmos Energy Louisiana", gasResPerTherm: 1.45, gasCommPerTherm: 1.1, waterPerKgal: 4.0 },
+  { state: "ME", utilityName: "Central Maine Power Co", resRateCents: 23.0, commRateCents: 17.5, subregion: "NEWE", demandPerKw: 15, gasUtilityName: "Summit Natural Gas of Maine", gasResPerTherm: 1.9, gasCommPerTherm: 1.35, waterPerKgal: 6.0 },
+  { state: "MD", utilityName: "Baltimore Gas & Electric Co (BGE)", resRateCents: 17.0, commRateCents: 13.0, subregion: "RFCE", demandPerKw: 13, gasUtilityName: "Baltimore Gas & Electric (gas)", gasResPerTherm: 1.5, gasCommPerTherm: 1.1, waterPerKgal: 5.5 },
+  { state: "MA", utilityName: "Eversource Energy (MA)", resRateCents: 29.5, commRateCents: 21.5, subregion: "NEWE", demandPerKw: 19, gasUtilityName: "National Grid (gas)", gasResPerTherm: 2.05, gasCommPerTherm: 1.45, waterPerKgal: 7.0 },
+  { state: "MI", utilityName: "DTE Electric Co", resRateCents: 18.5, commRateCents: 13.5, subregion: "RFCM", demandPerKw: 14, gasUtilityName: "DTE Gas", gasResPerTherm: 1.0, gasCommPerTherm: 0.85, waterPerKgal: 4.5 },
+  { state: "MN", utilityName: "Xcel Energy (NSP-Minnesota)", resRateCents: 14.5, commRateCents: 11.5, subregion: "MROW", demandPerKw: 13, gasUtilityName: "CenterPoint Energy Minnesota", gasResPerTherm: 0.95, gasCommPerTherm: 0.8, waterPerKgal: 4.5 },
+  { state: "MS", utilityName: "Mississippi Power Co", resRateCents: 13.5, commRateCents: 11.5, subregion: "SRMV", demandPerKw: 11, gasUtilityName: "Atmos Energy Mississippi", gasResPerTherm: 1.4, gasCommPerTherm: 1.05, waterPerKgal: 3.5 },
+  { state: "MO", utilityName: "Ameren Missouri", resRateCents: 12.5, commRateCents: 9.5, subregion: "SRMW", demandPerKw: 11, gasUtilityName: "Spire Missouri", gasResPerTherm: 1.25, gasCommPerTherm: 0.95, waterPerKgal: 4.5 },
+  { state: "MT", utilityName: "NorthWestern Energy (MT)", resRateCents: 12.5, commRateCents: 11.0, subregion: "NWPP", demandPerKw: 11, gasUtilityName: "NorthWestern Energy Montana (gas)", gasResPerTherm: 0.95, gasCommPerTherm: 0.85, waterPerKgal: 3.5 },
+  { state: "NE", utilityName: "Omaha Public Power District", resRateCents: 11.5, commRateCents: 9.5, subregion: "MROW", demandPerKw: 10, gasUtilityName: "Metropolitan Utilities District (MUD)", gasResPerTherm: 0.95, gasCommPerTherm: 0.75, waterPerKgal: 3.5 },
+  { state: "NV", utilityName: "NV Energy", resRateCents: 14.5, commRateCents: 10.5, subregion: "NWPP", demandPerKw: 13, gasUtilityName: "Southwest Gas", gasResPerTherm: 1.25, gasCommPerTherm: 0.95, waterPerKgal: 4.5 },
+  { state: "NH", utilityName: "Eversource Energy (NH)", resRateCents: 25.5, commRateCents: 19.5, subregion: "NEWE", demandPerKw: 16, gasUtilityName: "Liberty Utilities New Hampshire", gasResPerTherm: 1.95, gasCommPerTherm: 1.4, waterPerKgal: 6.0 },
+  { state: "NJ", utilityName: "Public Service Electric & Gas (PSE&G)", resRateCents: 18.5, commRateCents: 14.0, subregion: "RFCE", demandPerKw: 14, gasUtilityName: "PSE&G (gas)", gasResPerTherm: 1.25, gasCommPerTherm: 0.95, waterPerKgal: 6.0 },
+  { state: "NM", utilityName: "Public Service Co of New Mexico (PNM)", resRateCents: 14.0, commRateCents: 11.0, subregion: "AZNM", demandPerKw: 12, gasUtilityName: "New Mexico Gas Company", gasResPerTherm: 1.0, gasCommPerTherm: 0.8, waterPerKgal: 4.5 },
+  { state: "NY", utilityName: "Consolidated Edison Co (ConEd)", resRateCents: 24.5, commRateCents: 19.0, subregion: "NYCW", demandPerKw: 20, gasUtilityName: "Con Edison (gas)", gasResPerTherm: 1.85, gasCommPerTherm: 1.3, waterPerKgal: 6.0 },
+  { state: "NC", utilityName: "Duke Energy Carolinas", resRateCents: 13.5, commRateCents: 10.0, subregion: "SRVC", demandPerKw: 12, gasUtilityName: "Piedmont Natural Gas", gasResPerTherm: 1.55, gasCommPerTherm: 1.15, waterPerKgal: 4.5 },
+  { state: "ND", utilityName: "Xcel Energy (NSP-North Dakota)", resRateCents: 11.5, commRateCents: 9.5, subregion: "MROW", demandPerKw: 10, gasUtilityName: "Montana-Dakota Utilities (gas)", gasResPerTherm: 0.85, gasCommPerTherm: 0.7, waterPerKgal: 3.5 },
+  { state: "OH", utilityName: "Ohio Edison (FirstEnergy)", resRateCents: 15.5, commRateCents: 11.0, subregion: "RFCW", demandPerKw: 12, gasUtilityName: "Columbia Gas of Ohio", gasResPerTherm: 1.3, gasCommPerTherm: 0.95, waterPerKgal: 5.5 },
+  { state: "OK", utilityName: "Oklahoma Gas & Electric Co (OG&E)", resRateCents: 12.0, commRateCents: 9.5, subregion: "SPSO", demandPerKw: 10, gasUtilityName: "Oklahoma Natural Gas", gasResPerTherm: 1.3, gasCommPerTherm: 0.95, waterPerKgal: 4.0 },
+  { state: "OR", utilityName: "Portland General Electric Co", resRateCents: 14.5, commRateCents: 12.0, subregion: "NWPP", demandPerKw: 12, gasUtilityName: "NW Natural", gasResPerTherm: 1.55, gasCommPerTherm: 1.25, waterPerKgal: 6.5 },
+  { state: "PA", utilityName: "PECO Energy Co", resRateCents: 17.5, commRateCents: 12.5, subregion: "RFCE", demandPerKw: 13, gasUtilityName: "PECO (gas)", gasResPerTherm: 1.45, gasCommPerTherm: 1.1, waterPerKgal: 6.5 },
+  { state: "RI", utilityName: "Rhode Island Energy", resRateCents: 27.0, commRateCents: 20.5, subregion: "NEWE", demandPerKw: 17, gasUtilityName: "Rhode Island Energy (gas)", gasResPerTherm: 2.0, gasCommPerTherm: 1.4, waterPerKgal: 6.0 },
+  { state: "SC", utilityName: "Dominion Energy South Carolina", resRateCents: 14.5, commRateCents: 11.5, subregion: "SRVC", demandPerKw: 12, gasUtilityName: "Dominion Energy South Carolina (gas)", gasResPerTherm: 1.55, gasCommPerTherm: 1.15, waterPerKgal: 4.0 },
+  { state: "SD", utilityName: "Black Hills Energy (SD)", resRateCents: 12.5, commRateCents: 10.5, subregion: "MROW", demandPerKw: 11, gasUtilityName: "MidAmerican Energy South Dakota (gas)", gasResPerTherm: 0.95, gasCommPerTherm: 0.8, waterPerKgal: 4.5 },
+  { state: "TN", utilityName: "Nashville Electric Service (TVA)", resRateCents: 12.5, commRateCents: 11.5, subregion: "SRTV", demandPerKw: 11, gasUtilityName: "Piedmont Natural Gas Tennessee", gasResPerTherm: 1.3, gasCommPerTherm: 1.0, waterPerKgal: 4.0 },
+  { state: "TX", utilityName: "Oncor Electric Delivery (TDU) / REP avg", resRateCents: 15.0, commRateCents: 10.5, subregion: "ERCT", demandPerKw: 12, gasUtilityName: "Atmos Energy Texas", gasResPerTherm: 1.35, gasCommPerTherm: 0.95, waterPerKgal: 4.5 },
+  { state: "UT", utilityName: "Rocky Mountain Power (PacifiCorp)", resRateCents: 11.5, commRateCents: 9.5, subregion: "NWPP", demandPerKw: 11, gasUtilityName: "Dominion Energy Utah (Enbridge)", gasResPerTherm: 1.0, gasCommPerTherm: 0.8, waterPerKgal: 3.0 },
+  { state: "VT", utilityName: "Green Mountain Power Corp", resRateCents: 21.5, commRateCents: 17.5, subregion: "NEWE", demandPerKw: 15, gasUtilityName: "Vermont Gas Systems", gasResPerTherm: 1.75, gasCommPerTherm: 1.3, waterPerKgal: 6.0 },
+  { state: "VA", utilityName: "Dominion Energy Virginia", resRateCents: 14.5, commRateCents: 10.0, subregion: "SRVC", demandPerKw: 12, gasUtilityName: "Washington Gas Virginia", gasResPerTherm: 1.45, gasCommPerTherm: 1.05, waterPerKgal: 5.0 },
+  { state: "WA", utilityName: "Puget Sound Energy", resRateCents: 11.5, commRateCents: 10.5, subregion: "NWPP", demandPerKw: 11, gasUtilityName: "Puget Sound Energy (gas)", gasResPerTherm: 1.45, gasCommPerTherm: 1.15, waterPerKgal: 6.5 },
+  { state: "WV", utilityName: "Appalachian Power Co (WV)", resRateCents: 14.0, commRateCents: 11.5, subregion: "RFCW", demandPerKw: 12, gasUtilityName: "Mountaineer Gas", gasResPerTherm: 1.3, gasCommPerTherm: 1.0, waterPerKgal: 6.5 },
+  { state: "WI", utilityName: "We Energies (Wisconsin Electric)", resRateCents: 17.0, commRateCents: 13.0, subregion: "MROE", demandPerKw: 14, gasUtilityName: "We Energies (gas)", gasResPerTherm: 1.0, gasCommPerTherm: 0.85, waterPerKgal: 4.5 },
+  { state: "WY", utilityName: "Rocky Mountain Power (WY)", resRateCents: 11.5, commRateCents: 10.0, subregion: "RMPA", demandPerKw: 10, gasUtilityName: "Black Hills Energy Wyoming (gas)", gasResPerTherm: 0.95, gasCommPerTherm: 0.8, waterPerKgal: 3.5 },
 ];
 
 export const STATE_SUBREGION: Record<string, string> = Object.fromEntries(
@@ -181,6 +193,105 @@ export function generateNationalTariffs(existingStates: Set<string>): SeedTariff
     // but still add the commercial flat rep rate only if missing entirely.
     if (existingStates.has(p.state)) continue;
     out.push(...generateStateTariffs(p));
+  }
+  return out;
+}
+
+const GAS_REP_NOTE =
+  "IMPUTED (state-average): synthesized from the EIA-176 / Natural Gas Navigator 2024 state-average delivered price — NOT this LDC's filed tariff. Actual filed rates are used wherever the catalog has them; verify against your utility's current rate sheet before making decisions.";
+const WATER_REP_NOTE =
+  "IMPUTED (state-average): representative municipal water volumetric rate (AWWA/state rate-survey derived; sewer excluded) — NOT a filed rate schedule. Municipal rates vary widely by system; verify against your water bill.";
+
+/** Gas + water representative rates for one state: two gas rows (res + comm
+ * flat per-therm, monthly customer charge) named for the state's DOMINANT LDC
+ * from the territory registry (so ZIP → territory attribution → tariff lookup
+ * chains by utilityName), and one municipal water row (volumetric, stored
+ * per-GALLON per the cost-engine unit convention — see the AZ Phoenix row). */
+export function generateStateGasWaterTariffs(
+  p: StateProfile,
+  opts: { skipGas?: boolean; skipWater?: boolean } = {},
+): SeedTariff[] {
+  const out: SeedTariff[] = [];
+  const st = p.state.toLowerCase();
+  if (!opts.skipGas && p.gasUtilityName && p.gasResPerTherm && p.gasCommPerTherm) {
+    out.push(
+      {
+        urdbId: `rep-${st}-gas-res`,
+        utilityName: p.gasUtilityName,
+        name: `Residential Gas Service — ${p.state} (state-average imputed)`,
+        sector: "residential",
+        commodity: "gas",
+        state: p.state,
+        peakKwMin: null,
+        peakKwMax: null,
+        structure: {
+          fixedMonthly: 15,
+          energy: [{ label: "All gas ($/therm)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: p.gasResPerTherm }],
+          demand: [],
+          notes: GAS_REP_NOTE,
+        } as unknown as SeedTariff["structure"],
+        freshness: "urdb_stale",
+        effectiveDate: "2026-01-01",
+      },
+      {
+        urdbId: `rep-${st}-gas-comm`,
+        utilityName: p.gasUtilityName,
+        name: `Commercial Gas Service — ${p.state} (state-average imputed)`,
+        sector: "commercial",
+        commodity: "gas",
+        state: p.state,
+        peakKwMin: null,
+        peakKwMax: null,
+        structure: {
+          fixedMonthly: 40,
+          energy: [{ label: "All gas ($/therm)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: p.gasCommPerTherm }],
+          demand: [],
+          notes: GAS_REP_NOTE,
+        } as unknown as SeedTariff["structure"],
+        freshness: "urdb_stale",
+        effectiveDate: "2026-01-01",
+      },
+    );
+  }
+  if (!opts.skipWater && p.waterPerKgal) {
+    // Unit semantics: the cost engine multiplies ratePerUnit by usage in the
+    // METER'S unit (gallons for water) — the $/kgal rate is stored per-gallon.
+    const perGallon = Math.round((p.waterPerKgal / 1000) * 1e6) / 1e6;
+    out.push({
+      urdbId: `rep-${st}-water`,
+      utilityName: `${p.state} municipal water systems (representative)`,
+      name: `Municipal Water — Volumetric ($${p.waterPerKgal.toFixed(2)}/kgal, state-average imputed)`,
+      sector: "commercial",
+      commodity: "water",
+      state: p.state,
+      peakKwMin: null,
+      peakKwMax: null,
+      structure: {
+        fixedMonthly: 25,
+        energy: [{ label: `Volumetric ($${p.waterPerKgal.toFixed(2)}/kgal, priced per gallon)`, months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: perGallon }],
+        demand: [],
+        notes: WATER_REP_NOTE,
+      } as unknown as SeedTariff["structure"],
+      freshness: "urdb_stale",
+      effectiveDate: "2026-01-01",
+    });
+  }
+  return out;
+}
+
+/** National gas + water representative rates. AZ keeps its hand-modeled
+ * Southwest Gas residential + Phoenix water rows as authoritative; only the
+ * missing AZ commercial-gas row is generated. */
+export function generateNationalGasWaterTariffs(): SeedTariff[] {
+  const out: SeedTariff[] = [];
+  for (const p of STATE_PROFILES) {
+    if (p.state === "AZ") {
+      // Hand-modeled: Southwest Gas G-5 residential (gas) + City of Phoenix
+      // (water). Generate ONLY the commercial gas row — same LDC name.
+      out.push(...generateStateGasWaterTariffs(p, { skipWater: true }).filter((t) => t.sector === "commercial"));
+      continue;
+    }
+    out.push(...generateStateGasWaterTariffs(p));
   }
   return out;
 }

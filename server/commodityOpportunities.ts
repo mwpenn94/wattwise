@@ -34,6 +34,7 @@ import type { OpportunityCandidate } from "./analytics/scenarios";
 import type { MonthNormalRow } from "./analytics/baseline";
 import { COMMODITY_UNITS, TariffStructure, MODELED_ESTIMATES_DISCLAIMER } from "../shared/wattwise";
 import { resolveCommodityService } from "./commodityService";
+import { lookupTerritory } from "./serviceTerritories";
 
 export type XcOpportunity = OpportunityCandidate & {
   estUnitsSavedPerYr?: number;
@@ -46,6 +47,7 @@ interface SiteLite {
   buildingType: string | null;
   sqft: number | null;
   state: string | null;
+  zip?: string | null;
   utilityName?: string | null;
   servicesProfile?: unknown;
 }
@@ -109,7 +111,14 @@ async function resolveBasis(site: SiteLite, userId: number, com: "gas" | "water"
   return null;
 }
 
-/** Resolve the $/unit price for a commodity: assigned tariff → seeded state tariff → disclosed default. */
+/** Resolve the $/unit price for a commodity, actual-first with the tier
+ * notated in the label (owner directive Jul 19: "actual as able, imputed
+ * where required, notated accordingly"):
+ *   1. the meter's ASSIGNED tariff (closest to actual — user/bill-selected)
+ *   2. a FILED seeded tariff (hand-modeled, source ≠ state-average imputed)
+ *   3. the TERRITORY-ATTRIBUTED utility's state-average imputed row (the ZIP's
+ *      dominant LDC per the EIA-861/176 registry)
+ *   4. any state row → 5. disclosed national default. */
 async function resolveRate(site: SiteLite, userId: number, com: "gas" | "water"): Promise<{ rate: number; label: string }> {
   const meters = await h.listMeters(site.id, userId);
   const cMeter = meters.find((m) => m.commodity === com) ?? null;
@@ -123,9 +132,39 @@ async function resolveRate(site: SiteLite, userId: number, com: "gas" | "water")
   const assigned = await tryTariff(cMeter?.currentTariffId);
   if (assigned) return assigned;
   const seeded = site.state ? await h.listTariffs(com, site.state) : [];
-  for (const t of seeded) {
+  const rateOf = (t: (typeof seeded)[number]) => {
     const r = (t.structure as TariffStructure)?.energy?.[0]?.ratePerUnit;
-    if (typeof r === "number" && r > 0) return { rate: r, label: `seeded ${t.name} rate` };
+    return typeof r === "number" && r > 0 ? r : null;
+  };
+  // Tier 2: filed (non-imputed) seeded rows first — actual before imputed.
+  const isImputed = (t: (typeof seeded)[number]) => t.source === "state_representative_synthesized";
+  for (const t of seeded.filter((t) => !isImputed(t))) {
+    const r = rateOf(t);
+    if (r != null) return { rate: r, label: `seeded ${t.name} rate (filed-tariff modeled)` };
+  }
+  // Tier 3: territory-attributed utility's imputed row — the ZIP's dominant
+  // LDC per the registry, so the name on the estimate matches who actually
+  // serves the address.
+  if (site.zip && com === "gas") {
+    try {
+      const terr = await lookupTerritory(site.zip, com);
+      if (terr.covered && terr.utilities.length > 0) {
+        const match = seeded.find((t) => rateOf(t) != null && terr.utilities.includes(t.utilityName));
+        if (match) {
+          return {
+            rate: rateOf(match)!,
+            label: `${match.utilityName} — ${match.name} (territory-matched to your ZIP; state-average imputed, verify against your bill)`,
+          };
+        }
+      }
+    } catch {
+      /* territory lookup is best-effort — fall through to state row */
+    }
+  }
+  // Tier 4: any state row (imputed) — still notated.
+  for (const t of seeded) {
+    const r = rateOf(t);
+    if (r != null) return { rate: r, label: `seeded ${t.name} rate${isImputed(t) ? " (state-average imputed)" : ""}` };
   }
   return DEFAULT_RATE[com];
 }

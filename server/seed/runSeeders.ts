@@ -14,6 +14,7 @@ import {
   weatherNormals,
   zipSubregions,
   convergenceLog,
+  seedFreshness,
 } from "../../drizzle/schema";
 import { and, eq } from "drizzle-orm";
 import {
@@ -33,6 +34,7 @@ import {
   STATE_PROFILES,
   ZONE_STATIONS,
   generateNationalTariffs,
+  generateNationalGasWaterTariffs,
   zoneStationNormals,
 } from "./nationalData";
 
@@ -371,6 +373,94 @@ export async function seedNationalTariffs(db: Db) {
   return n;
 }
 
+/** Upsert one SeedTariff row keyed on (utilityName, name) — shared by the
+ * boot seeders and the weekly refresh re-assert path. Returns "inserted" |
+ * "updated". */
+async function upsertSeedTariff(db: Db, t: ReturnType<typeof generateNationalGasWaterTariffs>[number], sourceVersion: string): Promise<"inserted" | "updated"> {
+  const existing = await db
+    .select({ id: tariffs.id })
+    .from(tariffs)
+    .where(and(eq(tariffs.utilityName, t.utilityName), eq(tariffs.name, t.name)))
+    .limit(1);
+  if (existing.length === 0) {
+    await db.insert(tariffs).values({
+      urdbId: t.urdbId,
+      utilityName: t.utilityName,
+      name: t.name,
+      sector: t.sector,
+      commodity: t.commodity,
+      state: t.state,
+      peakKwMin: t.peakKwMin,
+      peakKwMax: t.peakKwMax,
+      structure: t.structure,
+      freshness: t.freshness,
+      effectiveDate: new Date(t.effectiveDate),
+      source: "state_representative_synthesized",
+      sourceVersion,
+    });
+    return "inserted";
+  }
+  await db
+    .update(tariffs)
+    .set({
+      urdbId: t.urdbId,
+      sector: t.sector,
+      state: t.state,
+      peakKwMin: t.peakKwMin,
+      peakKwMax: t.peakKwMax,
+      structure: t.structure,
+      effectiveDate: new Date(t.effectiveDate),
+      sourceVersion,
+    })
+    .where(eq(tariffs.id, existing[0].id));
+  return "updated";
+}
+
+/** RATE-2 (Jul 19): national gas + water representative rates — ~2 gas rows
+ * per state (res + comm flat $/therm, EIA-176 2024 state averages) named for
+ * the territory registry's dominant LDC so ZIP → territory attribution →
+ * tariff lookup chains by utilityName, plus 1 municipal water row per state
+ * ($/kgal stored per-gallon). Owner directive: actual as able, imputed where
+ * required, notated accordingly — every row's name AND structure.notes say
+ * "state-average imputed"; AZ's hand-modeled filed tariffs stay authoritative. */
+export async function seedNationalGasWaterTariffs(db: Db) {
+  if (await alreadySeeded(db, "tariffs_gas_water_national")) return 0;
+  let n = 0;
+  for (const t of generateNationalGasWaterTariffs()) {
+    await upsertSeedTariff(db, t, SEED_VERSION);
+    n++;
+  }
+  await recordRun(db, "tariffs_gas_water_national", n, "Public domain (EIA-176 2024 gas averages; AWWA/state water rate surveys)", "https://www.eia.gov/naturalgas/data.php", "Gas res+comm per state (50 states + DC, dominant-LDC named to match the service-territory registry) + 1 municipal water volumetric row per state; source=state_representative_synthesized, every row labeled state-average imputed with a verify-against-your-bill note; AZ hand-modeled Southwest Gas G-5 + City of Phoenix rows remain authoritative");
+  return n;
+}
+
+/** Weekly-refresh re-assert (RATE-4): re-emits every national representative
+ * rate row (electric + gas + water) under the given sourceVersion so drifted
+ * or manually damaged rows are healed and the vintage stamp advances. Rows
+ * whose values changed are updated in place (same identity key), so assigned
+ * meters keep their tariff ids. Returns counts for the owner notification. */
+export async function reassertNationalRates(sourceVersion: string): Promise<{ inserted: number; updated: number }> {
+  const db = await getDb();
+  if (!db) return { inserted: 0, updated: 0 };
+  const all = [...generateNationalTariffs(new Set(["AZ"])), ...generateNationalGasWaterTariffs()];
+  let inserted = 0;
+  let updated = 0;
+  for (const t of all) {
+    const r = await upsertSeedTariff(db, t, sourceVersion);
+    if (r === "inserted") inserted++;
+    else updated++;
+  }
+  // Advance the freshness stamp for the rate-averages source so the staleness
+  // sweep reflects this re-assert (seededAt = verification time).
+  const now = Date.now();
+  await db
+    .insert(seedFreshness)
+    .values({ source: "national_rate_averages", version: sourceVersion, seededAt: now, cadenceDays: 365, lastCheckedAt: now })
+    .onDuplicateKeyUpdate({ set: { version: sourceVersion, seededAt: now, lastCheckedAt: now } })
+    .catch(() => undefined);
+  return { inserted, updated };
+}
+
 export async function seedConvergenceLog(db: Db) {
   if (await alreadySeeded(db, "convergence_log")) return 0;
   const entries = [
@@ -408,6 +498,7 @@ export function ensureSeeded(): Promise<void> {
           tariffs: await seedTariffs(db),
           nationalWeather: await seedNationalWeather(db),
           nationalTariffs: await seedNationalTariffs(db),
+          gasWaterTariffs: await seedNationalGasWaterTariffs(db),
           archetypes: await seedArchetypes(db),
           convergence: await seedConvergenceLog(db),
         };

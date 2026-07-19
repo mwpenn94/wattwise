@@ -41,6 +41,7 @@ import { staleSeedsForDomain } from "../seedLifecycle";
 // Cross-commodity parity: gas/water opportunity generation rides along in the
 // same stage-7 pass as electric ranking (see the injection block below).
 import { generateCommodityOpportunities, type XcOpportunity } from "../commodityOpportunities";
+import { STATE_PROFILES } from "../seed/nationalData";
 import { resolveCommodityService } from "../commodityService";
 import type { Site, Meter } from "../../drizzle/schema";
 
@@ -1306,7 +1307,9 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // Batch-18 (pass 419): pass the raw window total so short-history sites (<25
   // days, annualUsage null) still get their real blended rate instead of the
   // $0.12 fallback — the rate is window-invariant even when annualization isn't.
-  const { rate: kWhRate, isFallback: rateIsFallback, fallbackReason } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null, hasIntervals && points.length > 0);
+  const stateProfileRow = site.state ? STATE_PROFILES.find((p) => p.state === site.state) : null;
+  const stateAvgRate = stateProfileRow ? { rate: stateProfileRow.commRateCents / 100, state: stateProfileRow.state } : null;
+  const { rate: kWhRate, isFallback: rateIsFallback, fallbackReason, fallbackBasis } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null, hasIntervals && points.length > 0, stateAvgRate);
   // Batch-19 (pass 539): the disclosure names the actual cause — a customer
   // with usage data but no identified tariff was being told their "cost basis
   // could not be established", which misdirects them toward re-uploading data
@@ -1314,12 +1317,13 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // Batch-41 (pass 1769): a third cause — valid interval data that is export-
   // dominated (no positive net-import kWh) — must not be blamed on "usage data"
   // the customer did in fact upload; the blended-rate math is import-only.
+  const priceBasisPhrase = fallbackBasis ?? "a $0.12/kWh national-average assumption";
   const fallbackRateDisclosure =
     fallbackReason === "no_tariff_cost_basis"
-      ? "Savings priced at a $0.12/kWh national-average assumption because no tariff could be identified to compute your real rate — select or verify your tariff to price savings at your actual rate."
+      ? `Savings priced at ${priceBasisPhrase} because no tariff could be identified to compute your real rate — select or verify your tariff to price savings at your actual rate.`
       : fallbackReason === "no_net_import"
-        ? "Savings priced at a $0.12/kWh national-average assumption: your interval data is valid but shows no positive net-import energy (export-dominated profile), and the blended-rate calculation is based on imported kWh only."
-        : "Savings priced at a $0.12/kWh national-average assumption because your annual cost basis could not be established — actual savings scale with your real rate.";
+        ? `Savings priced at ${priceBasisPhrase}: your interval data is valid but shows no positive net-import energy (export-dominated profile), and the blended-rate calculation is based on imported kWh only.`
+        : `Savings priced at ${priceBasisPhrase} because your annual cost basis could not be established — actual savings scale with your real rate.`;
   if (demand && currentCost) {
     const anyRatchet = currentCost.monthlyDetails.some((m) => m.ratchetApplied);
     const demandRate = currentCost.breakdown.demand > 0 && demand.peakKw > 0 ? currentCost.breakdown.demand / 12 / demand.peakKw : 0;
@@ -1494,7 +1498,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   try {
     const currentCommodity = meter?.commodity ?? "electric";
     const xc = (await generateCommodityOpportunities(
-      { id: site.id, buildingType: site.buildingType, sqft: site.sqft, state: site.state },
+      { id: site.id, buildingType: site.buildingType, sqft: site.sqft, state: site.state, zip: site.zip },
       userId,
       normals,
       narrate,
@@ -1712,7 +1716,8 @@ function estimateBlendedRate(
   annualUsage: number | null,
   rawUsageKwh?: number | null,
   hasAnyPoints?: boolean,
-): { rate: number; isFallback: boolean; fallbackReason?: "no_tariff_cost_basis" | "no_usage_data" | "no_net_import" } {
+  stateAvg?: { rate: number; state: string } | null,
+): { rate: number; isFallback: boolean; fallbackReason?: "no_tariff_cost_basis" | "no_usage_data" | "no_net_import"; fallbackBasis?: string } {
   // All-in blended rate: total annual cost (energy + demand + fixed + CP − export)
   // per kWh (cycle 1, passes 9/19). Energy-only understates ¢/kWh on
   // demand-heavy tariffs and inflates opportunity paybacks.
@@ -1744,10 +1749,24 @@ function estimateBlendedRate(
   // them toward re-uploading valid data. The blended rate is import-only by
   // design; name that condition specifically.
   const hasPositiveUsage = (annualUsage && annualUsage > 0) || (rawUsageKwh && rawUsageKwh > 0);
+  // Owner directive (Jul 19, "actual as able, imputed where required, notated
+  // accordingly"): before dropping all the way to the generic $0.12 national
+  // assumption, use the site's STATE-average commercial retail rate (EIA-861
+  // 2024, seeded in STATE_PROFILES) — a materially better imputation (state
+  // averages span ~9¢ WY to ~40¢ HI) that is still explicitly notated.
+  if (stateAvg && Number.isFinite(stateAvg.rate) && stateAvg.rate > 0) {
+    return {
+      rate: stateAvg.rate,
+      isFallback: true,
+      fallbackReason: hasPositiveUsage ? "no_tariff_cost_basis" : hasAnyPoints ? "no_net_import" : "no_usage_data",
+      fallbackBasis: `the ${stateAvg.state} state-average rate ($${stateAvg.rate.toFixed(3)}/kWh, EIA-861 2024 — state-average imputed)`,
+    };
+  }
   return {
     rate: 0.12,
     isFallback: true,
     fallbackReason: hasPositiveUsage ? "no_tariff_cost_basis" : hasAnyPoints ? "no_net_import" : "no_usage_data",
+    fallbackBasis: "a $0.12/kWh national-average assumption",
   };
 }
 

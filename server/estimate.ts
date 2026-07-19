@@ -19,6 +19,7 @@ import * as h from "./dbHelpers";
 import { costOnTariff, tariffEligible } from "./analytics/tariffEngine";
 import type { TariffStructure } from "../shared/wattwise";
 import { buildAccuracyLadder } from "../shared/capabilityMatrix"; // accuracy ladder + cross-commodity gas teaser
+import { lookupTerritory } from "./serviceTerritories";
 
 /* ---------------- IP rate limiting (public endpoint guard) ---------------- */
 const BUCKET_MAX = 12; // estimates per window per IP
@@ -201,24 +202,58 @@ export async function computeAddressEstimate(input: {
   const gasBench = await h.getBenchmark(input.buildingType, "gas");
   if (gasBench && sqft > 0) {
     const annualTherms = gasBench.medianEui * sqft;
+    // Rate ladder (owner directive Jul 19 — "actual as able, imputed where
+    // required, notated accordingly"): 1) filed/hand-modeled seeded tariff
+    // for the state (sector-matched preferred), 2) the ZIP's territory-
+    // attributed LDC's state-average imputed row, 3) any state row (notated
+    // imputed), 4) disclosed EIA national average. Anonymous estimates have
+    // no assigned tariff, so the ladder starts at the filed tier.
     let gasRate: number | null = null;
     let gasTariffName: string | null = null;
+    let gasTier: "filed" | "territory_imputed" | "state_imputed" | "national" = "national";
     const gasTariffs = state ? await h.listTariffs("gas", state) : [];
-    for (const t of gasTariffs) {
+    const rateOf = (t: (typeof gasTariffs)[number]) => {
       const r = (t.structure as TariffStructure)?.energy?.[0]?.ratePerUnit;
-      if (typeof r === "number" && r > 0 && (gasRate == null || r < gasRate)) {
-        gasRate = r;
-        gasTariffName = t.name;
+      return typeof r === "number" && r > 0 ? r : null;
+    };
+    const isImputedRow = (t: (typeof gasTariffs)[number]) => t.source === "state_representative_synthesized";
+    const sectorPreferred = (rows: typeof gasTariffs) =>
+      [...rows.filter((t) => t.sector === sector), ...rows.filter((t) => t.sector !== sector)];
+    for (const t of sectorPreferred(gasTariffs.filter((t) => !isImputedRow(t)))) {
+      const r = rateOf(t);
+      if (r != null) { gasRate = r; gasTariffName = t.name; gasTier = "filed"; break; }
+    }
+    if (gasRate == null && zip) {
+      try {
+        const terr = await lookupTerritory(zip, "gas");
+        if (terr.covered && terr.utilities.length > 0) {
+          const match = sectorPreferred(gasTariffs).find((t) => rateOf(t) != null && terr.utilities.includes(t.utilityName));
+          if (match) { gasRate = rateOf(match); gasTariffName = `${match.utilityName} — ${match.name}`; gasTier = "territory_imputed"; }
+        }
+      } catch { /* territory lookup is best-effort — fall through to state row */ }
+    }
+    if (gasRate == null) {
+      for (const t of sectorPreferred(gasTariffs)) {
+        const r = rateOf(t);
+        if (r != null) { gasRate = r; gasTariffName = t.name; gasTier = "state_imputed"; break; }
       }
     }
     if (gasRate == null) gasRate = 1.2; // EIA 2025 national average $/therm — disclosed below
+    const gasRateNote =
+      gasTier === "filed"
+        ? `the seeded ${gasTariffName} rate (filed-tariff modeled)`
+        : gasTier === "territory_imputed"
+          ? `${gasTariffName}, territory-matched to your ZIP (state-average imputed — verify against your bill)`
+          : gasTier === "state_imputed"
+            ? `the seeded ${gasTariffName} rate (state-average imputed — verify against your bill)`
+            : "the EIA national average $1.20/therm (no seeded rate matched)";
     const gasAnnualCost = annualTherms * gasRate;
     gasEstimate = {
       annualTherms: Math.round(annualTherms),
       annualCostUsd: Math.round(gasAnnualCost),
       monthlyCostUsd: Math.round(gasAnnualCost / 12),
       tariffName: gasTariffName,
-      basis: `If your building uses natural gas: benchmark-imputed — ${gasBench.medianEui} ${gasBench.unit} (${gasBench.source}) × ${sqft.toLocaleString()} sqft, priced at ${gasTariffName ? `the seeded ${gasTariffName} rate` : "the EIA national average $1.20/therm"}. All-electric buildings can ignore this line.`,
+      basis: `If your building uses natural gas: benchmark-imputed — ${gasBench.medianEui} ${gasBench.unit} (${gasBench.source}) × ${sqft.toLocaleString()} sqft, priced at ${gasRateNote}. All-electric buildings can ignore this line.`,
     };
   }
 

@@ -409,3 +409,15 @@
 - [x] CUR-1: Currency maintenance — verification metadata (lastVerifiedAt, sourceVersion) on incentives + service territories; reports disclose data freshness
 - [x] CUR-2: Scheduled refresh jobs (Heartbeat + agent-verifier) keep incentive programs and the territory registry current; stale data flagged, expired programs never render
 - [x] CUR-3: Refresh endpoints idempotent + cron-authenticated; owner notified of material changes
+
+## National rates/plans + reference-data currency sweep (requested Jul 19)
+- [x] RATE-1: Audit current tariff/rate coverage (per-utility vs national-average fallback) and inventory ALL reference datasets (tariffs, benchmarks, weather normals, emissions/eGRID, climate zones, archetypes) for coverage + currency gaps
+- [x] RATE-2: Seed rates/plans nationally for the territory-registry utilities (EIA-861 avg retail rates per utility/state + commodity), versioned vintage + lastVerifiedAt, honest provenance (utility-average vs schedule-level)
+- [x] RATE-3: Rate resolution ladder — site's attributed utility rate → state average → national blend, each disclosed with provenance and vintage
+- [x] RATE-4: Extend the weekly refreshReference cron to re-verify/supersede rates and stamp freshness on all reference datasets; owner notified of material changes
+- [x] RATE-5: Freshness disclosure wherever rates render (estimates, reports, scenarios); tests + live verification + checkpoint
+
+## Owner directive (Jul 19): "actual as able, imputed where required, notated accordingly"
+- [x] PROV-1: Every seeded gas/water rate row explicitly labeled imputed (state-average) in its name/notes; hand-modeled filed tariffs (AZ set) remain authoritative and labeled as filed
+- [x] PROV-2: Rate resolution is actual-first everywhere: bill-verified/assigned tariff → filed seeded tariff → territory-matched state-average imputed → national fallback, each tier notated in the rendered basis string
+- [x] PROV-3: Scenario/implementation pricing ($0.12/kWh hardcodes) upgraded: actual blended rate when available, else state-average imputed with notation, national assumption only as last resort

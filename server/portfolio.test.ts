@@ -77,17 +77,20 @@ describe("§3i-2 utility registry + roll-up (live procedures)", () => {
     expect(reg.electric.some((u: string) => /APS|Arizona Public Service|SRP|Salt River|TEP|Tucson|UNS/i.test(u))).toBe(true);
   });
 
-  it("VT (national fallback coverage) lists its real electric provider and fabricates no gas/water providers", async () => {
+  it("VT (national coverage) lists its real electric, gas, and water providers from the seeded snapshot", async () => {
     const { appRouter } = await import("./routers");
     const caller = appRouter.createCaller({
       user: { id: 999901, openId: "test-portfolio-reg", name: "T", role: "user", tier: "pro" },
     } as never);
     const reg = await caller.tariffs.utilitiesForState({ state: "VT" });
-    // Seeded national snapshot carries one electric provider per state —
-    // Green Mountain Power for VT — but no VT gas or water rates.
+    // National snapshot: Green Mountain Power (electric), Vermont Gas Systems
+    // (dominant LDC, EIA-176-derived state-average imputed rates), and a
+    // representative municipal water row — RATE-2 (owner directive Jul 19)
+    // extended gas/water to every state; providers still come ONLY from the
+    // seeded snapshot, never fabricated at query time.
     expect(reg.electric.some((u: string) => /Green Mountain/i.test(u))).toBe(true);
-    expect(reg.gas).toEqual([]);
-    expect(reg.water).toEqual([]);
+    expect(reg.gas.some((u: string) => /Vermont Gas/i.test(u))).toBe(true);
+    expect(reg.water.some((u: string) => /municipal water/i.test(u))).toBe(true);
   });
 
   it("a nonexistent state code returns empty arrays, not fabricated providers", async () => {
