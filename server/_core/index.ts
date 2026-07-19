@@ -8,7 +8,7 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
-import { digestHandler } from "../scheduledHandlers";
+import { digestHandler, refreshReferenceHandler } from "../scheduledHandlers";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -39,6 +39,7 @@ async function startServer() {
   registerOAuthRoutes(app);
   // Heartbeat cron callbacks — must be mounted before the Vite/static fallthrough
   app.post("/api/scheduled/digest", digestHandler);
+  app.post("/api/scheduled/refreshReference", refreshReferenceHandler);
   // tRPC API
   app.use(
     "/api/trpc",

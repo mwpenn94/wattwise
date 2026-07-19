@@ -39,7 +39,7 @@ export interface ReportMeasure {
   unitSavings: { value: number; unit: string } | null;
   demandSavingsKw: number | null;
   /** Live incentive matches for this measure (never-expired, named sources). */
-  rebates: Array<{ name: string; valueUsd: number; source: string }>;
+  rebates: Array<{ name: string; valueUsd: number; source: string; url: string | null; kind: string; basis: string }>;
 }
 
 export interface VerdictRow {
@@ -71,6 +71,30 @@ export interface ReportData {
     confidence: string | null;
     monthsUsed: number | null;
   } | null;
+  /** REB (Jul 19) — rebates summary: capturable dollars across the whole
+   * planned basket, per-program rows with application links, plus data
+   * freshness so the report never presents stale program terms as current. */
+  rebatesSummary: {
+    totalUsd: number;
+    /** recurring annual payments (DR programs) — kept separate from one-time capture */
+    totalAnnualUsd: number;
+    programs: Array<{
+      name: string;
+      source: string;
+      url: string | null;
+      kind: string;
+      /** one-time capturable dollars across all matched measures */
+      valueUsd: number;
+      /** recurring $/yr (dr_payment) */
+      annualUsd: number;
+      /** honest basis: fixed | percent_of_cost | per_unit_rate | performance_paid */
+      basis: string;
+      measures: string[];
+      expiresAt: number | null;
+    }>;
+    /** freshness disclosure: oldest verification across matched programs */
+    dataAsOf: { sourceVersion: string; lastVerifiedAt: number | null } | null;
+  };
   disclaimer: string;
 }
 
@@ -102,7 +126,7 @@ export async function assembleReportData(siteId: number, userId: number): Promis
       .map(async (o) => {
         const prov = (o.provenance ?? null) as Record<string, unknown> | null;
         const commodity = ((prov?.commodity as string | undefined) ?? "electric") as "electric" | "gas" | "water";
-        let rebates: Array<{ name: string; valueUsd: number; source: string }> = [];
+        let rebates: Array<{ name: string; valueUsd: number; source: string; url: string | null; kind: string; basis: string }> = [];
         try {
           const { matchIncentives } = await import("./incentives");
           const matches = await matchIncentives({
@@ -119,6 +143,9 @@ export async function assembleReportData(siteId: number, userId: number): Promis
               name: m.ratePerUnitSaved != null && m.valueUsd <= 0 ? `${m.name} ($${m.ratePerUnitSaved}/${m.rateUnit ?? "unit"} saved)` : m.name,
               valueUsd: m.valueUsd > 0 ? m.valueUsd : (m.annualUsd ?? 0),
               source: m.sourceName,
+              url: m.sourceUrl ?? null,
+              kind: m.kind,
+              basis: m.kind === "dr_payment" ? "performance_paid" : m.ratePerUnitSaved != null && m.valueUsd <= 0 ? "per_unit_rate" : "fixed",
             }));
         } catch {
           /* incentive matching never blocks report assembly */
@@ -139,6 +166,49 @@ export async function assembleReportData(siteId: number, userId: number): Promis
       }),
   );
   const plannedTotalUsd = measures.reduce((a, m) => a + (m.annualSavingsUsd ?? 0), 0);
+
+  // REB (Jul 19): rebates summary — aggregate per program across the basket so
+  // the Energy Plan shows total capturable dollars with application links.
+  const programAgg = new Map<string, ReportData["rebatesSummary"]["programs"][number]>();
+  for (const m of measures) {
+    for (const r of m.rebates) {
+      const key = `${r.source}::${r.name.replace(/ \(\$[^)]*\)$/, "")}`;
+      const row = programAgg.get(key) ?? {
+        name: r.name.replace(/ \(\$[^)]*\)$/, ""),
+        source: r.source,
+        url: r.url,
+        kind: r.kind,
+        valueUsd: 0,
+        annualUsd: 0,
+        basis: r.basis,
+        measures: [],
+        expiresAt: null,
+      };
+      if (r.basis === "performance_paid") row.annualUsd += r.valueUsd;
+      else row.valueUsd += r.valueUsd;
+      if (!row.measures.includes(m.title)) row.measures.push(m.title);
+      if (!row.url && r.url) row.url = r.url;
+      programAgg.set(key, row);
+    }
+  }
+  const programs = Array.from(programAgg.values()).sort((a, b) => b.valueUsd + b.annualUsd - (a.valueUsd + a.annualUsd));
+  // Freshness: oldest verification among the matched programs' DB rows — the
+  // report is only as current as its stalest source.
+  let dataAsOf: ReportData["rebatesSummary"]["dataAsOf"] = null;
+  if (programs.length > 0) {
+    try {
+      const { incentiveFreshness } = await import("./incentives");
+      dataAsOf = await incentiveFreshness();
+    } catch {
+      /* freshness lookup never blocks report assembly */
+    }
+  }
+  const rebatesSummary: ReportData["rebatesSummary"] = {
+    totalUsd: programs.reduce((a, p) => a + p.valueUsd, 0),
+    totalAnnualUsd: programs.reduce((a, p) => a + p.annualUsd, 0),
+    programs,
+    dataAsOf,
+  };
 
   // Prove-it verdict ledger.
   const verdicts: VerdictRow[] = impls.map((i) => {
@@ -173,6 +243,7 @@ export async function assembleReportData(siteId: number, userId: number): Promis
     plannedTotalUsd,
     verdicts,
     verifiedTotalUsd,
+    rebatesSummary,
     baseline: params
       ? {
           method: params.method ?? null,
@@ -206,6 +277,19 @@ export function practitionerCsv(d: ReportData): string {
         esc(m.unitSavings ? `${Math.round(m.unitSavings.value).toLocaleString()} ${m.unitSavings.unit}/yr` : ""),
         esc(m.demandSavingsKw != null ? m.demandSavingsKw : ""),
         esc((m.rebates ?? []).map((r) => `${r.name} ($${Math.round(r.valueUsd).toLocaleString()})`).join("; ")),
+      ].join(","),
+    );
+  for (const p of d.rebatesSummary?.programs ?? [])
+    lines.push(
+      [
+        "rebate_program",
+        esc(p.name),
+        esc(p.valueUsd > 0 ? Math.round(p.valueUsd) : Math.round(p.annualUsd)),
+        p.basis === "fixed" ? "Good" : "Est.",
+        esc(`${p.basis}; applies to: ${p.measures.join(" / ")}; apply: ${p.url ?? "see " + p.source}`),
+        "",
+        "",
+        esc(p.source),
       ].join(","),
     );
   for (const v of d.verdicts) lines.push(["implementation", esc(v.measure), esc(v.verifiedSavingsUsd), v.chip, esc(`status ${v.status}; ${v.months} month(s) evaluated`), "", "", ""].join(","));

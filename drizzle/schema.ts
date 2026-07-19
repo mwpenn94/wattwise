@@ -590,6 +590,8 @@ export const serviceTerritories = mysqlTable(
     /** Empty string = sentinel: territory positively known unserved. */
     utilityName: varchar("utilityName", { length: 255 }).notNull(),
     sourceVersion: varchar("sourceVersion", { length: 64 }).notNull(),
+    /** CUR (Jul 19) — ms epoch of last refresh that confirmed this row. */
+    lastVerifiedAt: bigint("lastVerifiedAt", { mode: "number" }),
   },
   (t) => [index("territory_zip3_idx").on(t.zip3, t.commodity)],
 );
@@ -891,6 +893,13 @@ export const incentives = mysqlTable(
     sourceUrl: varchar("sourceUrl", { length: 255 }),
     notes: text("notes"),
     createdAt: bigint("createdAt", { mode: "number" }).notNull(),
+    /** CUR (Jul 19) currency maintenance — ms epoch of the last automated
+     * re-verification against the authoritative source; null = never verified
+     * since seed. Reports disclose freshness from this. */
+    lastVerifiedAt: bigint("lastVerifiedAt", { mode: "number" }),
+    /** Versioned provenance of the row's current values (e.g. "seed.1",
+     * "verify.2026-07-19"). Refresh runs supersede by writing a new version. */
+    sourceVersion: varchar("sourceVersion", { length: 64 }).default("seed.1").notNull(),
   },
 );
 export type Incentive = typeof incentives.$inferSelect;

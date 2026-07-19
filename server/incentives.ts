@@ -75,6 +75,7 @@ const SEED: SeedIncentive[] = [
     amountValue: 0.3,
     expires: "2033-12-31",
     sourceName: "IRS — 26 U.S.C. §48E",
+    sourceUrl: "https://www.irs.gov/credits-deductions/clean-electricity-investment-credit",
     notes: "Base 30% with prevailing-wage compliance for systems >1MW; smaller commercial systems qualify at 30%.",
   },
   {
@@ -88,6 +89,7 @@ const SEED: SeedIncentive[] = [
     amountType: "fixed_usd",
     amountValue: 1.0,
     sourceName: "IRS — 26 U.S.C. §179D",
+    sourceUrl: "https://www.irs.gov/credits-deductions/energy-efficient-commercial-buildings-deduction",
     notes: "Up to ~$1.00–$5.00 per sqft depending on savings and wage compliance; we quote the conservative floor per sqft. Who benefits: building OWNER (or designer for public buildings).",
   },
   {
@@ -102,6 +104,7 @@ const SEED: SeedIncentive[] = [
     amountType: "usd_per_year",
     amountValue: 50,
     sourceName: "APS Cool Rewards program",
+    sourceUrl: "https://www.aps.com/en/Residential/Save-Money-and-Energy/Programs/Cool-Rewards",
     notes: "Enrollment credit plus annual participation credit — THEY PAY YOU. Utility may briefly adjust your thermostat during summer peak events; you can override.",
   },
   {
@@ -116,6 +119,7 @@ const SEED: SeedIncentive[] = [
     amountType: "usd_per_year",
     amountValue: 25,
     sourceName: "SRP BYOT program",
+    sourceUrl: "https://www.srpnet.com/energy-savings-rebates/home/rebates/thermostats",
     notes: "Annual bill credit per enrolled thermostat — THEY PAY YOU.",
   },
   {
@@ -131,6 +135,7 @@ const SEED: SeedIncentive[] = [
     amountValue: 0.35,
     amountCapUsd: 20_000,
     sourceName: "PSE Business Lighting program",
+    sourceUrl: "https://www.pse.com/en/business-incentives/business-lighting",
     notes: "Prescriptive + custom lighting rebates, roughly 20–50% of project cost; we quote 35% capped at $20k.",
   },
   {
@@ -148,6 +153,7 @@ const SEED: SeedIncentive[] = [
     unitLabel: "kWh",
     amountCapUsd: 300_000,
     sourceName: "APS Business Custom incentives",
+    sourceUrl: "https://www.aps.com/en/Business/Save-Money-and-Energy/Rebates-and-Discounts/Solutions-for-Business",
     notes: "Custom (non-prescriptive) projects are paid per first-year kWh saved — program rates historically ~$0.05–$0.11/kWh; we quote a mid-range $0.08/kWh snapshot, capped. Savings must be supported by engineering calculations or M&V — the Verified Savings (M&V) panel produces the implementer-ready numbers.",
   },
   {
@@ -165,6 +171,7 @@ const SEED: SeedIncentive[] = [
     unitLabel: "kWh",
     amountCapUsd: 200_000,
     sourceName: "SRP Business Solutions custom incentives",
+    sourceUrl: "https://www.srpnet.com/energy-savings-rebates/business",
     notes: "Custom measures paid per first-year kWh saved (snapshot ~$0.05/kWh). First-year unit savings from the scenario or M&V panel feed this directly.",
   },
   {
@@ -182,6 +189,7 @@ const SEED: SeedIncentive[] = [
     unitLabel: "therm",
     amountCapUsd: 50_000,
     sourceName: "Southwest Gas energy-efficiency programs",
+    sourceUrl: "https://www.swgas.com/en/energy-efficiency",
     notes: "Gas efficiency measures paid per first-year therm saved (snapshot ~$1.00/therm, program-dependent).",
   },
   {
@@ -230,6 +238,82 @@ export async function seedIncentives(): Promise<void> {
     });
   }
   seededOnce = true;
+}
+
+/* ------------------------------------------------------------------ */
+/* CUR (Jul 19) — currency maintenance                                 */
+/* ------------------------------------------------------------------ */
+
+/** Freshness disclosure for reports: the catalog is only as current as its
+ * stalest active row. Returns the oldest verification timestamp among
+ * non-expired rows (falling back to createdAt for never-verified rows) and
+ * the prevailing sourceVersion. Null when the catalog is empty/unavailable. */
+export async function incentiveFreshness(): Promise<{ sourceVersion: string; lastVerifiedAt: number | null } | null> {
+  const db = await getDb();
+  if (!db) return null;
+  await seedIncentives();
+  const rows = await db.select({ lastVerifiedAt: incentives.lastVerifiedAt, createdAt: incentives.createdAt, sourceVersion: incentives.sourceVersion, expiresAt: incentives.expiresAt }).from(incentives);
+  const now = Date.now();
+  const active = rows.filter((r) => r.expiresAt == null || r.expiresAt >= now);
+  if (active.length === 0) return null;
+  const oldest = active.reduce((min, r) => Math.min(min, r.lastVerifiedAt ?? r.createdAt), Number.POSITIVE_INFINITY);
+  // Report the version of the stalest row — honest lower bound on currency.
+  const stalest = active.find((r) => (r.lastVerifiedAt ?? r.createdAt) === oldest);
+  return { sourceVersion: stalest?.sourceVersion ?? "seed.1", lastVerifiedAt: Number.isFinite(oldest) ? oldest : null };
+}
+
+/** Scheduled re-verification pass (Heartbeat). Mechanical currency work that
+ * belongs in-process: re-assert every active row against the current seed
+ * catalog (the in-repo authoritative snapshot), stamp lastVerifiedAt, bump
+ * sourceVersion, and report rows needing human attention — rows expiring
+ * within 90 days and rows already expired (which never render regardless).
+ * Deep source re-verification (browsing DSIRE/utility pages) is agent work,
+ * intentionally out of scope for this handler. */
+export async function verifyIncentiveCatalog(now = Date.now()): Promise<{
+  verified: number;
+  expiringSoon: string[];
+  expired: string[];
+}> {
+  const db = await getDb();
+  if (!db) return { verified: 0, expiringSoon: [], expired: [] };
+  await seedIncentives();
+  const version = `verify.${new Date(now).toISOString().slice(0, 10)}`;
+  const rows = await db.select().from(incentives);
+  const seedByCode = new Map(SEED.map((s) => [s.code, s]));
+  let verified = 0;
+  const expiringSoon: string[] = [];
+  const expired: string[] = [];
+  const soonMs = 90 * 24 * 3600 * 1000;
+  for (const r of rows) {
+    if (r.expiresAt != null && r.expiresAt < now) {
+      expired.push(r.code);
+      continue; // expired rows are left untouched — they never render
+    }
+    const s = seedByCode.get(r.code);
+    if (s) {
+      // Re-assert seed-managed values (amount/expiry/url may have been
+      // corrected in a newer deploy's catalog) and stamp verification.
+      await db
+        .update(incentives)
+        .set({
+          amountValue: s.amountValue,
+          amountCapUsd: s.amountCapUsd ?? null,
+          expiresAt: s.expires ? new Date(s.expires + "T23:59:59Z").getTime() : null,
+          sourceUrl: s.sourceUrl ?? null,
+          sourceName: s.sourceName,
+          lastVerifiedAt: now,
+          sourceVersion: version,
+        })
+        .where(eq(incentives.id, r.id));
+    } else {
+      // Row not in the current catalog (e.g. added manually) — stamp the
+      // check only; values are left alone and flagged for human review.
+      await db.update(incentives).set({ lastVerifiedAt: now }).where(eq(incentives.id, r.id));
+    }
+    verified += 1;
+    if (r.expiresAt != null && r.expiresAt - now < soonMs) expiringSoon.push(r.code);
+  }
+  return { verified, expiringSoon, expired };
 }
 
 /* ------------------------------------------------------------------ */

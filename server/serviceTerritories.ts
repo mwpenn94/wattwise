@@ -23,8 +23,9 @@
  */
 import { getDb } from "./db";
 import { serviceTerritories } from "../drizzle/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import type { Commodity } from "./commodityService";
+import { NATIONAL_TERRITORIES, NATIONAL_UNSERVED, NATIONAL_SOURCE_VERSION } from "./serviceTerritoriesData";
 
 export interface TerritoryLookup {
   /** Whether the registry covers this ZIP3 for this commodity at all. */
@@ -36,7 +37,7 @@ export interface TerritoryLookup {
   sourceVersion: string | null;
 }
 
-const SOURCE_VERSION = "eia861-2024+puc-seed.1";
+const SOURCE_VERSION = NATIONAL_SOURCE_VERSION;
 
 /**
  * Seed registry — ZIP3 rows for the territories the product has priced
@@ -82,7 +83,30 @@ const KNOWN_UNSERVED: Array<{ zip3: string; state: string; commodity: Commodity 
 
 let seededOnce = false;
 
-/** Idempotent seeding, mirroring the seedIncentives pattern. */
+/** The full current catalog: AZ hand-curated rows + the national EIA-861
+ * dataset. AZ rows keep their richer multi-utility detail; national rows
+ * cover the other states at ZIP3 granularity. */
+function currentCatalog(): {
+  serving: Array<{ zip3: string; state: string; commodity: Commodity; utilityName: string }>;
+  unserved: Array<{ zip3: string; state: string; commodity: Commodity }>;
+} {
+  const seen = new Set(SEED.map((s) => `${s.zip3}|${s.commodity}|${s.utilityName}`));
+  const serving = [
+    ...SEED,
+    ...NATIONAL_TERRITORIES.filter((n) => !seen.has(`${n.zip3}|${n.commodity}|${n.utilityName}`)),
+  ];
+  const unservedSeen = new Set(KNOWN_UNSERVED.map((u) => `${u.zip3}|${u.commodity}`));
+  // A ZIP3 with serving rows can't simultaneously be unserved — serving wins.
+  const servingKeys = new Set(serving.map((s) => `${s.zip3}|${s.commodity}`));
+  const unserved = [
+    ...KNOWN_UNSERVED,
+    ...NATIONAL_UNSERVED.filter((u) => !unservedSeen.has(`${u.zip3}|${u.commodity}`) && !servingKeys.has(`${u.zip3}|${u.commodity}`)),
+  ];
+  return { serving, unserved };
+}
+
+/** Idempotent seeding, mirroring the seedIncentives pattern. Seeds only when
+ * the table is empty; the scheduled refresh (below) handles upgrades. */
 export async function seedServiceTerritories(): Promise<void> {
   if (seededOnce) return;
   const db = await getDb();
@@ -92,12 +116,82 @@ export async function seedServiceTerritories(): Promise<void> {
     seededOnce = true;
     return;
   }
+  const { serving, unserved } = currentCatalog();
+  const now = Date.now();
   const rows = [
-    ...SEED.map((s) => ({ ...s, sourceVersion: SOURCE_VERSION })),
-    ...KNOWN_UNSERVED.map((s) => ({ ...s, utilityName: "", sourceVersion: SOURCE_VERSION })),
+    ...serving.map((s) => ({ ...s, sourceVersion: SOURCE_VERSION, lastVerifiedAt: now })),
+    ...unserved.map((s) => ({ ...s, utilityName: "", sourceVersion: SOURCE_VERSION, lastVerifiedAt: now })),
   ];
-  await db.insert(serviceTerritories).values(rows);
+  // Chunk inserts — the national catalog is thousands of rows.
+  for (let i = 0; i < rows.length; i += 500) {
+    await db.insert(serviceTerritories).values(rows.slice(i, i + 500));
+  }
   seededOnce = true;
+}
+
+/**
+ * CUR (Jul 19) — scheduled currency refresh with versioned supersession.
+ * Re-ingests the current catalog under SOURCE_VERSION: upserts every row,
+ * stamps lastVerifiedAt, then deletes rows belonging to older sourceVersions
+ * (superseded vintages) — only after the new ingest succeeded, so a failed
+ * refresh can never leave the registry emptier than before.
+ */
+export async function refreshServiceTerritories(now = Date.now()): Promise<{
+  inserted: number;
+  verified: number;
+  superseded: number;
+}> {
+  const db = await getDb();
+  if (!db) return { inserted: 0, verified: 0, superseded: 0 };
+  const { serving, unserved } = currentCatalog();
+  const target = [
+    ...serving.map((s) => ({ ...s, utilityName: s.utilityName })),
+    ...unserved.map((s) => ({ ...s, utilityName: "" })),
+  ];
+  const existing = await db
+    .select({ id: serviceTerritories.id, zip3: serviceTerritories.zip3, commodity: serviceTerritories.commodity, utilityName: serviceTerritories.utilityName, sourceVersion: serviceTerritories.sourceVersion })
+    .from(serviceTerritories);
+  const byKey = new Map(existing.map((r) => [`${r.zip3}|${r.commodity}|${r.utilityName}`, r]));
+  let inserted = 0;
+  let verified = 0;
+  const keptIds = new Set<number>();
+  const toInsert: Array<typeof serviceTerritories.$inferInsert> = [];
+  for (const t of target) {
+    const hit = byKey.get(`${t.zip3}|${t.commodity}|${t.utilityName}`);
+    if (hit) {
+      keptIds.add(hit.id);
+      verified += 1;
+      await db
+        .update(serviceTerritories)
+        .set({ lastVerifiedAt: now, sourceVersion: SOURCE_VERSION, state: t.state })
+        .where(eq(serviceTerritories.id, hit.id));
+    } else {
+      toInsert.push({ zip3: t.zip3, state: t.state, commodity: t.commodity, utilityName: t.utilityName, sourceVersion: SOURCE_VERSION, lastVerifiedAt: now });
+    }
+  }
+  for (let i = 0; i < toInsert.length; i += 500) {
+    const chunk = toInsert.slice(i, i + 500);
+    await db.insert(serviceTerritories).values(chunk);
+    inserted += chunk.length;
+  }
+  // Supersede: rows not re-asserted by the current catalog vintage.
+  const stale = existing.filter((r) => !keptIds.has(r.id) && r.sourceVersion !== SOURCE_VERSION);
+  for (const r of stale) {
+    await db.delete(serviceTerritories).where(eq(serviceTerritories.id, r.id));
+  }
+  seededOnce = true;
+  return { inserted, verified, superseded: stale.length };
+}
+
+/** Freshness disclosure: oldest verification across the registry + vintage. */
+export async function territoryFreshness(): Promise<{ sourceVersion: string; lastVerifiedAt: number | null; rows: number } | null> {
+  const db = await getDb();
+  if (!db) return null;
+  await seedServiceTerritories();
+  const rows = await db.select({ lastVerifiedAt: serviceTerritories.lastVerifiedAt, sourceVersion: serviceTerritories.sourceVersion }).from(serviceTerritories);
+  if (rows.length === 0) return null;
+  const oldest = rows.reduce((min, r) => Math.min(min, r.lastVerifiedAt ?? 0), Number.POSITIVE_INFINITY);
+  return { sourceVersion: rows[0].sourceVersion ?? SOURCE_VERSION, lastVerifiedAt: Number.isFinite(oldest) && oldest > 0 ? oldest : null, rows: rows.length };
 }
 
 /**

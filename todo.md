@@ -401,3 +401,11 @@
 - [x] RECON-2: Audit where each lives today (opportunities, reports, dashboard) vs confined to Scenarios
 - [x] RECON-3: Close gaps — surface unit savings + rebates on opportunity cards and reports, not just Scenarios; tests + live verification
 
+## Rebates summary + EIA-861 national territory ingest (requested Jul 19)
+- [x] REB-1: Energy Plan report gains a rebates summary section — total capturable rebate dollars across planned measures, per-program rows with application links
+- [x] REB-2: Incentive programs carry application URLs; summary distinguishes fixed-value vs per-unit-rate vs performance-paid programs honestly; tests
+- [x] EIA-1: EIA-861 national territory ingest — expand the service-territory registry beyond the AZ seed toward national coverage (utility↔ZIP mapping), superseding the seed via sourceVersion
+- [x] EIA-2: Verify ladder behavior with national data live; tests + checkpoint
+- [x] CUR-1: Currency maintenance — verification metadata (lastVerifiedAt, sourceVersion) on incentives + service territories; reports disclose data freshness
+- [x] CUR-2: Scheduled refresh jobs (Heartbeat + agent-verifier) keep incentive programs and the territory registry current; stale data flagged, expired programs never render
+- [x] CUR-3: Refresh endpoints idempotent + cron-authenticated; owner notified of material changes

@@ -208,9 +208,25 @@ interface PrintData {
     chip: string;
     unitSavings: { value: number; unit: string } | null;
     demandSavingsKw: number | null;
-    rebates: Array<{ name: string; valueUsd: number; source: string }>;
+    rebates: Array<{ name: string; valueUsd: number; source: string; url?: string | null; basis?: string }>;
   }>;
   plannedTotalUsd: number;
+  rebatesSummary?: {
+    totalUsd: number;
+    totalAnnualUsd: number;
+    programs: Array<{
+      name: string;
+      source: string;
+      url: string | null;
+      kind: string;
+      valueUsd: number;
+      annualUsd: number;
+      basis: string;
+      measures: string[];
+      expiresAt: number | null;
+    }>;
+    dataAsOf: { sourceVersion: string; lastVerifiedAt: number | null } | null;
+  } | null;
   verdicts: Array<{ measure: string; implementedAt: number; status: string; verifiedSavingsUsd: number; months: number; chip: string }>;
   verifiedTotalUsd: number;
   baseline: { method: string | null; cvrmse: number | null; r2: number | null; confidence: string | null; monthsUsed: number | null } | null;
@@ -262,6 +278,58 @@ function PrintReport({ kind, token, data, origin }: { kind: Kind; token: string;
               )}
             </section>
           ))}
+          {data.rebatesSummary && data.rebatesSummary.programs.length > 0 && (
+            <section className="border rounded-md p-4 break-inside-avoid">
+              <div className="flex items-baseline justify-between">
+                <h2 className="font-semibold">Rebates &amp; incentives you can capture</h2>
+                <div className="font-semibold text-emerald-700">
+                  {data.rebatesSummary.totalUsd > 0 ? `${usd(data.rebatesSummary.totalUsd)} one-time` : ""}
+                  {data.rebatesSummary.totalUsd > 0 && data.rebatesSummary.totalAnnualUsd > 0 ? " + " : ""}
+                  {data.rebatesSummary.totalAnnualUsd > 0 ? `${usd(data.rebatesSummary.totalAnnualUsd)}/yr ongoing` : ""}
+                </div>
+              </div>
+              <table className="w-full text-xs border-collapse mt-3">
+                <thead>
+                  <tr className="border-b text-left text-neutral-500">
+                    <th className="py-1 pr-2">Program</th>
+                    <th className="py-1 pr-2">Applies to</th>
+                    <th className="py-1 pr-2">Basis</th>
+                    <th className="py-1 pr-2 text-right">Value</th>
+                    <th className="py-1">How to apply</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.rebatesSummary.programs.map((p) => (
+                    <tr key={`${p.source}-${p.name}`} className="border-b align-top">
+                      <td className="py-1.5 pr-2 font-medium">{p.name}<div className="text-neutral-500 font-normal">{p.source}</div></td>
+                      <td className="py-1.5 pr-2">{p.measures.join(", ")}</td>
+                      <td className="py-1.5 pr-2">
+                        {p.basis === "performance_paid" ? "pays yearly for participation" : p.basis === "per_unit_rate" ? "paid per unit saved" : p.basis === "percent_of_cost" ? "% of project cost" : "fixed amount"}
+                      </td>
+                      <td className="py-1.5 pr-2 text-right font-medium">
+                        {p.annualUsd > 0 ? `${usd(p.annualUsd)}/yr` : usd(p.valueUsd)}
+                      </td>
+                      <td className="py-1.5">
+                        {p.url ? (
+                          <a className="underline break-all" href={p.url} target="_blank" rel="noreferrer">{p.url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0]}</a>
+                        ) : (
+                          <span className="text-neutral-500">contact {p.source}</span>
+                        )}
+                        {p.expiresAt != null && <div className="text-neutral-500">expires {new Date(p.expiresAt).toLocaleDateString()}</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-[10px] text-neutral-500 mt-2">
+                Program terms{" "}
+                {data.rebatesSummary.dataAsOf?.lastVerifiedAt != null
+                  ? `last re-verified ${new Date(data.rebatesSummary.dataAsOf.lastVerifiedAt).toLocaleDateString()} (${data.rebatesSummary.dataAsOf.sourceVersion})`
+                  : "from our seeded snapshot — not yet re-verified"}
+                . Amounts are computed against modeled savings; confirm current terms with the program before committing.
+              </p>
+            </section>
+          )}
           <section className="text-sm text-neutral-700">
             <strong>What we'll verify:</strong> after you implement a measure, mark it "I did this" in Meterly. Each
             month with a full bill cycle of data, we compare actual usage against the weather-adjusted baseline and
