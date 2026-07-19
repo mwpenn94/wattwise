@@ -43,10 +43,19 @@ import { assembleReportData, newReportToken, practitionerCsv, portfolioManagerCs
 import { assembleWrapped } from "./wrapped";
 
 /** §3l report kinds → human feature names for tier-gate error copy. */
-const REPORT_FEATURE_NAME: Record<"energy_plan" | "verified_savings" | "practitioner", string> = {
+const REPORT_FEATURE_NAME: Record<"energy_plan" | "verified_savings" | "practitioner" | "site_insights", string> = {
   energy_plan: "My Energy Plan report",
   verified_savings: "Verified Savings Statement",
   practitioner: "Practitioner export",
+  site_insights: "Site Insights report",
+};
+/** PRINT (Jul 19) — tier floor per report kind. site_insights is free: it is a
+ * print-grade rendering of the user's own Explore analysis, not a gated artifact. */
+const REPORT_TIER: Record<"energy_plan" | "verified_savings" | "practitioner" | "site_insights", "free" | "plus" | "pro"> = {
+  energy_plan: "plus",
+  verified_savings: "pro",
+  practitioner: "pro",
+  site_insights: "free",
 };
 import { evaluateImplementation, buildMonthlyActuals } from "./analytics/proveIt";
 import { routeQuestion, ASK_ROUTE_EST_COST_USD, buildAskCard } from "./askWattwise";
@@ -2880,9 +2889,10 @@ export const appRouter = router({
      * Returns the token — the client renders the print view with the footer
      * verification link (/verify/<token>). */
     generate: protectedProcedure
-      .input(z.object({ siteId: z.number().int(), kind: z.enum(["energy_plan", "verified_savings", "practitioner"]) }))
+      .input(z.object({ siteId: z.number().int(), kind: z.enum(["energy_plan", "verified_savings", "practitioner", "site_insights"]) }))
       .mutation(async ({ ctx, input }) => {
-        requireTier(tierOf(ctx.user), input.kind === "energy_plan" ? "plus" : "pro", REPORT_FEATURE_NAME[input.kind]);
+        const tierFloor = REPORT_TIER[input.kind];
+        if (tierFloor !== "free") requireTier(tierOf(ctx.user), tierFloor, REPORT_FEATURE_NAME[input.kind]);
         const data = await assembleReportData(input.siteId, ctx.user.id);
         const token = newReportToken();
         await h.createReportArtifact({

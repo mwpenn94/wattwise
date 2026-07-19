@@ -182,3 +182,57 @@
     to { opacity: 1; transform: translateY(0) scale(1); }
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * PRINT (Jul 19) — global print rules so ANY page prints sanely, and the
+ * dedicated print reports (Reports page + Explore's Site Insights Report)
+ * render as clean paginated documents.
+ * ------------------------------------------------------------------------- */
+@media print {
+  @page {
+    margin: 14mm 12mm;
+  }
+  html,
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+  .print-report,
+  .print-report * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  /* App chrome never belongs on paper: sidebar, headers, toasts, floating UI */
+  aside,
+  nav,
+  [data-sidebar],
+  [data-sonner-toaster],
+  [data-radix-popper-content-wrapper],
+  .print-hide {
+    display: none !important;
+  }
+  /* When a dedicated print report is mounted, it is the only visible content;
+     the interactive screen UI is fully suppressed. Pages without a print
+     report keep their content (minus chrome) so Ctrl+P still yields something
+     legible. */
+  body:has(.print-report) .screen-only,
+  body:has(.print-report) .print\:hidden {
+    display: none !important;
+  }
+  /* Scroll containers must not clip on paper */
+  .screen-only [class*="overflow-"],
+  [class*="max-h-"] {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  /* Keep cards/sections intact across page breaks */
+  section,
+  table tr,
+  .break-inside-avoid {
+    break-inside: avoid;
+  }
+  a {
+    color: #000 !important;
+    text-decoration: none;
+  }
+}

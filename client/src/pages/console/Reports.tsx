@@ -79,7 +79,7 @@ export default function Reports() {
         a.click();
         URL.revokeObjectURL(url);
         toast.success("Practitioner CSV downloaded", { description: `Verify link: /verify/${res.token}` });
-      } else {
+      } else if (vars.kind !== "site_insights") {
         setPrintKind(vars.kind);
         setPrintPayload({ token: res.token, data: res.data as ReportData });
         setTimeout(() => window.print(), 350);

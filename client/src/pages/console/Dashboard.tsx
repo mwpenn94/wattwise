@@ -27,6 +27,8 @@ import RefineChips from "@/components/RefineChips";
 import SiteGeometryPanel from "@/components/SiteGeometryPanel";
 import UtilityServicesCard from "@/components/UtilityServicesCard";
 import { Link, useSearch } from "wouter";
+import { Printer } from "lucide-react";
+import SiteInsightsReport, { type InsightsPrintData } from "@/components/print/SiteInsightsReport";
 
 type Demand = {
   peakKw: number;
@@ -92,6 +94,16 @@ export default function Dashboard() {
   const [rangeDays, setRangeDays] = useState<30 | 90 | 365 | "all">(30);
   // §3e prove-it: which opportunity the "I did this" dialog is marking
   const [markTarget, setMarkTarget] = useState<{ id?: number; measure: string; title: string; expectedSavingsUsd: number | null } | null>(null);
+  // PRINT (Jul 19) — print-grade Site Insights Report: generate a verify token,
+  // render the static print view (hidden print:block), then window.print().
+  const [printToken, setPrintToken] = useState<string | null>(null);
+  const genReport = trpc.reports.generate.useMutation({
+    onSuccess: (res) => {
+      setPrintToken(res.token);
+      setTimeout(() => window.print(), 400);
+    },
+    onError: (e) => toast.error(e.message),
+  });
   const windowRange = useMemo(() => {
     if (!stats.data?.maxTs) return null;
     const from = rangeDays === "all" ? (stats.data.minTs ?? 0) : stats.data.maxTs - rangeDays * 86_400_000;
@@ -193,8 +205,58 @@ export default function Dashboard() {
   const vocab = personaVocab(persona);
   const demandFirst = vocab.heroOrder === "demand_first";
 
+  // PRINT (Jul 19) — assemble the print payload from the queries this page has
+  // already loaded; the print view renders only after a verify token exists.
+  const printData: InsightsPrintData | null =
+    printToken != null && activeSite != null
+      ? {
+          site: {
+            name: activeSite.name,
+            buildingType: activeSite.buildingType ?? null,
+            sqft: activeSite.sqft ?? null,
+            state: activeSite.state ?? null,
+            zip: (activeSite as { zip?: string | null }).zip ?? null,
+            utilityName: (activeSite as { utilityName?: string | null }).utilityName ?? null,
+          },
+          generatedAt: Date.now(),
+          demand,
+          benchmark: benchmarkInsight,
+          emissions: emissionsInsight,
+          currentCost: costInsight,
+          baseline: summary?.baseline ?? null,
+          tariffComparisons: tariffInsight,
+          chart: chartData,
+          chartWindowLabel: rangeDays === "all" ? "full history" : `last ${rangeDays} days`,
+          insights: insightRows.map((i) => ({
+            kind: i.kind,
+            title: i.title,
+            body: i.body ?? i.title,
+            confidence: i.confidence ?? null,
+          })),
+          opportunities: allOppRows.map((o) => ({
+            title: o.title,
+            description: o.description ?? null,
+            estCostSavingsPerYr: o.estCostSavingsPerYr ?? null,
+            estEnergySavingsPerYr: o.estEnergySavingsPerYr ?? null,
+            energyUnit: o.energyUnit ?? null,
+            paybackBandYears: o.paybackBandYears ?? null,
+            confidence: o.confidence ?? null,
+            audience: String((o.provenance as Record<string, unknown> | null)?.audience ?? "occupant"),
+          })),
+          disclaimer:
+            "All figures are modeled estimates from your uploaded data and public rate/weather references — not a professional energy audit, engineering study, or financial/tax advice.",
+        }
+      : null;
+
   return (
     <div className="container max-w-6xl py-8">
+      {/* print-grade report — the only content visible when printing */}
+      {printData && printToken && (
+        <div className="hidden print:block">
+          <SiteInsightsReport data={printData} token={printToken} origin={window.location.origin} />
+        </div>
+      )}
+      <div className="screen-only">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl font-bold tracking-tight">Explore</h1>
@@ -218,6 +280,14 @@ export default function Dashboard() {
           </Select>
           <Button onClick={() => activeSiteId != null && run.mutate({ siteId: activeSiteId })} disabled={run.isPending || activeSiteId == null}>
             <Play className="mr-1 h-4 w-4" /> {run.isPending ? "Analyzing…" : "Run analysis"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => activeSiteId != null && genReport.mutate({ siteId: activeSiteId, kind: "site_insights" })}
+            disabled={genReport.isPending || activeSiteId == null || latest.data == null}
+            title={latest.data == null ? "Run an analysis first" : "Print-optimized report — use your browser's Save as PDF"}
+          >
+            <Printer className="mr-1 h-4 w-4" /> {genReport.isPending ? "Preparing…" : "Print / Save PDF"}
           </Button>
         </div>
       </div>
@@ -1004,6 +1074,7 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       )}
+      </div>
     </div>
   );
 }

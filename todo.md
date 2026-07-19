@@ -451,3 +451,18 @@
 - [x] INFER-2: Inferred mapping disclosed in validation notes (which column was used for what, and why)
 - [x] INFER-3: Currency/cost columns never selectable as usage regardless of header name
 - [x] INFER-4: Tests across diverse layouts (uppercase/underscore headers, unnamed columns, unit-in-parens, separate date+time, ISO timestamps) + full-suite regression
+
+## Print-grade PDF report (Jul 19 PM2 — owner: better print-to-PDF than raw Explore print)
+- [ ] PRINT-1: Dedicated print-optimized report route (/app/report/:siteId/print or similar) with cover header, KPIs, page-break control, no app chrome
+- [ ] PRINT-2: Static (non-interactive) chart rendering for print: interval demand, load duration curve, heatmap render fully without scrollbars/sliders/empty canvases
+- [ ] PRINT-3: Full unclipped tables (rates, monthly peaks) — no scroll containers in print
+- [ ] PRINT-4: Report header/footer: site name, generated date, provenance & disclaimer block, page numbers via @page CSS
+- [ ] PRINT-5: Entry points: "Print / Save PDF" button on Explore + Reports pages opening the print route and auto-triggering print dialog
+- [ ] PRINT-6: Verify multi-page pagination visually; tests for the report data procedure
+
+## Print / Save PDF experience (Jul 19)
+- [x] PRINT-1: Print-grade Site Insights Report component (static SVG charts, div heatmap, full tables, break-inside-avoid, provenance chips, verify-link footer)
+- [x] PRINT-2: "Print / Save PDF" button on Explore wired through reports.generate (site_insights kind, free tier, verify token)
+- [x] PRINT-3: Global @media print CSS — app chrome hidden, white/black forced, scroll containers unclipped, page margins, print-color-adjust
+- [x] PRINT-4: site_insights report kind in DB enum + router + Verify page title map
+- [x] PRINT-5: Print-emulation verification via headless Chromium PDF (2 clean pages, charts + heatmap render)

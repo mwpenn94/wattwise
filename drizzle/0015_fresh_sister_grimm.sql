@@ -1,0 +1,1 @@
+ALTER TABLE `report_artifacts` MODIFY COLUMN `kind` enum('energy_plan','verified_savings','practitioner','site_insights') NOT NULL;

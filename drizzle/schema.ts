@@ -816,7 +816,7 @@ export const reportArtifacts = mysqlTable(
     userId: int("userId").notNull(),
     siteId: int("siteId").notNull(),
     token: varchar("token", { length: 64 }).notNull().unique(),
-    kind: mysqlEnum("kind", ["energy_plan", "verified_savings", "practitioner"]).notNull(),
+    kind: mysqlEnum("kind", ["energy_plan", "verified_savings", "practitioner", "site_insights"]).notNull(),
     /** snapshot of the headline numbers at print time (for drift display) */
     snapshot: json("snapshot"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),

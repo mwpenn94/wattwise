@@ -18,6 +18,7 @@ const KIND_TITLE: Record<string, string> = {
   energy_plan: "My Energy Plan",
   verified_savings: "Verified Savings Statement",
   practitioner: "Practitioner Export",
+  site_insights: "Site Insights Report",
 };
 
 export default function Verify() {
