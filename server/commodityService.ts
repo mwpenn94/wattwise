@@ -51,6 +51,7 @@ export interface ServiceResolution {
 interface SiteForResolution {
   id: number;
   state: string | null;
+  zip?: string | null;
   utilityName?: string | null;
   servicesProfile?: unknown;
 }
@@ -114,10 +115,46 @@ export async function resolveCommodityService(
     }
   }
 
-  // Tier 3 — territory imputation from the seeded tariff snapshot. Only a
-  // NEGATIVE signal is conclusive: no utility serving the commodity in the
-  // site's state → impute absent (disclosed as snapshot-based). A populated
-  // territory only means "plausible" and falls through.
+  // Tier 3a — ZIP-level territory attribution (TERR, Jul 19): the site's ZIP3
+  // resolved against the EIA-861-derived service-territory registry. Coverage
+  // is definitive in BOTH directions — named utilities serve the ZIP (gas
+  // becomes plausible-active with the utility named) or the ZIP is positively
+  // known unserved (imputed absent). An uncovered ZIP falls through to the
+  // state-level snapshot — registry silence is never treated as absence.
+  try {
+    const { lookupTerritory } = await import("./serviceTerritories");
+    const terr = await lookupTerritory(site.zip, commodity);
+    if (terr.covered) {
+      if (terr.served === false) {
+        return {
+          commodity,
+          analyze: false,
+          basis: "territory_imputed",
+          reason: `no ${commodity} utility serves ZIP ${String(site.zip ?? "").slice(0, 3)}xx per the service-territory registry (${terr.sourceVersion}) — service imputed absent; mark it active in site settings if this is wrong`,
+        };
+      }
+      if (terr.served === true && commodity === "gas") {
+        // Being inside a gas territory upgrades gas from "never assumed" to
+        // plausible-active — the strongest imputation short of a meter/bill.
+        return {
+          commodity,
+          analyze: true,
+          basis: "territory_imputed",
+          reason: `${terr.utilities.join(" / ")} serves gas in ZIP ${String(site.zip ?? "").slice(0, 3)}xx (service-territory registry, ${terr.sourceVersion}) — gas imputed plausible; mark it absent in site settings if this building is all-electric`,
+        };
+      }
+      // electric/water inside a served territory: consistent with the default
+      // (plausible-active) — fall through so the default's wording applies.
+    }
+  } catch {
+    /* registry failure never blocks resolution — fall through */
+  }
+
+  // Tier 3b — state-level territory imputation from the seeded tariff
+  // snapshot. Only a NEGATIVE signal is conclusive: no utility serving the
+  // commodity in the site's state → impute absent (disclosed as
+  // snapshot-based). A populated territory only means "plausible" and falls
+  // through.
   if (site.state) {
     try {
       const territory = await h.listTariffs(commodity, site.state);
@@ -153,6 +190,47 @@ export async function resolveCommodityService(
     basis: "default",
     reason: `${commodity === "electric" ? "grid electricity" : "municipal water"} service is near-universal for occupied buildings — assumed present until you mark it absent in site settings`,
   };
+}
+
+/**
+ * BILL (owner, Jul 19) — bill uploads auto-set the service profile. A real
+ * utility bill for a commodity is conclusive evidence of service — stronger
+ * than equipment inference and second only to the user's own word. Called
+ * from the bill-create procedures after a bill row persists.
+ *
+ * Rules: never downgrades or overrides a user's explicit setting (an existing
+ * "active"/"none" in the profile is the user's word — for "none" we surface
+ * an insight nudge instead of silently flipping it); stamps provenance so the
+ * services card can say "a bill on file proves this".
+ */
+export async function noteBillEvidence(siteId: number, userId: number, commodity: Commodity): Promise<void> {
+  try {
+    const site = await h.getSite(siteId, userId);
+    const profile = readProfile((site as { servicesProfile?: unknown }).servicesProfile);
+    const current = profile[commodity];
+    if (current === "active") return; // already settled, user's word or prior evidence
+    if (current === "none") {
+      // User said no service, but a bill for that commodity just arrived —
+      // never silently override; surface the contradiction honestly.
+      await h.addInsight({
+        siteId,
+        kind: "data_coverage",
+        title: `A ${commodity} bill is on file, but this site is marked as having no ${commodity} service`,
+        body: `You marked ${commodity} service as absent in site settings, yet a ${commodity} bill was just saved for this site. Your setting stands — ${commodity} remains excluded from analysis — but if the bill is right, flip the setting in the Utility services card to unlock ${commodity} analysis.`,
+        severity: "warning",
+        confidence: "high",
+        provenance: { method: "bill_service_evidence_v1", commodity },
+        metrics: null,
+      });
+      return;
+    }
+    // Unset/unknown → bill evidence settles it as active (bill_evidence provenance).
+    await h.updateSite(siteId, userId, {
+      servicesProfile: { ...profile, [commodity]: "active" },
+    } as never);
+  } catch {
+    /* evidence stamping must never fail a bill save */
+  }
 }
 
 /** Resolve all three commodities at once (site settings UI + analysis narration). */

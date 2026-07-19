@@ -575,6 +575,25 @@ export const zipSubregions = mysqlTable(
   (t) => [index("zip3_idx").on(t.zip3)],
 );
 
+/** 12c. service_territories — ZIP3→utility service-territory registry (TERR,
+ * Jul 19). Seeded from EIA Form 861 (electric, 2024) + state PUC territory
+ * filings (gas/water). Rows with utilityName = "" are sentinel "positively
+ * known unserved" markers; a ZIP3 with no rows at all is NOT covered by the
+ * registry and callers must fall back to state-level presence. */
+export const serviceTerritories = mysqlTable(
+  "service_territories",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    zip3: varchar("zip3", { length: 3 }).notNull(),
+    state: varchar("state", { length: 8 }).notNull(),
+    commodity: mysqlEnum("commodity", ["electric", "gas", "water"]).notNull(),
+    /** Empty string = sentinel: territory positively known unserved. */
+    utilityName: varchar("utilityName", { length: 255 }).notNull(),
+    sourceVersion: varchar("sourceVersion", { length: 64 }).notNull(),
+  },
+  (t) => [index("territory_zip3_idx").on(t.zip3, t.commodity)],
+);
+
 /** 13. benchmarks — EUI medians (seeded ENERGY STAR/CBECS/RECS). */
 export const benchmarks = mysqlTable(
   "benchmarks",

@@ -57,7 +57,11 @@ function usd(n: number | null | undefined) {
 
 export default function Reports() {
   const { user } = useAuth();
-  const tier = (user as { tier?: string } | null)?.tier ?? "free";
+  // Effective tier comes from the server (account.usage applies the admin→pro
+  // owner rule via tierOf); reading the raw user row's tier column rendered
+  // every report button disabled for the admin owner (tier=free in the row).
+  const usageQ = trpc.account.usage.useQuery(undefined, { enabled: !!user });
+  const tier = usageQ.data?.tier ?? (user as { tier?: string } | null)?.tier ?? "free";
   const sitesQ = trpc.sites.list.useQuery();
   const [siteId, setSiteId] = useState<number | null>(null);
   const activeSiteId = siteId ?? sitesQ.data?.[0]?.id ?? null;
@@ -202,6 +206,9 @@ interface PrintData {
     costClass: string | null;
     confidence: string | null;
     chip: string;
+    unitSavings: { value: number; unit: string } | null;
+    demandSavingsKw: number | null;
+    rebates: Array<{ name: string; valueUsd: number; source: string }>;
   }>;
   plannedTotalUsd: number;
   verdicts: Array<{ measure: string; implementedAt: number; status: string; verifiedSavingsUsd: number; months: number; chip: string }>;
@@ -245,7 +252,14 @@ function PrintReport({ kind, token, data, origin }: { kind: Kind; token: string;
               <p className="text-sm text-neutral-700 mt-1">{m.what}</p>
               <p className="text-xs text-neutral-500 mt-2">
                 Payback: {m.paybackLabel ?? "n/a"} · {m.costClass ?? "cost class n/a"} · confidence {m.confidence ?? "n/a"}
+                {m.unitSavings ? ` · ≈${Math.round(m.unitSavings.value).toLocaleString()} ${m.unitSavings.unit}/yr` : ""}
+                {m.demandSavingsKw != null && m.demandSavingsKw > 0 ? ` · ${m.demandSavingsKw.toFixed(1)} kW demand` : ""}
               </p>
+              {m.rebates.length > 0 && (
+                <p className="text-xs text-emerald-700 mt-1">
+                  Rebates: {m.rebates.map((r) => `${r.name}${r.valueUsd > 0 ? ` — $${Math.round(r.valueUsd).toLocaleString()}` : ""} (${r.source})`).join("; ")}
+                </p>
+              )}
             </section>
           ))}
           <section className="text-sm text-neutral-700">

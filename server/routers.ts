@@ -1749,6 +1749,18 @@ export const appRouter = router({
           ctx.user.id,
         );
         await maybeReconcileBill(id.id, input.meterId, ctx.user.id);
+        // BILL (Jul 19): a saved bill is conclusive service evidence — stamp
+        // the site's services profile via the meter's commodity (never
+        // downgrades a user override; contradictions surface as insights).
+        try {
+          const meter = await h.getMeter(input.meterId, ctx.user.id);
+          if (meter) {
+            const { noteBillEvidence } = await import("./commodityService");
+            await noteBillEvidence(meter.siteId, ctx.user.id, meter.commodity as "electric" | "gas" | "water");
+          }
+        } catch {
+          /* evidence stamping never fails a bill save */
+        }
         return { id };
       }),
     /** Progressive participation (Jul 2026): persist a bill against a SITE that
@@ -1819,6 +1831,21 @@ export const appRouter = router({
         );
         await h.audit(ctx.user.id, "bill_created", "bill", String(id), { siteId: input.siteId, quickStart: true });
         await maybeReconcileBill(id.id, meter.id, ctx.user.id);
+        // BILL (Jul 19): a saved bill is conclusive service evidence. The
+        // quick-start path may lack a typed meter, so the bill's own usage
+        // unit decides the commodity (therms/ccf → gas, gal/kgal → water).
+        try {
+          const u = input.usageUnit.toLowerCase();
+          const commodity = /therm|ccf|mcf|dth/.test(u)
+            ? ("gas" as const)
+            : /gal|ccf_water|hcf/.test(u)
+              ? ("water" as const)
+              : ((meter.commodity as "electric" | "gas" | "water") ?? ("electric" as const));
+          const { noteBillEvidence } = await import("./commodityService");
+          await noteBillEvidence(input.siteId, ctx.user.id, commodity);
+        } catch {
+          /* evidence stamping never fails a bill save */
+        }
         return { id, meterId: meter.id };
       }),
   }),

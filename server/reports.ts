@@ -34,6 +34,12 @@ export interface ReportMeasure {
   costClass: string | null;
   confidence: string | null;
   chip: Chip;
+  /** RECON (Jul 19) — implementer-grade unit savings: rebate math runs on
+   * units (kWh, therms, gallons), not dollars; kW is demand, kept separate. */
+  unitSavings: { value: number; unit: string } | null;
+  demandSavingsKw: number | null;
+  /** Live incentive matches for this measure (never-expired, named sources). */
+  rebates: Array<{ name: string; valueUsd: number; source: string }>;
 }
 
 export interface VerdictRow {
@@ -87,18 +93,51 @@ export async function assembleReportData(siteId: number, userId: number): Promis
 
   // Basket = open opportunities (not yet implemented).
   const implemented = new Set(impls.map((i) => i.measure));
-  const measures: ReportMeasure[] = opps
-    .filter((o) => !implemented.has(o.measure))
-    .map((o) => ({
-      title: o.title,
-      measure: o.measure,
-      what: o.description ?? "",
-      annualSavingsUsd: o.estCostSavingsPerYr ?? null,
-      paybackLabel: o.paybackBandYears ?? null,
-      costClass: o.estDemandSavingsKw != null && o.estDemandSavingsKw > 0 ? "demand-reducing" : null,
-      confidence: o.confidence ?? null,
-      chip: chipForConfidence(o.confidence),
-    }));
+  // RECON (Jul 19): reports carry the same unit savings + rebate matches the
+  // Scenarios page has — rebates were previously confined to Scenarios.
+  const sectorClass = site.buildingType === "single_family" || site.buildingType === "multifamily" ? ("residential" as const) : ("commercial" as const);
+  const measures: ReportMeasure[] = await Promise.all(
+    opps
+      .filter((o) => !implemented.has(o.measure))
+      .map(async (o) => {
+        const prov = (o.provenance ?? null) as Record<string, unknown> | null;
+        const commodity = ((prov?.commodity as string | undefined) ?? "electric") as "electric" | "gas" | "water";
+        let rebates: Array<{ name: string; valueUsd: number; source: string }> = [];
+        try {
+          const { matchIncentives } = await import("./incentives");
+          const matches = await matchIncentives({
+            measureKey: o.measure,
+            state: site.state,
+            utilityName: site.utilityName ?? null,
+            sectorClass,
+            capexUsd: 0,
+            unitsSavedAnnual: o.estEnergySavingsPerYr != null ? { [commodity]: o.estEnergySavingsPerYr } : undefined,
+          });
+          rebates = matches
+            .filter((m) => m.valueUsd > 0 || (m.annualUsd ?? 0) > 0 || m.ratePerUnitSaved != null)
+            .map((m) => ({
+              name: m.ratePerUnitSaved != null && m.valueUsd <= 0 ? `${m.name} ($${m.ratePerUnitSaved}/${m.rateUnit ?? "unit"} saved)` : m.name,
+              valueUsd: m.valueUsd > 0 ? m.valueUsd : (m.annualUsd ?? 0),
+              source: m.sourceName,
+            }));
+        } catch {
+          /* incentive matching never blocks report assembly */
+        }
+        return {
+          title: o.title,
+          measure: o.measure,
+          what: o.description ?? "",
+          annualSavingsUsd: o.estCostSavingsPerYr ?? null,
+          paybackLabel: o.paybackBandYears ?? null,
+          costClass: o.estDemandSavingsKw != null && o.estDemandSavingsKw > 0 ? "demand-reducing" : null,
+          confidence: o.confidence ?? null,
+          chip: chipForConfidence(o.confidence),
+          unitSavings: o.estEnergySavingsPerYr != null ? { value: o.estEnergySavingsPerYr, unit: o.energyUnit ?? "kWh" } : null,
+          demandSavingsKw: o.estDemandSavingsKw ?? null,
+          rebates,
+        };
+      }),
+  );
   const plannedTotalUsd = measures.reduce((a, m) => a + (m.annualSavingsUsd ?? 0), 0);
 
   // Prove-it verdict ledger.
@@ -154,15 +193,27 @@ export function practitionerCsv(d: ReportData): string {
     return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
   };
   const lines: string[] = [];
-  lines.push("section,name,annual_usd,confidence_chip,detail");
-  lines.push(["site", esc(d.site.name), esc(d.annualCostUsd), d.annualCostChip, esc(`${d.site.buildingType ?? ""} ${d.site.sqft ?? ""} sqft ${d.site.state ?? ""}`)].join(","));
-  for (const m of d.measures) lines.push(["planned_measure", esc(m.title), esc(m.annualSavingsUsd), m.chip, esc(`${m.costClass ?? ""}; payback ${m.paybackLabel ?? "n/a"}`)].join(","));
-  for (const v of d.verdicts) lines.push(["implementation", esc(v.measure), esc(v.verifiedSavingsUsd), v.chip, esc(`status ${v.status}; ${v.months} month(s) evaluated`)].join(","));
+  lines.push("section,name,annual_usd,confidence_chip,detail,unit_savings,demand_kw,rebates");
+  lines.push(["site", esc(d.site.name), esc(d.annualCostUsd), d.annualCostChip, esc(`${d.site.buildingType ?? ""} ${d.site.sqft ?? ""} sqft ${d.site.state ?? ""}`), "", "", ""].join(","));
+  for (const m of d.measures)
+    lines.push(
+      [
+        "planned_measure",
+        esc(m.title),
+        esc(m.annualSavingsUsd),
+        m.chip,
+        esc(`${m.costClass ?? ""}; payback ${m.paybackLabel ?? "n/a"}`),
+        esc(m.unitSavings ? `${Math.round(m.unitSavings.value).toLocaleString()} ${m.unitSavings.unit}/yr` : ""),
+        esc(m.demandSavingsKw != null ? m.demandSavingsKw : ""),
+        esc((m.rebates ?? []).map((r) => `${r.name} ($${Math.round(r.valueUsd).toLocaleString()})`).join("; ")),
+      ].join(","),
+    );
+  for (const v of d.verdicts) lines.push(["implementation", esc(v.measure), esc(v.verifiedSavingsUsd), v.chip, esc(`status ${v.status}; ${v.months} month(s) evaluated`), "", "", ""].join(","));
   if (d.baseline)
     lines.push(
-      ["baseline", esc(d.baseline.method), "", d.baseline.confidence === "high" ? "Good" : "Est.", esc(`CVRMSE ${d.baseline.cvrmse != null ? (d.baseline.cvrmse * 100).toFixed(1) + "%" : "n/a"}; R2 ${d.baseline.r2 ?? "n/a"}; months ${d.baseline.monthsUsed ?? "n/a"}`)].join(","),
+      ["baseline", esc(d.baseline.method), "", d.baseline.confidence === "high" ? "Good" : "Est.", esc(`CVRMSE ${d.baseline.cvrmse != null ? (d.baseline.cvrmse * 100).toFixed(1) + "%" : "n/a"}; R2 ${d.baseline.r2 ?? "n/a"}; months ${d.baseline.monthsUsed ?? "n/a"}`), "", "", ""].join(","),
     );
-  lines.push(["disclaimer", esc(d.disclaimer), "", "", ""].join(","));
+  lines.push(["disclaimer", esc(d.disclaimer), "", "", "", "", ""].join(","));
   return lines.join("\n");
 }
 

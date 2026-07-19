@@ -390,4 +390,14 @@
 - [x] SVC-3: Analysis honors the profile — no baselines/opportunities for a commodity resolved "none"; skips narrated honestly with the resolution reason
 - [x] SVC-4: UI — site-level utility services control (per-commodity on/off/unknown) showing provenance (user-set vs evidence vs territory-imputed)
 - [x] SVC-5: Tests for resolution ladder combinations + live verification
+## Reports broken + territory/bill evidence + reconciliation (reported Jul 19)
+- [x] RPT-1: Root-cause "none of the reports features work" (found: Reports.tsx read raw user.tier=free for the admin owner instead of server-effective tier → all buttons disabled)
+- [x] RPT-2: Fix Reports end-to-end (effective tier from account.usage), audit other report surfaces (M&V panel, wrapped, portfolio exports), tests
+- [x] TERR-1: Utility-level territory imputation — site ZIP resolved against a utility service-territory registry (EIA 861-derived) instead of state-level tariff presence
+- [x] TERR-2: commodityService ladder consumes ZIP-level lookup with provenance; state-snapshot fallback when ZIP uncovered; tests
+- [x] BILL-1: Bill uploads auto-set service profile — parsed gas/water/electric bill = conclusive evidence tier (above equipment inference); never downgrades a user override; tests
+- [x] BILL-2: Verify all three live + checkpoint
+- [x] RECON-1: Re-read shared docs/task history/vault mentions of rebates and per-unit savings measures (kWh, kW, therms, gallons); inventory each discussed capability
+- [x] RECON-2: Audit where each lives today (opportunities, reports, dashboard) vs confined to Scenarios
+- [x] RECON-3: Close gaps — surface unit savings + rebates on opportunity cards and reports, not just Scenarios; tests + live verification
 
