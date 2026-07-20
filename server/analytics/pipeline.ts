@@ -1356,7 +1356,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       annualSavingsUsdHi: coolKwh * 0.15 * kWhRate,
       capexBand: "low",
       confidence: disaggMethod === "archetype_prior_only" ? "low" : "medium",
-      rationale: `Cooling is an estimated ${(endUseFractions.cooling * 100).toFixed(0)}% of annual use (${dis.label}). 5–15% cooling savings from setpoint/schedule optimization is typical.`,
+      rationale: `Cooling is an estimated ${(endUseFractions.cooling * 100).toFixed(0)}% of annual use (${dis.label}). The 5–15% cooling-savings band spans ENERGY STAR's smart-thermostat field finding (~8% of HVAC energy) and ACEEE/LBNL retro-commissioning ranges for setpoint and schedule optimization.`,
       disclosures: rateIsFallback ? [dis.disclaimer, fallbackRateDisclosure] : [dis.disclaimer],
     });
   }
@@ -1370,7 +1370,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       annualSavingsUsdHi: lightKwh * 0.55 * kWhRate,
       capexBand: "medium",
       confidence: disaggMethod === "archetype_prior_only" ? "low" : "medium",
-      rationale: `Lighting is an estimated ${(endUseFractions.lighting * 100).toFixed(0)}% of annual use (${dis.label}). LED conversion typically cuts lighting energy 30–55%.`,
+      rationale: `Lighting is an estimated ${(endUseFractions.lighting * 100).toFixed(0)}% of annual use (${dis.label}). The 30–55% band reflects DOE Solid-State Lighting program findings for LED conversion from mixed fluorescent/HID stock (upper end with occupancy controls).`,
       disclosures: rateIsFallback ? [dis.disclaimer, fallbackRateDisclosure] : [dis.disclaimer],
     });
   }

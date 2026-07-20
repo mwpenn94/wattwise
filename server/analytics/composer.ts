@@ -250,6 +250,15 @@ export function composeMeasures(
   disclosures.push("Emissions deltas use an annual-average grid intensity factor — marginal/hourly intensity differs.");
 
   const basketCapexUsd = cap(measures.reduce((a, m) => a + (m.capexUsd ?? 0), 0));
+  // weakest-chip inheritance (§3c): the basket is never more confident than
+  // its least confident member OR the baseline. (Hoisted above payback so the
+  // band can derive from it — accuracy pass, Jul 20.)
+  const order = { low: 0, medium: 1, high: 2 } as const;
+  const weakest = perMeasure.reduce<"low" | "medium" | "high">(
+    (acc, m) => (order[m.confidence] < order[acc] ? m.confidence : acc),
+    extrapolated ? "low" : baselineConfidence === "low" ? "low" : "medium",
+  );
+
   let basketPaybackYears: number | null = null;
   let basketPaybackBand: string | null = null;
   if (basketCapexUsd === 0 && composedSavings > 1) {
@@ -257,17 +266,20 @@ export function composeMeasures(
     basketPaybackBand = "immediate — no upfront cost";
   } else if (basketCapexUsd > 0 && composedSavings > 1) {
     basketPaybackYears = cap(basketCapexUsd / composedSavings);
-    basketPaybackBand = `${(basketPaybackYears * 0.75).toFixed(1)}–${(basketPaybackYears * 1.5).toFixed(1)} years`;
-    disclosures.push("Basket payback band is a fixed heuristic spread (75%–150%), not derived from quantified uncertainty; excludes incentives, financing, degradation, and rate escalation.");
+    // Accuracy pass (Jul 20): the old 75%–150% spread was a fixed heuristic
+    // regardless of how well the basket was modeled. Use the same
+    // confidence-derived proportional spread convention as the scenario
+    // engine: savings uncertainty ≈ ±15% (high) / ±25% (medium) / ±40% (low),
+    // anchored to the ASHRAE G14 CV(RMSE) ≤25% monthly-model gate; payback
+    // bounds are capex ÷ (savings × (1±u)).
+    const u = weakest === "high" ? 0.15 : weakest === "medium" ? 0.25 : 0.4;
+    const lo = basketCapexUsd / (composedSavings * (1 + u));
+    const hi = basketCapexUsd / (composedSavings * (1 - u));
+    basketPaybackBand = `${lo.toFixed(1)}–${hi.toFixed(1)} years`;
+    disclosures.push(
+      `Basket payback band is derived from the basket's ${weakest}-confidence chip (savings uncertainty ±${Math.round(u * 100)}%, anchored to the ASHRAE G14 CV(RMSE) ≤25% M&V gate); excludes incentives, financing, degradation, and rate escalation.`,
+    );
   }
-
-  // weakest-chip inheritance (§3c): the basket is never more confident than
-  // its least confident member OR the baseline.
-  const order = { low: 0, medium: 1, high: 2 } as const;
-  const weakest = perMeasure.reduce<"low" | "medium" | "high">(
-    (acc, m) => (order[m.confidence] < order[acc] ? m.confidence : acc),
-    extrapolated ? "low" : baselineConfidence === "low" ? "low" : "medium",
-  );
 
   /* ---- 5. rate re-sweep on the composed profile (§3c: rate last) ---- */
   const rateSweep = candidateTariffs.map((t) => {

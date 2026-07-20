@@ -151,7 +151,21 @@ export async function runCommodityEfficiency(opts: {
     siteTotalDeltaCost: Math.round(deltaCost * 100) / 100,
     siteTotalDeltaCo2eLb: Math.round(deltaCo2eLb),
     paybackYears,
-    paybackBand: paybackYears == null ? null : paybackYears === 0 ? "immediate — no upfront cost" : `${Math.max(0, Math.round((paybackYears - 1) * 10) / 10)}–${Math.round((paybackYears + 1) * 10) / 10} yr`,
+    // Accuracy pass (Jul 20): the old ±1-year ABSOLUTE spread was unjustified —
+    // it overstated certainty on long paybacks (9–11 yr on a 10-yr point) and
+    // implied false precision on short ones regardless of baseline quality.
+    // Same confidence-derived proportional spread as the electric engine:
+    // payback ∝ 1/savings; savings uncertainty ±25% (medium/high measured
+    // baseline) or -40%/+30% (low / benchmark-estimated baseline).
+    paybackBand:
+      paybackYears == null
+        ? null
+        : paybackYears === 0
+          ? "immediate — no upfront cost"
+          : (() => {
+              const s = confidence === "low" ? { savLo: 0.6, savHi: 1.3 } : { savLo: 0.75, savHi: 1.25 };
+              return `${(paybackYears / s.savHi).toFixed(1)}–${(paybackYears / s.savLo).toFixed(1)} yr`;
+            })(),
     confidence,
     confidenceLabel,
     disclosures,

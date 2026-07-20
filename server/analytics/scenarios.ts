@@ -486,15 +486,6 @@ export function runScenario(
   if ((input.capexUsd == null || input.capexUsd === 0) && deltaCost < -1) {
     paybackYears = 0;
     paybackBand = "immediate — no upfront cost";
-  } else if (input.capexUsd && deltaCost < -1) {
-    paybackYears = input.capexUsd / -deltaCost;
-    const lo = paybackYears * 0.75;
-    const hi = paybackYears * 1.5;
-    paybackBand = `${lo.toFixed(1)}–${hi.toFixed(1)} years`;
-    // Batch-39 (pass 1609): the old wording ("reflecting modeling uncertainty")
-    // implied the band was DERIVED from the scenario's quantified uncertainty. It
-    // is not — it is a fixed heuristic spread. Say so, and say what it ignores.
-    disclosures.push("Payback band is a fixed heuristic spread (75%–150% of the point estimate), not derived from this scenario's quantified savings uncertainty; excludes incentives, financing, degradation, and rate escalation.");
   }
 
   // Batch-26 (passes 903/913): a scenario inherits its baseline's confidence,
@@ -503,6 +494,26 @@ export function runScenario(
   // ternary collapsed medium baselines to low with no cause, understating
   // reliability.
   const confidence = extrapolated ? "low" : baselineConfidence === "low" ? "low" : "medium";
+  if (paybackYears == null && input.capexUsd && deltaCost < -1) {
+    paybackYears = input.capexUsd / -deltaCost;
+    // Accuracy pass (owner directive Jul 20, "as accurate/precise/justified as
+    // possible"): the band now DERIVES from the scenario's stated confidence
+    // tier instead of one fixed 75–150% spread. Tier → savings-uncertainty
+    // half-width, anchored to the M&V machinery's own gates (mv.ts applies the
+    // ASHRAE G14 CV(RMSE) ≤25% payability gate; proveIt.ts assumes 25% CV when
+    // no fit exists; extrapolated/archetype baselines carry more):
+    //   medium (best a modeled counterfactual can be) → ±25% savings
+    //   low (extrapolated span or archetype baseline)  → -40%/+30% (asymmetric:
+    //        savings shortfall is the dominant failure mode on weak baselines).
+    // Payback ∝ 1/savings, so the payback band inverts the savings multipliers.
+    const spread = confidence === "medium" ? { savLo: 0.75, savHi: 1.25, pct: "±25%" } : { savLo: 0.6, savHi: 1.3, pct: "-40%/+30%" };
+    const lo = paybackYears / spread.savHi;
+    const hi = paybackYears / spread.savLo;
+    paybackBand = `${lo.toFixed(1)}–${hi.toFixed(1)} years`;
+    disclosures.push(
+      `Payback band is derived from this scenario's ${confidence}-confidence baseline (savings uncertainty ${spread.pct}, anchored to the ASHRAE G14 CV(RMSE) ≤25% M&V gate); excludes incentives, financing, degradation, and rate escalation.`,
+    );
+  }
   return {
     perCommodity: {
       electric: { deltaUsage, deltaDemandKw: scenPeak - basePeak, deltaCost, deltaCo2eLb },

@@ -228,9 +228,9 @@ export function degradationDrift(currentAnnual: number | null, priorAnnual: numb
     material,
     message: material
       ? drift > 0
-        ? `Weather-normalized usage is up ${pct}% vs the prior year with no reported change in how the building is used — a pattern consistent with equipment losing efficiency (dirty coils, refrigerant, failing economizers). Worth a service visit; the data names the drift, not the diagnosis.`
+        ? `Weather-normalized usage is up ${pct}% vs the prior year — past our 8% materiality threshold (normalized baselines typically wobble a few percent year-to-year from non-weather noise; ASHRAE-style monthly models carry roughly that much residual error). With no reported change in how the building is used, the pattern is consistent with equipment losing efficiency (dirty coils, refrigerant, failing economizers). Worth a service visit; the data names the drift, not the diagnosis.`
         : `Weather-normalized usage is down ${Math.abs(pct)}% vs the prior year — whatever changed is working in your favor.`
-      : `Year-over-year weather-normalized drift is ${pct >= 0 ? "+" : ""}${pct}% — within normal variation.`,
+      : `Year-over-year weather-normalized drift is ${pct >= 0 ? "+" : ""}${pct}% — below the 8% materiality threshold (within typical noise for a normalized monthly baseline).`,
   };
 }
 

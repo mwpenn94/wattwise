@@ -30,6 +30,24 @@ export const EGRID_FACTORS: Array<{
   { subregion: "SRSO", subregionName: "SERC South", co2eLbPerMwh: 823.6, year: 2022 },
   { subregion: "NYCW", subregionName: "NPCC NYC/Westchester", co2eLbPerMwh: 571.5, year: 2022 },
   { subregion: "RFCE", subregionName: "RFC East", co2eLbPerMwh: 655.4, year: 2022 },
+  // Accuracy pass (Jul 20): the remaining eGRID2022 subregions referenced by
+  // STATE_SUBREGION — previously unseeded, so states outside the launch
+  // territory silently fell through to the AZNM default factor. Values are
+  // eGRID2022 total output emission rates (CO2e lb/MWh), EPA release.
+  { subregion: "AKGD", subregionName: "ASCC Alaska Grid", co2eLbPerMwh: 1067.1, year: 2022 },
+  { subregion: "FRCC", subregionName: "FRCC All (Florida)", co2eLbPerMwh: 812.7, year: 2022 },
+  { subregion: "HIOA", subregionName: "HICC Oahu", co2eLbPerMwh: 1592.7, year: 2022 },
+  { subregion: "MROE", subregionName: "MRO East (Wisconsin)", co2eLbPerMwh: 1180.9, year: 2022 },
+  { subregion: "MROW", subregionName: "MRO West (Upper Midwest)", co2eLbPerMwh: 936.5, year: 2022 },
+  { subregion: "NEWE", subregionName: "NPCC New England", co2eLbPerMwh: 538.7, year: 2022 },
+  { subregion: "RFCM", subregionName: "RFC Michigan", co2eLbPerMwh: 1176.7, year: 2022 },
+  { subregion: "RFCW", subregionName: "RFC West (Ohio Valley)", co2eLbPerMwh: 999.6, year: 2022 },
+  { subregion: "SPNO", subregionName: "SPP North (Kansas/W. Missouri)", co2eLbPerMwh: 941.0, year: 2022 },
+  { subregion: "SPSO", subregionName: "SPP South (Oklahoma/Arkansas)", co2eLbPerMwh: 863.5, year: 2022 },
+  { subregion: "SRMV", subregionName: "SERC Mississippi Valley", co2eLbPerMwh: 802.8, year: 2022 },
+  { subregion: "SRMW", subregionName: "SERC Midwest (Illinois/Missouri)", co2eLbPerMwh: 1163.7, year: 2022 },
+  { subregion: "SRTV", subregionName: "SERC Tennessee Valley", co2eLbPerMwh: 855.0, year: 2022 },
+  { subregion: "SRVC", subregionName: "SERC Virginia/Carolinas", co2eLbPerMwh: 619.8, year: 2022 },
 ];
 
 /** zip3 → subregion for launch territories (AZ + neighbors). */

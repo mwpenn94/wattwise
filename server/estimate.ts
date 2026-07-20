@@ -20,6 +20,7 @@ import { costOnTariff, tariffEligible } from "./analytics/tariffEngine";
 import type { TariffStructure } from "../shared/wattwise";
 import { buildAccuracyLadder } from "../shared/capabilityMatrix"; // accuracy ladder + cross-commodity gas teaser
 import { lookupTerritory } from "./serviceTerritories";
+import { STATE_PROFILES } from "./seed/nationalData";
 
 /* ---------------- IP rate limiting (public endpoint guard) ---------------- */
 const BUCKET_MAX = 12; // estimates per window per IP
@@ -164,10 +165,23 @@ export async function computeAddressEstimate(input: {
       /* skip malformed structures — estimate must not 500 on one bad row */
     }
   }
+  let noTariffPriceNote: string | null = null;
   if (annualCost == null) {
-    // national average residential/commercial blended rates (EIA 2025) — last resort
-    const blended = sector === "residential" ? 0.17 : 0.13;
-    annualCost = annualKwh * blended;
+    // Actual-first ladder (owner directive Jul 19): no seeded structure matched,
+    // so impute at the STATE-average sector rate (EIA-861 2024, seeded in
+    // STATE_PROFILES — spans ~9¢ WY to ~40¢ HI) before the national blend.
+    const prof = state ? STATE_PROFILES.find((p) => p.state === state) : null;
+    const stateCents = prof ? (sector === "residential" ? prof.resRateCents : prof.commRateCents) : null;
+    if (stateCents && stateCents > 0) {
+      const rate = stateCents / 100;
+      annualCost = annualKwh * rate;
+      noTariffPriceNote = `No seeded tariff structure matched; priced at the ${state} state-average ${sector} rate ($${rate.toFixed(3)}/kWh, EIA-861 2024 — state-average imputed). Your actual rate may differ.`;
+    } else {
+      // national average residential/commercial blended rates (EIA 2025) — true last resort
+      const blended = sector === "residential" ? 0.17 : 0.13;
+      annualCost = annualKwh * blended;
+      noTariffPriceNote = `No seeded tariff matched and state unknown; priced at the EIA national-average ${sector} blend ($${blended.toFixed(2)}/kWh — national-average imputed).`;
+    }
     tariffName = null;
   }
 
@@ -300,7 +314,7 @@ export async function computeAddressEstimate(input: {
         name: tariffName,
         note: tariffName
           ? "Cheapest eligible seeded rate for your area — your actual rate may differ"
-          : "No seeded tariff matched; priced at a national blended rate",
+          : (noTariffPriceNote ?? "No seeded tariff matched; priced at a national blended rate"),
       },
       loadBasis: "archetype_scaled",
     },

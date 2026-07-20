@@ -278,24 +278,17 @@ export async function seedNationalWeather(db: Db) {
   return n;
 }
 
-/** eGRID 2022 CO2e defaults for subregions not in the AZ-launch set (lb/MWh). */
+/** eGRID 2022 CO2e defaults for subregions not in the AZ-launch set (lb/MWh).
+ * Accuracy pass (Jul 20): this was a second hand-copied factor table that had
+ * drifted from the canonical seedData.EGRID_FACTORS (e.g. MROE 1395.4 vs
+ * 1180.9, SRMW 1500.5 vs 1163.7). EGRID_FACTORS now carries every subregion
+ * referenced by STATE_SUBREGION and is the single authority; this map derives
+ * from it (plus the two NY splits not used by any state default), so the two
+ * sources can never diverge again. */
 const NATIONAL_EGRID_DEFAULTS: Record<string, number> = {
-  AKGD: 1067.0,
-  FRCC: 813.9,
-  HIOA: 1548.7,
-  MROE: 1395.4,
-  MROW: 972.9,
-  NEWE: 528.0,
-  NYLI: 1200.7,
-  NYUP: 262.5,
-  RFCM: 1198.6,
-  RFCW: 998.2,
-  SRMV: 771.5,
-  SRMW: 1500.5,
-  SRTV: 941.7,
-  SRVC: 620.1,
-  SPNO: 1088.9,
-  SPSO: 987.4,
+  ...Object.fromEntries(EGRID_FACTORS.map((f) => [f.subregion, f.co2eLbPerMwh])),
+  NYLI: 1200.7, // NPCC Long Island — kept for ZIP3-level NY splits
+  NYUP: 262.5, // NPCC Upstate NY
 };
 
 /** National representative tariffs: 4 per state (res flat/TOU, comm flat,

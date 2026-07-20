@@ -2178,9 +2178,17 @@ export const appRouter = router({
           } as BaselineFit)
         : null;
 
-      // blended rate from the latest analysis summary insight (all-in $/kWh)
-      let blendedRate = 0.12;
-      let rateDisclosure = "Priced at a $0.12/kWh national-average assumption — run an analysis with a tariff to use your real blended rate.";
+      // blended rate from the latest analysis summary insight (all-in $/kWh).
+      // Actual-first ladder: real blended rate (below) → state-average imputed
+      // (EIA-861 2024 via STATE_PROFILES) → national assumption as true last resort.
+      const mvProf = site.state ? STATE_PROFILES.find((p) => p.state === site.state) : null;
+      const mvSector = site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? "residential" : "commercial";
+      const mvStateCents = mvProf ? (mvSector === "residential" ? mvProf.resRateCents : mvProf.commRateCents) : null;
+      let blendedRate = mvStateCents && mvStateCents > 0 ? mvStateCents / 100 : 0.12;
+      let rateDisclosure =
+        mvStateCents && mvStateCents > 0
+          ? `Priced at the ${site.state} state-average ${mvSector} rate ($${(mvStateCents / 100).toFixed(3)}/kWh, EIA-861 2024 — state-average imputed) — run an analysis with a tariff to use your real blended rate.`
+          : "Priced at a $0.12/kWh national-average assumption — no state on file to impute a closer rate; run an analysis with a tariff to use your real blended rate.";
       const siteInsights = await h.listInsights(impl.siteId, ctx.user.id);
       const summary = [...siteInsights].reverse().find((i) => i.kind === "summary");
       const summaryMetrics = (summary?.metrics ?? null) as { currentCost?: { breakdown?: { total?: number; energyKwh?: number } } } | null;
@@ -2611,7 +2619,10 @@ export const appRouter = router({
             confidence: rollupConfidence,
           },
           disclosure:
-            "Portfolio rollup sums per-site composed savings; sites are composed independently (no cross-site interaction modeled). Rollup confidence inherits the weakest site chip.",
+            "Portfolio rollup sums per-site composed savings; sites are composed independently (no cross-site interaction modeled). Rollup confidence inherits the weakest site chip." +
+            (input.measure.capexUsd != null && input.measure.capexUsd > 0
+              ? " Capex shown is a typical-project placeholder applied to EVERY site — real installed costs vary by site size and condition; get quotes before relying on payback."
+              : ""),
         };
       }),
 

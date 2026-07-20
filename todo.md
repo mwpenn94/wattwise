@@ -471,3 +471,11 @@
 - [x] GEO-1: Diagnose why building geometry fails on previously-working addresses (prod logs + pipeline trace)
 - [x] GEO-2: Fix root cause; add resilience (retry/fallback/graceful degradation) so geometry failure never blocks the flow
 - [x] GEO-3: Tests + live verification against previously-working addresses
+
+## Accuracy/precision/justification audit (Jul 19)
+- [x] ACC-1: Inventory full calculation surface (bills, savings, rates, benchmarks, emissions, scenarios, projections)
+- [x] ACC-2: Audit + fix unjustified constants, unit errors, precision/rounding issues, provenance gaps
+- [x] ACC-3: Recursion passes to convergence (two consecutive clean passes), tests updated
+
+## Accuracy convergence audit (Jul 20)
+- [x] ACC-CONV: Recursive convergence passes — pass 1 (9 fixes), pass 2 (3 fixes), pass 3 clean, pass 4 (1 fix: M&V blended-rate ladder), passes 5 & 6 consecutive clean → CONVERGED

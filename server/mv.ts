@@ -152,7 +152,16 @@ export async function assessMv(opts: {
   }
   const totalAvoided = rows.reduce((s, r) => s + r.avoided, 0);
   const totalPredicted = rows.reduce((s, r) => s + r.predicted, 0);
+  // Accuracy pass (Jul 20): the no-CV(RMSE) fallback assumes 50% relative
+  // uncertainty — double the ASHRAE G14 monthly gate, deliberately conservative
+  // for a model whose fit quality is unknown. Previously applied silently; a
+  // ±band with an undisclosed basis is not a justified number.
   const uncertaintyUnits = fit.cvrmse != null ? Math.round(Math.abs(totalPredicted) * fit.cvrmse * 100) / 100 : Math.round(Math.abs(totalPredicted) * 0.5 * 100) / 100;
+  if (fit.cvrmse == null) {
+    disclosures.push(
+      "Model fit statistics are unavailable, so the uncertainty band assumes 50% relative uncertainty — double the ASHRAE G14 monthly-model gate — as a conservative placeholder; treat the band as indicative only.",
+    );
+  }
 
   /* ---- price avoided units at the assigned tariff's volumetric rate ---- */
   let ratePerUnit: number | null = null;

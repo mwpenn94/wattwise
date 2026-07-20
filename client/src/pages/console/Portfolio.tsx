@@ -896,11 +896,13 @@ function PortfolioBasket({ rows }: { rows: { siteId: number; name: string; analy
   });
 
   const MEASURES: Record<string, { label: string; kind: "efficiency" | "solar" | "battery"; efficiencyReductions?: Record<string, number>; solarKwDc?: number; batteryKwh?: number; batteryKw?: number; capexUsd?: number }> = {
-    led_retrofit: { label: "LED retrofit", kind: "efficiency", efficiencyReductions: { lighting: 0.5 }, capexUsd: 8000 },
-    hvac_tuneup: { label: "HVAC tune-up / controls", kind: "efficiency", efficiencyReductions: { cooling: 0.15, heating: 0.1 }, capexUsd: 5000 },
-    smart_thermostats: { label: "Smart thermostats / setpoints", kind: "efficiency", efficiencyReductions: { cooling: 0.08, heating: 0.08 }, capexUsd: 1200 },
-    solar_50kw: { label: "Solar 50 kW DC", kind: "solar", solarKwDc: 50, capexUsd: 110000 },
-    battery_100kwh: { label: "Battery 100 kWh / 50 kW", kind: "battery", batteryKwh: 100, batteryKw: 50, capexUsd: 90000 },
+    // Capex figures are typical-project placeholders (disclosed in the result);
+    // reductions mirror the server scenario presets (DOE/ENERGY STAR typical ranges).
+    led_retrofit: { label: "LED retrofit (~$8k typ. capex)", kind: "efficiency", efficiencyReductions: { lighting: 0.5 }, capexUsd: 8000 },
+    hvac_tuneup: { label: "HVAC tune-up / controls (~$5k typ. capex)", kind: "efficiency", efficiencyReductions: { cooling: 0.15, heating: 0.1 }, capexUsd: 5000 },
+    smart_thermostats: { label: "Smart thermostats / setpoints (~$1.2k typ. capex)", kind: "efficiency", efficiencyReductions: { cooling: 0.08, heating: 0.08 }, capexUsd: 1200 },
+    solar_50kw: { label: "Solar 50 kW DC (~$110k typ. capex)", kind: "solar", solarKwDc: 50, capexUsd: 110000 },
+    battery_100kwh: { label: "Battery 100 kWh / 50 kW (~$90k typ. capex)", kind: "battery", batteryKwh: 100, batteryKw: 50, capexUsd: 90000 },
   };
 
   const toggle = (id: number) =>
