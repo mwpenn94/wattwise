@@ -20,6 +20,7 @@ import { notifyOwner } from "./_core/notification";
 import { reassertNationalRates } from "./seed/runSeeders";
 import { SEED_VERSION } from "./seed/seedData";
 import { assessSeedFreshness } from "./seedLifecycle";
+import { checkEiaRateDrift } from "./eiaRefresh";
 
 export async function digestHandler(req: Request, res: Response) {
   try {
@@ -82,13 +83,26 @@ export async function refreshReferenceHandler(req: Request, res: Response) {
     const staleness = await assessSeedFreshness(now).catch(() => []);
     const overdue = staleness.filter((s) => s.stale);
     const freshness = await territoryFreshness();
-    const material = incentives.expiringSoon.length > 0 || territories.superseded > 0 || rates.inserted > 0 || overdue.length > 0;
+    // NEXT-4: live EIA drift check — gated on EIA_API_KEY (free). Detects when
+    // the seeded state-average catalog has drifted >10% from current EIA data
+    // and reports it for a deliberate seed update; never mutates rate rows
+    // (the weekly re-assert would clobber runtime mutations anyway).
+    const eia = await checkEiaRateDrift(now).catch((e) => ({ ran: false as const, reason: e instanceof Error ? e.message : String(e) }));
+    const eiaDrifted = eia.ran && eia.drifted ? eia.drifted : [];
+    const material = incentives.expiringSoon.length > 0 || territories.superseded > 0 || rates.inserted > 0 || overdue.length > 0 || eiaDrifted.length > 0;
     if (material) {
       const parts: string[] = [];
       if (incentives.expiringSoon.length > 0) parts.push(`Incentive programs expiring within 90 days: ${incentives.expiringSoon.join(", ")} — verify renewal terms and update the catalog.`);
       if (territories.superseded > 0) parts.push(`${territories.superseded} service-territory rows superseded by vintage ${freshness?.sourceVersion ?? "current"}.`);
       if (rates.inserted > 0) parts.push(`${rates.inserted} missing national rate rows re-created during the weekly re-assert (${rates.updated} refreshed in place) — someone or something had removed them.`);
       if (overdue.length > 0) parts.push(`Reference datasets past their refresh cadence: ${overdue.map((s) => `${s.source} (${s.ageDays}d old, cadence ${s.cadenceDays}d)`).join(", ")} — schedule a source-data update.`);
+      if (eiaDrifted.length > 0)
+        parts.push(
+          `EIA live check (period ${eia.ran ? (eia.electricPeriod ?? eia.gasPeriod ?? "latest") : ""}): ${eiaDrifted.length} state-average rate(s) drifted >10% from the seeded catalog — ${eiaDrifted
+            .slice(0, 8)
+            .map((d) => `${d.state} ${d.metric.replaceAll("_", " ")} seeded ${d.seeded} vs live ${d.live}`)
+            .join("; ")}${eiaDrifted.length > 8 ? ` (+${eiaDrifted.length - 8} more)` : ""}. Update STATE_PROFILES in server/seed/nationalData.ts.`,
+        );
       await notifyOwner({
         title: "Meterly reference-data refresh: attention needed",
         content: parts.join(" "),
@@ -101,6 +115,7 @@ export async function refreshReferenceHandler(req: Request, res: Response) {
       rates,
       staleSeeds: overdue.map((s) => s.source),
       freshness,
+      eia,
     });
   } catch (err) {
     res.status(500).json({

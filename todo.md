@@ -479,3 +479,9 @@
 
 ## Accuracy convergence audit (Jul 20)
 - [x] ACC-CONV: Recursive convergence passes — pass 1 (9 fixes), pass 2 (3 fixes), pass 3 clean, pass 4 (1 fix: M&V blended-rate ladder), passes 5 & 6 consecutive clean → CONVERGED
+
+## Backlog execution (Jul 21 — "consider next steps + Vault history, do optimal")
+- [x] NEXT-1: Calibrate-to-my-bill — enter a real bill total, derive the site's true blended rate, becomes tier-0 "bill-verified" in the rate ladder across estimates/scenarios/opportunities/M&V
+- [x] NEXT-2: UI provenance badges — color-coded tier chip (bill-verified/filed/imputed/national) with full basis tooltip on dollar figures (Explore, Scenarios, Portfolio, Estimate)
+- [x] NEXT-3: Persist geometry resolve results to DB so cold-started prod instances skip throttled upstreams
+- [x] NEXT-4: EIA API refresh module in weekly cron (gated on EIA_API_KEY; graceful vintage-reassert fallback when absent) — implemented as a drift DETECTOR (compares live EIA vs seeded catalog, notifies owner on >10% drift) rather than silent mutation, since the weekly re-assert would clobber runtime rate mutations

@@ -14,6 +14,7 @@
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ProvenanceBadge } from "@/components/ProvenanceBadge";
 
 export type InsightConfidence = "estimated" | "good" | "measured";
 
@@ -55,6 +56,9 @@ export interface InsightCardProps {
   confidence: InsightConfidence;
   /** Extra chips (e.g. "ratchet-aware") rendered after the confidence chip. */
   extraChips?: string[];
+  /** NEXT-2: raw basis/disclosure string for the rate-provenance tier chip.
+   * Classified client-side; renders nothing when no tier keyword matches. */
+  rateBasis?: string | null;
   /** One-tap action. Omit when the card is purely informational. */
   action?: { label: string; onClick: () => void; disabled?: boolean };
   /** Optional secondary action (e.g. §3e "I did this" prove-it entry point). */
@@ -95,6 +99,7 @@ export function InsightCard(p: InsightCardProps) {
           )}
         </p>
         <div className="flex flex-wrap items-center gap-1.5">
+          {p.rateBasis != null && <ProvenanceBadge basis={p.rateBasis} />}
           {p.extraChips?.map((c) => (
             <span key={c} className="prov-chip">
               {c}

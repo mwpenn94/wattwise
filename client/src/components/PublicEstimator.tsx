@@ -28,6 +28,7 @@ import {
   UtensilsCrossed,
   Warehouse,
 } from "lucide-react";
+import { ProvenanceBadge } from "@/components/ProvenanceBadge";
 
 const BUILDING_TYPES: Array<{ key: string; label: string; icon: typeof HomeIcon; residential?: boolean }> = [
   { key: "single_family", label: "Home", icon: HomeIcon, residential: true },
@@ -287,9 +288,14 @@ export function PublicEstimator() {
           )}
 
           {/* money-first headline */}
-          <p className="font-display text-3xl font-extrabold tracking-tight stat-glow">
-            ~${est.estimatedAnnualCostUsd.toLocaleString()}
-            <span className="text-base font-semibold text-muted-foreground">/yr</span>
+          <p className="flex flex-wrap items-center gap-2 font-display text-3xl font-extrabold tracking-tight stat-glow">
+            <span>
+              ~${est.estimatedAnnualCostUsd.toLocaleString()}
+              <span className="text-base font-semibold text-muted-foreground">/yr</span>
+            </span>
+            {/* NEXT-2: anonymous teasers are state-average imputed by construction —
+                the tier chip says so at the headline; tooltip carries the accuracy label. */}
+            <ProvenanceBadge tier="imputed" basis={est.accuracy.label} />
           </p>
           <p className="text-xs text-muted-foreground">
             electric ≈ ${est.estimatedMonthlyCostUsd.toLocaleString()}/mo · {est.estimatedAnnualKwh.toLocaleString()} kWh —{" "}

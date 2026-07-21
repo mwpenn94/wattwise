@@ -35,6 +35,7 @@ import type { MonthNormalRow } from "./analytics/baseline";
 import { COMMODITY_UNITS, TariffStructure, MODELED_ESTIMATES_DISCLAIMER } from "../shared/wattwise";
 import { resolveCommodityService } from "./commodityService";
 import { lookupTerritory } from "./serviceTerritories";
+import { deriveBillVerifiedRate } from "./billCalibration";
 
 export type XcOpportunity = OpportunityCandidate & {
   estUnitsSavedPerYr?: number;
@@ -115,10 +116,12 @@ async function resolveBasis(site: SiteLite, userId: number, com: "gas" | "water"
  * notated in the label (owner directive Jul 19: "actual as able, imputed
  * where required, notated accordingly"):
  *   1. the meter's ASSIGNED tariff (closest to actual — user/bill-selected)
- *   2. a FILED seeded tariff (hand-modeled, source ≠ state-average imputed)
- *   3. the TERRITORY-ATTRIBUTED utility's state-average imputed row (the ZIP's
+ *   2. BILL-VERIFIED blended rate from real bills on file (NEXT-1 — observed
+ *      price, above every modeled/imputed tier)
+ *   3. a FILED seeded tariff (hand-modeled, source ≠ state-average imputed)
+ *   4. the TERRITORY-ATTRIBUTED utility's state-average imputed row (the ZIP's
  *      dominant LDC per the EIA-861/176 registry)
- *   4. any state row → 5. disclosed national default. */
+ *   5. any state row → 6. disclosed national default. */
 async function resolveRate(site: SiteLite, userId: number, com: "gas" | "water"): Promise<{ rate: number; label: string }> {
   const meters = await h.listMeters(site.id, userId);
   const cMeter = meters.find((m) => m.commodity === com) ?? null;
@@ -131,6 +134,16 @@ async function resolveRate(site: SiteLite, userId: number, com: "gas" | "water")
   };
   const assigned = await tryTariff(cMeter?.currentTariffId);
   if (assigned) return assigned;
+  // Tier 2 (NEXT-1): the customer's own bills — an observed blended price
+  // beats every modeled or imputed rate below. Units line up natively: bill
+  // usage is stored in canonical units (therms, gallons), so the blend is
+  // already $/therm or $/gal as this module prices.
+  try {
+    const bv = await deriveBillVerifiedRate(site.id, userId, com);
+    if (bv) return { rate: bv.rate, label: bv.basis };
+  } catch {
+    /* bill calibration is strictly additive — never let it break the ladder */
+  }
   const seeded = site.state ? await h.listTariffs(com, site.state) : [];
   const rateOf = (t: (typeof seeded)[number]) => {
     const r = (t.structure as TariffStructure)?.energy?.[0]?.ratePerUnit;

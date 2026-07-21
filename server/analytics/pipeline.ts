@@ -43,6 +43,7 @@ import { staleSeedsForDomain } from "../seedLifecycle";
 import { generateCommodityOpportunities, type XcOpportunity } from "../commodityOpportunities";
 import { STATE_PROFILES } from "../seed/nationalData";
 import { resolveCommodityService } from "../commodityService";
+import { deriveBillVerifiedRate } from "../billCalibration";
 import type { Site, Meter } from "../../drizzle/schema";
 
 /** Opportunity candidate as it flows through ranking/persistence — electric
@@ -1155,6 +1156,19 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   } catch (e) {
     narrate(`AC14 vertical pack skipped: ${e instanceof Error ? e.message : String(e)}`);
   }
+  // NEXT-1 (Jul 21): rate resolution hoisted above the summary write so the
+  // machine-readable ratePricing block below reflects the SAME resolution the
+  // stage-7 opportunity pricing uses — one ladder, one answer.
+  // Batch-18 (pass 419): pass the raw window total so short-history sites (<25
+  // days, annualUsage null) still get their real blended rate instead of the
+  // $0.12 fallback — the rate is window-invariant even when annualization isn't.
+  const stateProfileRow = site.state ? STATE_PROFILES.find((p) => p.state === site.state) : null;
+  const stateAvgRate = stateProfileRow ? { rate: stateProfileRow.commRateCents / 100, state: stateProfileRow.state } : null;
+  // NEXT-1: bill-verified calibration — only fetched when it could matter
+  // (no tariff-priced cost basis), since the real-cost tiers win regardless.
+  const billVerified = currentCost == null ? await deriveBillVerifiedRate(site.id, userId, "electric") : null;
+  const { rate: kWhRate, isFallback: rateIsFallback, fallbackReason, fallbackBasis } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null, hasIntervals && points.length > 0, stateAvgRate, billVerified);
+  const priceBasisPhrase = fallbackBasis ?? "a $0.12/kWh national-average assumption";
   // Machine-readable summary row: persists demand analytics (incl. heatmap),
   // benchmark, emissions, current cost, and tariff comparisons so the dashboard
   // KPI cards and panels survive page reloads (live-E2E pass-1 finding).
@@ -1190,6 +1204,22 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       benchmark,
       emissions,
       currentCost,
+      // NEXT-1/NEXT-2 (Jul 21): machine-readable rate provenance so the UI can
+      // render a tier badge and — when the rate is imputed — a "calibrate with
+      // a bill" callout. tier ordering: tariff_priced_actual > bill_verified >
+      // state_average_imputed > national_assumption.
+      ratePricing: {
+        rateUsdPerKwh: kWhRate,
+        isFallback: rateIsFallback,
+        basis: rateIsFallback ? priceBasisPhrase : "your tariff-priced cost basis (actual)",
+        tier: !rateIsFallback
+          ? "tariff_priced_actual"
+          : billVerified
+            ? "bill_verified"
+            : stateAvgRate
+              ? "state_average_imputed"
+              : "national_assumption",
+      },
       // Batch-45 (pass 1928): structure-level flag so the dashboard can say
       // "your rate has no demand charges" ONLY when the structure truly has
       // none — never inferred from a $0 priced breakdown.
@@ -1304,12 +1334,6 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       }
     }
   }
-  // Batch-18 (pass 419): pass the raw window total so short-history sites (<25
-  // days, annualUsage null) still get their real blended rate instead of the
-  // $0.12 fallback — the rate is window-invariant even when annualization isn't.
-  const stateProfileRow = site.state ? STATE_PROFILES.find((p) => p.state === site.state) : null;
-  const stateAvgRate = stateProfileRow ? { rate: stateProfileRow.commRateCents / 100, state: stateProfileRow.state } : null;
-  const { rate: kWhRate, isFallback: rateIsFallback, fallbackReason, fallbackBasis } = estimateBlendedRate(currentCost, annualUsage, hasIntervals ? totalImportKwh(points) : null, hasIntervals && points.length > 0, stateAvgRate);
   // Batch-19 (pass 539): the disclosure names the actual cause — a customer
   // with usage data but no identified tariff was being told their "cost basis
   // could not be established", which misdirects them toward re-uploading data
@@ -1317,7 +1341,6 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // Batch-41 (pass 1769): a third cause — valid interval data that is export-
   // dominated (no positive net-import kWh) — must not be blamed on "usage data"
   // the customer did in fact upload; the blended-rate math is import-only.
-  const priceBasisPhrase = fallbackBasis ?? "a $0.12/kWh national-average assumption";
   const fallbackRateDisclosure =
     fallbackReason === "no_tariff_cost_basis"
       ? `Savings priced at ${priceBasisPhrase} because no tariff could be identified to compute your real rate — select or verify your tariff to price savings at your actual rate.`
@@ -1717,6 +1740,7 @@ function estimateBlendedRate(
   rawUsageKwh?: number | null,
   hasAnyPoints?: boolean,
   stateAvg?: { rate: number; state: string } | null,
+  billVerified?: { rate: number; basis: string } | null,
 ): { rate: number; isFallback: boolean; fallbackReason?: "no_tariff_cost_basis" | "no_usage_data" | "no_net_import"; fallbackBasis?: string } {
   // All-in blended rate: total annual cost (energy + demand + fixed + CP − export)
   // per kWh (cycle 1, passes 9/19). Energy-only understates ¢/kWh on
@@ -1749,6 +1773,22 @@ function estimateBlendedRate(
   // them toward re-uploading valid data. The blended rate is import-only by
   // design; name that condition specifically.
   const hasPositiveUsage = (annualUsage && annualUsage > 0) || (rawUsageKwh && rawUsageKwh > 0);
+  // NEXT-1 (Jul 21, "calibrate to my bill"): when no tariff/cost basis exists
+  // but the customer has REAL bills on file, their own blended rate (sum cost /
+  // sum usage across recent actual-read bills, latest revision per period —
+  // billCalibration.ts) beats every imputation: it is an observed price, not a
+  // modeled or averaged one. Still flagged isFallback because it lacks the
+  // tariff structure needed for per-period exactness (TOU/demand split), but
+  // the basis string carries bill-verified provenance so disclosures and
+  // badges rank it above all imputed tiers.
+  if (billVerified && Number.isFinite(billVerified.rate) && billVerified.rate > 0) {
+    return {
+      rate: billVerified.rate,
+      isFallback: true,
+      fallbackReason: hasPositiveUsage ? "no_tariff_cost_basis" : hasAnyPoints ? "no_net_import" : "no_usage_data",
+      fallbackBasis: billVerified.basis,
+    };
+  }
   // Owner directive (Jul 19, "actual as able, imputed where required, notated
   // accordingly"): before dropping all the way to the generic $0.12 national
   // assumption, use the site's STATE-average commercial retail rate (EIA-861

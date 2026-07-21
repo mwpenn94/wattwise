@@ -1066,6 +1066,26 @@ export const templateTasks = mysqlTable("template_tasks", {
 });
 export type TemplateTaskRow = typeof templateTasks.$inferSelect;
 
+/** NEXT-3 (Jul 21) — persisted footprint-resolve cache. The in-memory ~6h
+ * cache in geometry.ts dies with every autoscale cold start; footprints
+ * change on the timescale of YEARS, so successful resolves are also written
+ * here (keyed by the same ~11m grid cell) and consulted before hitting the
+ * raced OSM/Esri upstreams. 180-day TTL enforced at read time; transport
+ * failures are never persisted. */
+export const geometryResolveCache = mysqlTable("geometry_resolve_cache", {
+  id: int("id").autoincrement().primaryKey(),
+  /** ~11m grid cell key: `lat.toFixed(4),lng.toFixed(4)` */
+  gridKey: varchar("gridKey", { length: 32 }).notNull().unique(),
+  /** which source family produced the candidates */
+  provider: mysqlEnum("provider", ["osm", "esri", "none"]).notNull(),
+  /** FootprintCandidate[] JSON exactly as resolveFootprints returned it */
+  candidates: json("candidates").notNull(),
+  resolvedAt: bigint("resolvedAt", { mode: "number" }).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+export type GeometryResolveCacheRow = typeof geometryResolveCache.$inferSelect;
+
 /** v1.22 config-not-constant rule: external numeric limits (API caps,
  * free-tier thresholds, cache TTLs, service lives) ship as seeded config. */
 export const platformConfig = mysqlTable("platform_config", {

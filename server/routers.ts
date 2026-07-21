@@ -71,6 +71,8 @@ import { deriveFromAddress, cascadeProvenance, deriveUtilityTriple } from "./cas
 import { placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
 import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { reconcileBill } from "./billReconciliation";
+import { deriveBillVerifiedRate } from "./billCalibration";
+import { registerGeometryCacheDb } from "./geometryCacheDb";
 import { assessSeedFreshness, recordParseOutcome, recordUnknownTariff, sweepUnverifiedTariffs } from "./seedLifecycle";
 import { incentiveEconomics } from "./incentives";
 import { runCommodityEfficiency } from "./commodityScenario";
@@ -141,6 +143,10 @@ let sampleCardCache: {
     label: string;
   };
 } | null = null;
+
+/* NEXT-3: wire the persistent footprint-resolve cache once at startup —
+ * geometry.ts stays DB-free; the adapter injects the drizzle-backed layer. */
+registerGeometryCacheDb();
 
 export const appRouter = router({
   system: systemRouter,
@@ -2189,6 +2195,13 @@ export const appRouter = router({
         mvStateCents && mvStateCents > 0
           ? `Priced at the ${site.state} state-average ${mvSector} rate ($${(mvStateCents / 100).toFixed(3)}/kWh, EIA-861 2024 — state-average imputed) — run an analysis with a tariff to use your real blended rate.`
           : "Priced at a $0.12/kWh national-average assumption — no state on file to impute a closer rate; run an analysis with a tariff to use your real blended rate.";
+      // NEXT-1 (calibrate to my bill): real bills on file beat any imputation —
+      // upgrade the tier before the analysis-summary rate (which itself wins below).
+      const mvBillVerified = await deriveBillVerifiedRate(impl.siteId, ctx.user.id, "electric");
+      if (mvBillVerified) {
+        blendedRate = mvBillVerified.rate;
+        rateDisclosure = `Priced at ${mvBillVerified.basis} — verified savings scale with the rate actually paid.`;
+      }
       const siteInsights = await h.listInsights(impl.siteId, ctx.user.id);
       const summary = [...siteInsights].reverse().find((i) => i.kind === "summary");
       const summaryMetrics = (summary?.metrics ?? null) as { currentCost?: { breakdown?: { total?: number; energyKwh?: number } } } | null;

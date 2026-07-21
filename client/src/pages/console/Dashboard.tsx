@@ -29,6 +29,7 @@ import UtilityServicesCard from "@/components/UtilityServicesCard";
 import { Link, useSearch } from "wouter";
 import { Printer } from "lucide-react";
 import SiteInsightsReport, { type InsightsPrintData } from "@/components/print/SiteInsightsReport";
+import { ProvenanceBadge, classifyBasis } from "@/components/ProvenanceBadge";
 
 type Demand = {
   peakKw: number;
@@ -134,6 +135,8 @@ export default function Dashboard() {
     emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number; mapped?: boolean } | null;
     currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
     basisStructureHasDemandCharges?: boolean | null;
+    // NEXT-1/NEXT-2: machine-readable rate provenance from the pipeline summary
+    ratePricing?: { rateUsdPerKwh?: number; isFallback?: boolean; basis?: string; tier?: string } | null;
     demandReview?: DemandReviewData | null;
     tariffComparisons?: Array<{
       tariffName: string;
@@ -417,6 +420,26 @@ export default function Dashboard() {
           }
         />
       </div>
+
+      {/* NEXT-1 (Jul 21): calibrate-with-a-bill callout — when savings are
+          priced on an IMPUTED rate (state-average / national), one real bill
+          upgrades every downstream dollar to the bill-verified tier
+          automatically on the next analysis. Hidden once the rate is already
+          actual or bill-verified. */}
+      {summary?.ratePricing?.isFallback === true && summary.ratePricing.tier !== "bill_verified" && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3">
+          <ProvenanceBadge tier={(summary.ratePricing.tier as never) ?? null} basis={summary.ratePricing.basis ?? null} />
+          <p className="flex-1 text-xs leading-relaxed text-muted-foreground">
+            Dollar figures are priced at {summary.ratePricing.basis ?? "an imputed rate"}. Add one real bill (total $ and
+            usage) and the next analysis upgrades every figure to your bill-verified rate — automatically.
+          </p>
+          <Link href="/app/upload">
+            <Button size="sm" variant="outline" className="h-7 border-amber-500/40 text-xs">
+              Calibrate with a bill
+            </Button>
+          </Link>
+        </div>
+      )}
 
       {/* §3g hero rotation container — CSS order flips the story order per
           persona without duplicating JSX: commercial (facility voice) leads
@@ -734,7 +757,13 @@ export default function Dashboard() {
             )}
             {costInsight?.breakdown && (
               <div className="border-t border-border pt-3">
-                <p className="text-sm font-medium">Modeled annual cost on current rate</p>
+                <p className="flex items-center gap-2 text-sm font-medium">
+                  Modeled annual cost on current rate
+                  <ProvenanceBadge
+                    tier={(summary?.ratePricing?.tier as never) ?? null}
+                    basis={summary?.ratePricing?.basis ?? "your tariff-priced cost basis (actual)"}
+                  />
+                </p>
                 <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground sm:grid-cols-4">
                   <span>energy {fmtUsd(costInsight.breakdown.energy)}</span>
                   <span>demand {fmtUsd(costInsight.breakdown.demand)}</span>
@@ -949,6 +978,13 @@ export default function Dashboard() {
                   headlineFallback={`No dollar figure yet (needs a priced rate)`}
                   why={o.description ?? ""}
                   confidence={chipFromConfidence(o.confidence, o.disaggregationMethod === "nilmtk_1min_plus")}
+                  /* NEXT-2: rate-provenance tier chip from the strongest rate-bearing disclosure */
+                  rateBasis={
+                    (((o.provenance as Record<string, unknown> | null)?.disclosures as string[] | undefined) ?? []).find(
+                      (d) => classifyBasis(d) != null,
+                    ) ??
+                    (summary?.ratePricing?.isFallback === false ? "your tariff-priced cost basis (actual)" : null)
+                  }
                   extraChips={[
                     /* Parity fix (Jul 19): gas/water measures rank alongside electric —
                        the commodity chip makes the cross-commodity feed legible. */

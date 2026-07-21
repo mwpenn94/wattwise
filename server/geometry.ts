@@ -444,6 +444,23 @@ export function _clearResolveCache(): void {
   RESOLVE_CACHE.clear();
 }
 
+/* NEXT-3 (Jul 21) — persistent DB cache layer. Autoscale cold starts wipe the
+ * in-memory map; footprints change on the timescale of YEARS. Successful
+ * resolves are also written to geometry_resolve_cache (same ~11m grid key)
+ * and consulted before hitting upstreams. 180-day TTL at read time. The DB
+ * layer is injected (not imported) so this module stays dependency-free and
+ * unit-testable without a database. Fail-open in both directions: a cache
+ * read/write error never blocks a resolve. */
+export interface PersistentResolveCache {
+  get(gridKey: string): Promise<{ provider: "osm" | "esri" | "none"; candidates: FootprintCandidate[]; resolvedAt: number } | null>;
+  put(gridKey: string, provider: "osm" | "esri" | "none", candidates: FootprintCandidate[]): Promise<void>;
+}
+let persistentCache: PersistentResolveCache | null = null;
+export function setPersistentResolveCache(c: PersistentResolveCache | null): void {
+  persistentCache = c;
+}
+export const PERSISTENT_RESOLVE_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 days
+
 /**
  * Resolve footprints by racing BOTH source families in parallel:
  *   - OSM Overpass (itself a parallel mirror race) — richest tags, ODbL
@@ -463,6 +480,20 @@ export async function resolveFootprints(
     const hit = RESOLVE_CACHE.get(key);
     if (hit && Date.now() - hit.at < RESOLVE_CACHE_TTL_MS) {
       return { ...hit.value, cached: true };
+    }
+    // NEXT-3: persistent layer — survives cold starts. On hit, rehydrate the
+    // in-memory map too so subsequent calls in this instance stay local.
+    if (persistentCache) {
+      try {
+        const row = await persistentCache.get(key);
+        if (row && Date.now() - row.resolvedAt < PERSISTENT_RESOLVE_TTL_MS) {
+          const value: ResolvedFootprints = { candidates: row.candidates, provider: row.provider, osmFailed: false, esriFailed: false, cached: false };
+          RESOLVE_CACHE.set(key, { at: row.resolvedAt, value });
+          return { ...value, cached: true };
+        }
+      } catch {
+        /* fail-open: cache trouble never blocks a resolve */
+      }
     }
   }
 
@@ -496,6 +527,13 @@ export async function resolveFootprints(
       if (oldest != null) RESOLVE_CACHE.delete(oldest);
     }
     RESOLVE_CACHE.set(key, { at: Date.now(), value });
+    // NEXT-3: write-through to the persistent layer (never on transport
+    // failure — same rule as the in-memory cache). Fire-and-forget.
+    if (persistentCache) {
+      persistentCache.put(key, provider, candidates).catch(() => {
+        /* fail-open */
+      });
+    }
   }
   return value;
 }

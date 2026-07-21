@@ -25,6 +25,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { fmtUsd, fmtNum } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
+import { ProvenanceBadge, classifyBasis } from "@/components/ProvenanceBadge";
 import BillBuilder from "@/components/BillBuilder";
 import type { ScenarioResults } from "@shared/wattwise";
 
@@ -226,6 +227,12 @@ export default function Scenarios() {
                       <ProvChip>{s.loadBasis === "measured_intervals" ? "measured basis" : "archetype basis"}</ProvChip>
                       {s.extrapolated && <ProvChip>extrapolated</ProvChip>}
                       {r && <ConfidenceBadge level={r.confidence} label={r.confidenceLabel} />}
+                      {/* NEXT-2: rate-provenance tier chip — classified from the strongest
+                          rate-bearing disclosure the scenario run carried. */}
+                      {(() => {
+                        const rateDisc = (r?.disclosures ?? []).find((d) => classifyBasis(d) != null) ?? null;
+                        return rateDisc ? <ProvenanceBadge basis={rateDisc} /> : null;
+                      })()}
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
