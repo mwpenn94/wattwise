@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,6 +32,14 @@ export default function Upload() {
   const sites = trpc.sites.list.useQuery();
   const uploads = trpc.uploads.list.useQuery();
   const [siteId, setSiteId] = useState<string>("");
+  // CONF-1 (Jul 21): one-click calibrate links from Portfolio arrive as
+  // /app/upload?site=<id> — preselect that site once the list loads, but
+  // never stomp a choice the user already made.
+  useEffect(() => {
+    if (siteId) return;
+    const qs = new URLSearchParams(window.location.search).get("site");
+    if (qs && (sites.data ?? []).some((s) => String(s.id) === qs)) setSiteId(qs);
+  }, [sites.data, siteId]);
   const fileRef = useRef<HTMLInputElement>(null);
   const billRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);

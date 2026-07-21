@@ -19,6 +19,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { fmtNum, fmtUsd } from "@/lib/wattwiseUi";
+import { ProvenanceBadge } from "@/components/ProvenanceBadge";
 import { DisclaimerBanner } from "@/components/Honesty";
 import { MapView } from "@/components/Map";
 import { MapPin } from "lucide-react";
@@ -37,6 +38,7 @@ export default function Portfolio() {
   const activeGroup = groupFilter === "all" ? null : (groupsQ.data ?? []).find((g) => String(g.id) === groupFilter) ?? null;
   const rows = activeGroup ? allRows.filter((r) => activeGroup.siteIds.includes(r.siteId)) : allRows;
   const totals = portfolio.data?.totals;
+  const rateConfidence = portfolio.data?.rateConfidence;
 
   // §3i-2 exception-first ranking: dollar opportunity + anomaly severity.
   // Anomalies get a large additive bump so a flagged site outranks a merely
@@ -132,6 +134,11 @@ export default function Portfolio() {
             />
           </div>
 
+          {/* CONF-1 (Jul 21): rate-confidence rollup — how many sites' dollar
+              figures stand on actual/verified pricing vs an imputed average,
+              with one-click calibrate links for each imputed site. */}
+          <RateConfidenceCard rows={rows} rateConfidence={rateConfidence} />
+
           {/* §3i-2 exception-first view: ranked by $ opportunity + anomaly severity */}
           {ranked.length > 0 && (
             <Card className="mt-4 border-border/70">
@@ -217,7 +224,12 @@ export default function Portfolio() {
                           <TableCell className="text-right">{r.meterCount}</TableCell>
                           {r.analyzed ? (
                             <>
-                              <TableCell className="text-right">{r.annualCostUsd != null ? fmtUsd(r.annualCostUsd) : "—"}</TableCell>
+                              <TableCell className="text-right">
+                                <span className="inline-flex items-center gap-1.5">
+                                  {r.rateTier != null && <ProvenanceBadge tier={r.rateTier as never} basis={r.rateBasis} />}
+                                  {r.annualCostUsd != null ? fmtUsd(r.annualCostUsd) : "—"}
+                                </span>
+                              </TableCell>
                               <TableCell className="text-right">{r.demandCostUsd != null ? fmtUsd(r.demandCostUsd) : "—"}</TableCell>
                               <TableCell className="text-right">{r.peakKw != null ? fmtNum(r.peakKw) : "—"}</TableCell>
                               <TableCell className="text-right">{r.loadFactor != null ? `${(r.loadFactor * 100).toFixed(0)}%` : "—"}</TableCell>
@@ -244,6 +256,78 @@ export default function Portfolio() {
         </>
       )}
     </div>
+  );
+}
+
+/** CONF-1 (Jul 21) — rate-confidence rollup card. Counts analyzed sites by
+ * pricing tier and lists each imputed-rate site with a one-click calibrate
+ * link (→ /app/upload?site=<id>, which preselects the site). Hides entirely
+ * when nothing is analyzed yet — an empty confidence card would be noise. */
+function RateConfidenceCard({
+  rows,
+  rateConfidence,
+}: {
+  rows: { siteId: number; name: string; analyzed: boolean; rateTier: string | null; rateBasis: string | null; annualCostUsd: number | null }[];
+  rateConfidence?: { actualCount: number; billVerifiedCount: number; imputedCount: number; unknownCount: number };
+}) {
+  if (!rateConfidence) return null;
+  const analyzed = rateConfidence.actualCount + rateConfidence.billVerifiedCount + rateConfidence.imputedCount + rateConfidence.unknownCount;
+  if (analyzed === 0) return null;
+  const imputedSites = rows.filter((r) => r.analyzed && (r.rateTier === "state_average_imputed" || r.rateTier === "national_assumption"));
+  const solidCount = rateConfidence.actualCount + rateConfidence.billVerifiedCount;
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <BadgeCheck className="h-4 w-4 text-primary" /> Rate confidence
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Which pricing tier each site&apos;s dollar figures stand on — {solidCount}/{analyzed} analyzed sites priced on actual or bill-verified rates.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {rateConfidence.actualCount > 0 && (
+            <span className="inline-flex items-center gap-1.5 text-xs">
+              <ProvenanceBadge tier="actual" /> {rateConfidence.actualCount} tariff-priced
+            </span>
+          )}
+          {rateConfidence.billVerifiedCount > 0 && (
+            <span className="inline-flex items-center gap-1.5 text-xs">
+              <ProvenanceBadge tier="bill_verified" /> {rateConfidence.billVerifiedCount} bill-verified
+            </span>
+          )}
+          {rateConfidence.imputedCount > 0 && (
+            <span className="inline-flex items-center gap-1.5 text-xs">
+              <ProvenanceBadge tier="imputed" /> {rateConfidence.imputedCount} on imputed averages
+            </span>
+          )}
+          {rateConfidence.unknownCount > 0 && (
+            <span className="text-xs text-muted-foreground">{rateConfidence.unknownCount} analyzed before provenance tracking — re-run analysis to tier them</span>
+          )}
+        </div>
+        {imputedSites.length > 0 && (
+          <div className="space-y-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+            <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
+              {imputedSites.length === 1 ? "1 site prices" : `${imputedSites.length} sites price`} dollars on a state-average assumption — one real bill each pins the true rate:
+            </p>
+            <ul className="space-y-1">
+              {imputedSites.map((s) => (
+                <li key={s.siteId} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="text-muted-foreground">
+                    {s.name}
+                    {s.annualCostUsd != null ? ` · ${fmtUsd(s.annualCostUsd)}/yr modeled` : ""}
+                  </span>
+                  <Link href={`/app/upload?site=${s.siteId}`} className="font-medium text-primary underline underline-offset-2">
+                    Calibrate with a bill →
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

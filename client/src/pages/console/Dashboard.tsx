@@ -136,7 +136,14 @@ export default function Dashboard() {
     currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
     basisStructureHasDemandCharges?: boolean | null;
     // NEXT-1/NEXT-2: machine-readable rate provenance from the pipeline summary
-    ratePricing?: { rateUsdPerKwh?: number; isFallback?: boolean; basis?: string; tier?: string } | null;
+    ratePricing?: {
+      rateUsdPerKwh?: number;
+      isFallback?: boolean;
+      basis?: string;
+      tier?: string;
+      monthlyCurve?: Array<{ month: number; rate: number; billCount: number }> | null;
+      seasonalSpreadPct?: number | null;
+    } | null;
     demandReview?: DemandReviewData | null;
     tariffComparisons?: Array<{
       tariffName: string;
@@ -440,6 +447,45 @@ export default function Dashboard() {
           </Link>
         </div>
       )}
+
+      {/* SEAS-1 (Jul 21): seasonal rate strip — only rendered when the
+          bill-verified calibration found a material (>5%) month-to-month
+          spread across 3+ billed months. Months without a bill are simply
+          absent; nothing is interpolated. */}
+      {summary?.ratePricing?.tier === "bill_verified" &&
+        (summary.ratePricing.monthlyCurve?.length ?? 0) >= 3 &&
+        summary.ratePricing.seasonalSpreadPct != null && (
+          <div className="mt-3 rounded-lg border border-border/70 bg-card px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <ProvenanceBadge tier="bill_verified" basis={summary.ratePricing.basis ?? null} />
+              <p className="text-xs font-medium">
+                Seasonal rate detected — your blended rate varies{" "}
+                {(summary.ratePricing.seasonalSpreadPct * 100).toFixed(0)}% across billed months
+              </p>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {(() => {
+                const curve = summary.ratePricing.monthlyCurve ?? [];
+                const max = Math.max(...curve.map((p) => p.rate));
+                const monthName = (m: number) => ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][m - 1];
+                return curve.map((p) => (
+                  <span
+                    key={p.month}
+                    className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[11px] ${
+                      p.rate === max ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400" : "border-border bg-muted/40 text-muted-foreground"
+                    }`}
+                    title={`${p.billCount} bill${p.billCount === 1 ? "" : "s"}`}
+                  >
+                    {monthName(p.month)} ${p.rate.toFixed(3)}
+                  </span>
+                ));
+              })()}
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
+              Per-month blended rate from your actual bills (highest month highlighted). Months without a bill are omitted — never interpolated.
+            </p>
+          </div>
+        )}
 
       {/* §3g hero rotation container — CSS order flips the story order per
           persona without duplicating JSX: commercial (facility voice) leads

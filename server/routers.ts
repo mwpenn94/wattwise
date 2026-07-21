@@ -1353,6 +1353,7 @@ export const appRouter = router({
               currentCost?: { breakdown?: { total?: number; demand?: number; cp?: number | null } } | null;
               emissions?: { annualCo2eLb?: number } | null;
               baseline?: { normalizedAnnualUsage?: number | null; confidenceLabel?: string } | null;
+              ratePricing?: { tier?: string; basis?: string; isFallback?: boolean } | null;
             } | null;
             const meterRows = await h.listMeters(s.id, ctx.user.id);
             // §3i-2 exception-first inputs: biggest open $ opportunity (not yet
@@ -1404,6 +1405,11 @@ export const appRouter = router({
               topOpportunityUsd: topOpp?.savings ?? null,
               hasAnomaly: anomaly != null,
               anomalyTitle: anomaly?.title ?? null,
+              // CONF-1 (Jul 21): rate provenance for the confidence rollup —
+              // which pricing tier the site's dollar figures stand on. null
+              // when the site has no analyzed summary yet.
+              rateTier: m?.ratePricing?.tier ?? null,
+              rateBasis: m?.ratePricing?.basis ?? null,
             };
           }),
         );
@@ -1432,6 +1438,16 @@ export const appRouter = router({
           exposureMap.set(key, cur);
         }
         const exposureTotal = Array.from(exposureMap.values()).reduce((a, v) => a + v.annualCostUsd, 0);
+        // CONF-1 — rate-confidence rollup: how many analyzed sites price their
+        // dollars on actual/verified data vs an imputed average. Sites without
+        // an analysis are counted separately (unknown), never lumped as imputed.
+        const analyzedTiers = siteRollups.filter((r) => r.analyzed);
+        const rateConfidence = {
+          actualCount: analyzedTiers.filter((r) => r.rateTier === "tariff_priced_actual").length,
+          billVerifiedCount: analyzedTiers.filter((r) => r.rateTier === "bill_verified").length,
+          imputedCount: analyzedTiers.filter((r) => r.rateTier === "state_average_imputed" || r.rateTier === "national_assumption").length,
+          unknownCount: analyzedTiers.filter((r) => r.rateTier == null).length,
+        };
         const utilityExposure = Array.from(exposureMap.entries())
           .map(([utility, v]) => ({
             utility,
@@ -1444,6 +1460,7 @@ export const appRouter = router({
           entities: allEntities,
           sites: siteRollups,
           utilityExposure,
+          rateConfidence,
           totals: {
             siteCount: siteRollups.length,
             analyzedCount: siteRollups.filter((r) => r.analyzed).length,

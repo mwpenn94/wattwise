@@ -111,3 +111,76 @@ describe("deriveBillVerifiedRate", () => {
     expect(res!.billCount).toBe(2); // unchanged
   });
 });
+
+/* ---------- SEAS-1: seasonal monthly blended-rate curve ---------- */
+describe("seasonal monthly curve (SEAS-1)", () => {
+  let seasSiteId: number;
+  let seasMeterId: number;
+
+  beforeAll(async () => {
+    seasSiteId = await h.createSite({ userId, name: "BillCal Seasonal Site", state: "AZ", buildingType: "office" });
+    seasMeterId = await h.createMeter({ siteId: seasSiteId, userId, commodity: "electric", usageUnit: "kWh" }, userId);
+  });
+
+  afterAll(async () => {
+    const db = await getDb();
+    if (!db) return;
+    await db.delete(bills).where(eq(bills.meterId, seasMeterId));
+    await db.delete(meters).where(eq(meters.siteId, seasSiteId));
+    await db.delete(sites).where(eq(sites.id, seasSiteId));
+  });
+
+  it("emits a monthly curve when 3+ bills across 3+ months show >5% spread", async () => {
+    // AZ summer-tier shape: Jun cheap-ish, Jul/Aug expensive — 20%+ spread
+    await addBill(seasMeterId, "2026-06-01", "2026-06-30", 1000, 120); // $0.120
+    await addBill(seasMeterId, "2026-07-01", "2026-07-31", 1500, 225); // $0.150
+    await addBill(seasMeterId, "2026-08-01", "2026-08-31", 1600, 248); // $0.155
+    const res = await deriveBillVerifiedRate(seasSiteId, userId, "electric");
+    expect(res).not.toBeNull();
+    expect(res!.monthlyCurve).toBeDefined();
+    expect(res!.monthlyCurve!.length).toBe(3);
+    const jun = res!.monthlyCurve!.find((p) => p.month === 6);
+    const aug = res!.monthlyCurve!.find((p) => p.month === 8);
+    expect(jun!.rate).toBeCloseTo(0.12, 5);
+    expect(aug!.rate).toBeCloseTo(0.155, 5);
+    // spread = 0.155/0.120 - 1 ≈ 0.292
+    expect(res!.seasonalSpreadPct).toBeGreaterThan(0.25);
+    expect(res!.basis).toContain("seasonal:");
+  });
+
+  it("assigns bills to the month of their period midpoint", async () => {
+    // A Jun-20 → Jul-19 bill has midpoint ~Jul-04 → lands in July, not June
+    const db = await getDb();
+    await db!.delete(bills).where(eq(bills.meterId, seasMeterId));
+    await addBill(seasMeterId, "2026-05-15", "2026-06-14", 900, 99); // midpoint ~May 30 → May
+    await addBill(seasMeterId, "2026-06-20", "2026-07-19", 1400, 203); // midpoint ~Jul 04 → Jul
+    await addBill(seasMeterId, "2026-07-20", "2026-08-18", 1500, 240); // midpoint ~Aug 03 → Aug
+    const res = await deriveBillVerifiedRate(seasSiteId, userId, "electric");
+    expect(res!.monthlyCurve).toBeDefined();
+    const months = res!.monthlyCurve!.map((p) => p.month);
+    expect(months).toEqual([5, 7, 8]);
+  });
+
+  it("omits the curve when the spread is immaterial (<5%) — flat curve is noise", async () => {
+    const db = await getDb();
+    await db!.delete(bills).where(eq(bills.meterId, seasMeterId));
+    await addBill(seasMeterId, "2026-06-01", "2026-06-30", 1000, 120); // $0.1200
+    await addBill(seasMeterId, "2026-07-01", "2026-07-31", 1100, 133); // $0.1209
+    await addBill(seasMeterId, "2026-08-01", "2026-08-31", 1050, 127); // $0.1210
+    const res = await deriveBillVerifiedRate(seasSiteId, userId, "electric");
+    expect(res).not.toBeNull();
+    expect(res!.monthlyCurve).toBeUndefined();
+    expect(res!.seasonalSpreadPct).toBeUndefined();
+    expect(res!.basis).not.toContain("seasonal:");
+  });
+
+  it("omits the curve with fewer than 3 distinct billed months", async () => {
+    const db = await getDb();
+    await db!.delete(bills).where(eq(bills.meterId, seasMeterId));
+    await addBill(seasMeterId, "2026-06-01", "2026-06-30", 1000, 120);
+    await addBill(seasMeterId, "2026-07-01", "2026-07-31", 1500, 240);
+    const res = await deriveBillVerifiedRate(seasSiteId, userId, "electric");
+    expect(res).not.toBeNull();
+    expect(res!.monthlyCurve).toBeUndefined();
+  });
+});

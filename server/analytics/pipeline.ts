@@ -1219,6 +1219,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
             : stateAvgRate
               ? "state_average_imputed"
               : "national_assumption",
+        // SEAS-1 (Jul 21): monthly blended-rate curve when 3+ bills across 3+
+        // calendar months show material (>5%) seasonal spread — null otherwise.
+        // Only populated on the bill_verified tier; the UI renders a seasonal
+        // strip so summer-tier sites see WHY their summer dollars run hotter.
+        monthlyCurve: billVerified?.monthlyCurve ?? null,
+        seasonalSpreadPct: billVerified?.seasonalSpreadPct ?? null,
       },
       // Batch-45 (pass 1928): structure-level flag so the dashboard can say
       // "your rate has no demand charges" ONLY when the structure truly has

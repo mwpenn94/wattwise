@@ -66,13 +66,26 @@ async function eiaFetch(path: string, params: Record<string, string | string[]>,
     if (Array.isArray(v)) for (const item of v) url.searchParams.append(k, item);
     else url.searchParams.set(k, v);
   }
-  const res = await fetch(url.toString(), {
-    headers: { Accept: "application/json", "User-Agent": "Meterly/1.0 (rate drift check)" },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`EIA ${path} HTTP ${res.status}`);
-  const body = (await res.json()) as { response?: { data?: EiaSeriesRow[] } };
-  return body.response?.data ?? [];
+  // EIA's API intermittently returns HTTP 500 ("Something unexpected
+  // happened.") for queries that succeed seconds later — observed live on
+  // Jul 21 2026: identical request 500'd then 200'd on retry. One retry with a
+  // short backoff absorbs the flake without masking a real outage (a second
+  // 5xx still surfaces as an error into the drift report).
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url.toString(), {
+      headers: { Accept: "application/json", "User-Agent": "Meterly/1.0 (rate drift check)" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (res.ok) {
+      const body = (await res.json()) as { response?: { data?: EiaSeriesRow[] } };
+      return body.response?.data ?? [];
+    }
+    if (res.status >= 500 && attempt === 0) {
+      await new Promise((r) => setTimeout(r, 2_000));
+      continue;
+    }
+    throw new Error(`EIA ${path} HTTP ${res.status}`);
+  }
 }
 
 function num(v: number | string | null | undefined): number | null {

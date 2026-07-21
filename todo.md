@@ -485,3 +485,8 @@
 - [x] NEXT-2: UI provenance badges — color-coded tier chip (bill-verified/filed/imputed/national) with full basis tooltip on dollar figures (Explore, Scenarios, Portfolio, Estimate)
 - [x] NEXT-3: Persist geometry resolve results to DB so cold-started prod instances skip throttled upstreams
 - [x] NEXT-4: EIA API refresh module in weekly cron (gated on EIA_API_KEY; graceful vintage-reassert fallback when absent) — implemented as a drift DETECTOR (compares live EIA vs seeded catalog, notifies owner on >10% drift) rather than silent mutation, since the weekly re-assert would clobber runtime rate mutations
+
+## Suggested next steps — full fulfillment (Jul 21, round 2)
+- [x] KEY-1: Register free EIA API key end-to-end (user's browser + email), set EIA_API_KEY production secret, verify live drift check runs against real EIA data
+- [x] CONF-1: Portfolio rate-confidence rollup — count of sites on imputed vs bill-verified/filed rates, per-site tier chips, one-click calibrate links
+- [x] SEAS-1: Seasonal bill calibration — with 3+ bills, derive monthly blended-rate curve (seasonal variation) instead of single annual figure; surfaced in pipeline basis strings + tests

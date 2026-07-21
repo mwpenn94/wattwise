@@ -22,6 +22,15 @@
  */
 import * as h from "./dbHelpers";
 
+export interface MonthlyRatePoint {
+  /** calendar month 1–12 */
+  month: number;
+  /** blended $/unit for bills whose midpoint falls in this month */
+  rate: number;
+  /** number of qualifying bills contributing */
+  billCount: number;
+}
+
 export interface BillVerifiedRate {
   /** blended $/unit — canonical usage units: electric kWh, gas therms, water GALLONS */
   rate: number;
@@ -33,6 +42,12 @@ export interface BillVerifiedRate {
   /** human basis string, ladder-convention wording */
   basis: string;
   commodity: "electric" | "gas" | "water";
+  /** SEAS-1 (Jul 21): monthly blended-rate curve, present only when 3+ bills
+   * span 3+ distinct calendar months AND the seasonal spread is material
+   * (max/min > 5%). Months without a bill are omitted — never interpolated. */
+  monthlyCurve?: MonthlyRatePoint[];
+  /** max/min spread of the curve as a fraction (e.g. 0.18 = 18%) */
+  seasonalSpreadPct?: number;
 }
 
 function isoDay(d: Date | string): string {
@@ -94,12 +109,57 @@ export async function deriveBillVerifiedRate(
     return d.toLocaleDateString("en-US", { month: "short", year: "numeric", timeZone: "UTC" });
   };
   const span = fmtMonth(spanStart) === fmtMonth(spanEnd) ? fmtMonth(spanEnd) : `${fmtMonth(spanStart)}–${fmtMonth(spanEnd)}`;
+
+  // SEAS-1 — seasonal curve: with 3+ bills across 3+ distinct calendar months,
+  // the per-month blend exposes tiered/TOU seasonality a single annual figure
+  // flattens (e.g. AZ summer tiers). Each bill lands in the month of its
+  // period MIDPOINT (a Jun-15→Jul-14 bill is mostly both; the midpoint is the
+  // least-wrong single assignment and is deterministic). Months with no bill
+  // are omitted rather than interpolated, and the curve is only attached when
+  // the spread is material (>5%) — a flat curve would be noise dressed as signal.
+  let monthlyCurve: MonthlyRatePoint[] | undefined;
+  let seasonalSpreadPct: number | undefined;
+  if (window.length >= 3) {
+    const byMonth = new Map<number, { cost: number; usage: number; count: number }>();
+    for (const b of window) {
+      const start = new Date(b.periodStart as unknown as string).getTime();
+      const end = new Date(b.periodEnd as unknown as string).getTime();
+      const mid = new Date((start + end) / 2);
+      const m = mid.getUTCMonth() + 1;
+      const cur = byMonth.get(m) ?? { cost: 0, usage: 0, count: 0 };
+      cur.cost += Number(b.totalCost ?? 0);
+      cur.usage += Number(b.usage ?? 0);
+      cur.count += 1;
+      byMonth.set(m, cur);
+    }
+    if (byMonth.size >= 3) {
+      const pts: MonthlyRatePoint[] = Array.from(byMonth.entries())
+        .filter(([, v]) => v.usage > 0 && v.cost > 0)
+        .map(([month, v]) => ({ month, rate: v.cost / v.usage, billCount: v.count }))
+        .sort((a, b) => a.month - b.month);
+      if (pts.length >= 3) {
+        const rates = pts.map((p) => p.rate);
+        const spread = Math.max(...rates) / Math.min(...rates) - 1;
+        if (spread > 0.05) {
+          monthlyCurve = pts;
+          seasonalSpreadPct = Math.round(spread * 1000) / 1000;
+        }
+      }
+    }
+  }
+
+  const seasonalNote =
+    monthlyCurve && seasonalSpreadPct != null
+      ? `; seasonal: your rate varies ${(seasonalSpreadPct * 100).toFixed(0)}% across ${monthlyCurve.length} billed months`
+      : "";
   return {
     rate,
     billCount: window.length,
     spanStart,
     spanEnd,
     commodity,
-    basis: `your actual bills — bill-verified blended rate ($${rateStr}/${unit}, ${window.length} bill${window.length === 1 ? "" : "s"}, ${span})`,
+    basis: `your actual bills — bill-verified blended rate ($${rateStr}/${unit}, ${window.length} bill${window.length === 1 ? "" : "s"}, ${span}${seasonalNote})`,
+    monthlyCurve,
+    seasonalSpreadPct,
   };
 }
