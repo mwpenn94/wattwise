@@ -16,7 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Activity, BarChart3, Droplets, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown, Zap } from "lucide-react";
+import { Activity, BarChart3, Droplets, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown, Wifi, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { decimateForChart, fmtNum, fmtUsd, type ChartPoint } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
@@ -73,6 +73,8 @@ export default function Dashboard() {
   const baseline = trpc.analysis.baseline.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const insights = trpc.insights.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const opps = trpc.insights.opportunities.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
+  /* TELX-1: telecom findings join the savings feed (queried per active site) */
+  const telecom = trpc.telecom.analyze.useQuery({ siteId: activeSiteId ?? undefined }, { enabled: activeSiteId != null });
   const stats = trpc.intervalsApi.stats.useQuery({ meterId: meter?.id ?? 0 }, { enabled: !!meter });
   const utils = trpc.useUtils();
 
@@ -1075,6 +1077,50 @@ export default function Dashboard() {
           )}
         </CardContent>
       </Card>
+
+      {/* TELX-1: telecom savings surface in the same feed — these are recurring-bill
+          dollars from the user's own entered services, kept in a sibling card because
+          they are contract actions (call/switch), not building measures for Scenarios. */}
+      {(telecom.data?.findings ?? []).length > 0 && (
+        <Card className="mt-4 border-border/70">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 font-display text-base">
+              <Wifi className="h-4 w-4 text-primary" /> Telecom &amp; connectivity savings
+            </CardTitle>
+            <p className="text-xs text-muted-foreground">
+              From the services you entered on the Telecom page — published benchmark ranges, not negotiated quotes.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {(telecom.data?.findings ?? []).map((f, i) => (
+                <InsightCard
+                  key={`tel-${i}`}
+                  title={f.title}
+                  dollars={f.estAnnualSavingsHi != null && f.estAnnualSavingsLo != null ? (f.estAnnualSavingsLo + f.estAnnualSavingsHi) / 2 : null}
+                  framing="Save"
+                  headlineFallback="Action window — no dollar estimate"
+                  why={f.body}
+                  confidence={chipFromConfidence(f.confidence, false)}
+                  extraChips={[f.kind.replace(/_/g, " ")]}
+                  metrics={
+                    f.estAnnualSavingsLo != null && f.estAnnualSavingsHi != null && f.estAnnualSavingsLo !== f.estAnnualSavingsHi
+                      ? [{ label: "range", value: `$${Math.round(f.estAnnualSavingsLo)}–$${Math.round(f.estAnnualSavingsHi)}/yr` }]
+                      : []
+                  }
+                  action={{
+                    label: "Review on Telecom page",
+                    onClick: () => {
+                      window.location.href = `/app/telecom`;
+                    },
+                  }}
+                  provenance={f.disclosures}
+                />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* v1.18 §5 stage 5: landlord-benefit measures live in a separate card with
           an ask framing — the renter's feed above leads with in-control dollars. */}

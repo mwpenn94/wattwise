@@ -36,6 +36,7 @@ import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, t
 import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
 import { extractTelecomBill } from "./ingest/telecomBillOcr";
+import { resolveTerritory, partitionByTerritory } from "./serviceTerritory";
 import { runBulkScreen } from "./bulkScreen";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
@@ -2043,18 +2044,43 @@ export const appRouter = router({
       };
     }),
     list: protectedProcedure
-      .input(z.object({ state: z.string().optional(), commodity: z.enum(["electric", "gas", "water"]).optional() }).optional())
-      .query(async ({ input }) => {
+      .input(z.object({ state: z.string().optional(), commodity: z.enum(["electric", "gas", "water"]).optional(), siteId: z.number().optional() }).optional())
+      .query(async ({ ctx, input }) => {
         await seeded();
         const rows = await h.listTariffs(input?.commodity, input?.state);
-        return rows.map((t) => ({
-        ...t,
-        structure: undefined,
-        hasRatchet: !!(t.structure as TariffStructure).ratchet,
-        hasCp: !!(t.structure as TariffStructure).cp,
-        eligibilityNote:
-          "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.",
-        }));
+        // TERR-3: when a site is given, annotate each row with whether the
+        // utility plausibly serves that site's location, so the UI can separate
+        // in-territory rates from out-of-territory catalog rows instead of
+        // presenting them as one undifferentiated list. Fail-open: unresolved
+        // territory marks everything in-territory.
+        let terrInfo: { basis: string; confidence: string; overlap: boolean; plausibleUtilities: string[] } | null = null;
+        let inTerritoryIds: Set<number> | null = null;
+        if (input?.siteId != null) {
+          const site = await h.getSite(input.siteId, ctx.user.id);
+          if (site) {
+            const res = resolveTerritory(
+              { state: site.state, city: site.city, zip: site.zip, utilityName: site.utilityName },
+              (input?.commodity ?? "electric") as "electric" | "gas" | "water",
+            );
+            terrInfo = { basis: res.basis, confidence: res.confidence, overlap: res.overlap, plausibleUtilities: res.plausibleUtilities };
+            if (res.matchPrefixes.length > 0) {
+              const { inTerritory } = partitionByTerritory(rows, res);
+              inTerritoryIds = new Set(inTerritory.map((t) => t.id));
+            }
+          }
+        }
+        return {
+          territory: terrInfo,
+          rates: rows.map((t) => ({
+            ...t,
+            structure: undefined,
+            hasRatchet: !!(t.structure as TariffStructure).ratchet,
+            hasCp: !!(t.structure as TariffStructure).cp,
+            inTerritory: inTerritoryIds ? inTerritoryIds.has(t.id) : true,
+            eligibilityNote:
+              "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.",
+          })),
+        };
       }),
     detail: protectedProcedure.input(z.object({ tariffId: z.number() })).query(async ({ input }) => {
       const t = await h.getTariff(input.tariffId);

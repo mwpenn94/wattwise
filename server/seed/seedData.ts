@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.6"; // National gas/water representative rates (state-average imputed, territory-aligned LDC names)
+export const SEED_VERSION = "2026.07.7"; // UES residential ERRES/ERREST added (verified vs uesaz.com Jul 2026) + AZ service-territory map
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -558,6 +558,61 @@ export const SEED_TARIFFS: SeedTariff[] = [
     effectiveDate: "2024-09-01",
   },
   /* -------------------- UniSource / Lake Havasu territory ---------------- */
+  // UES residential rates verified against live uesaz.com published schedules
+  // (Jul 2026): https://www.uesaz.com/residential-service/ (Basic, ERRES) and
+  // https://www.uesaz.com/time-of-use/ (TOU, ERREST). Published energy charges
+  // EXCLUDE the PPFAC fuel adjustor, which changes monthly — disclosed in the
+  // rate name. Basic is a 400-kWh usage-tier rate (10.6¢ ≤400, 12.6¢ above);
+  // the engine's TouPeriod model has no monthly-usage tiers, so the upper-tier
+  // rate is used (conservative for typical AZ homes averaging >400 kWh/mo) and
+  // the tier is disclosed in the label.
+  {
+    urdbId: "uns-erres",
+    utilityName: "UniSource Energy Services (UNS Electric)",
+    name: "Basic Residential (ERRES) — excl. PPFAC fuel adjustor",
+    sector: "residential",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 17.0,
+      energy: [
+        // Published: 10.6¢ ≤400 kWh, 12.6¢ >400 kWh — upper tier applied (see note above).
+        { label: "All energy (tiered 10.6¢≤400kWh/12.6¢>400kWh; upper tier applied)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.126 },
+      ],
+      demand: [],
+      exportRate: { type: "net_billing_avoided_cost", ratePerKwh: 0.0562, notes: "UNS RCP export rate proxy — confirm current RCP filing" },
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2025-01-01",
+  },
+  {
+    urdbId: "uns-errest",
+    utilityName: "UniSource Energy Services (UNS Electric)",
+    name: "Residential Time-of-Use (ERREST) — excl. PPFAC fuel adjustor",
+    sector: "residential",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 14.0,
+      energy: [
+        // Summer (May–Oct): on-peak M–F 3–7pm. >400 kWh tier applied (19.86¢ on / 10.87¢ off).
+        { label: "Summer on-peak 3-7pm wkdy (>400kWh tier)", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 15, hourEnd: 19, ratePerUnit: 0.1986 },
+        { label: "Summer off-peak (>400kWh tier)", months: SUMMER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.1087 },
+        // Winter (Nov–Apr): on-peak M–F 6–9am and 6–9pm.
+        { label: "Winter on-peak 6-9am wkdy (>400kWh tier)", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 6, hourEnd: 9, ratePerUnit: 0.1731 },
+        { label: "Winter on-peak 6-9pm wkdy (>400kWh tier)", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 18, hourEnd: 21, ratePerUnit: 0.1731 },
+        { label: "Winter off-peak (>400kWh tier)", months: WINTER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.1036 },
+      ],
+      demand: [],
+      exportRate: { type: "net_billing_avoided_cost", ratePerKwh: 0.0562, notes: "UNS RCP export rate proxy — confirm current RCP filing" },
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2025-01-01",
+  },
   {
     urdbId: "uns-lgs",
     utilityName: "UniSource Energy Services (UNS Electric)",

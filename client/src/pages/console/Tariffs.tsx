@@ -26,7 +26,7 @@ export default function Tariffs() {
   const [commodity, setCommodity] = useState<"electric" | "gas" | "water">("electric");
   const activeSiteState = (sites.data ?? []).find((s) => s.id === activeSiteId)?.state ?? undefined;
   const effectiveState = stateFilter === "all" ? undefined : stateFilter || activeSiteState;
-  const tariffs = trpc.tariffs.list.useQuery({ state: effectiveState, commodity });
+  const tariffs = trpc.tariffs.list.useQuery({ state: effectiveState, commodity, siteId: activeSiteId ?? undefined });
   const meters = trpc.sites.meters.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const utils = trpc.useUtils();
   const assign = trpc.sites.setMeterTariff.useMutation({
@@ -36,8 +36,16 @@ export default function Tariffs() {
     },
     onError: (e) => toast.error(e.message),
   });
+  const [showOutOfTerritory, setShowOutOfTerritory] = useState(false);
 
-  const eligibilityNote = tariffs.data?.[0]?.eligibilityNote;
+  const rates = tariffs.data?.rates ?? [];
+  const territory = tariffs.data?.territory ?? null;
+  // Territory partition only applies when the state filter matches the site's
+  // own state — browsing another state's catalog is an explicit override.
+  const territoryActive = territory != null && territory.plausibleUtilities.length > 0 && effectiveState === activeSiteState;
+  const inTerritoryRates = territoryActive ? rates.filter((t) => t.inTerritory) : rates;
+  const outOfTerritoryRates = territoryActive ? rates.filter((t) => !t.inTerritory) : [];
+  const eligibilityNote = rates[0]?.eligibilityNote;
 
   return (
     <div className="container max-w-5xl py-8">
@@ -64,6 +72,25 @@ export default function Tariffs() {
       {eligibilityNote && (
         <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-relaxed text-amber-200/90">
           {eligibilityNote}
+        </p>
+      )}
+      {territoryActive && (
+        <div
+          className={`mt-3 rounded-md border px-3 py-2 text-xs leading-relaxed ${
+            territory.overlap ? "border-amber-500/30 bg-amber-500/5 text-amber-200/90" : "border-primary/25 bg-primary/5 text-muted-foreground"
+          }`}
+        >
+          <span className="font-medium text-foreground">
+            {territory.overlap ? "Multiple utilities serve this area" : `Showing rates for ${territory.plausibleUtilities.join(", ")}`}
+          </span>{" "}
+          — {territory.basis}
+          {territory.overlap &&
+            " Assign your actual tariff to a meter below (or upload a bill) to confirm which utility serves you — savings math uses the confirmed rate."}
+        </div>
+      )}
+      {territory != null && territory.plausibleUtilities.length === 0 && effectiveState === activeSiteState && (
+        <p className="mt-3 rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+          Territory unconfirmed — {territory.basis}
         </p>
       )}
 
@@ -127,7 +154,7 @@ export default function Tariffs() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(tariffs.data ?? []).map((t) => (
+                {inTerritoryRates.map((t) => (
                   <TariffRowGroup
                     key={t.id}
                     t={t}
@@ -139,7 +166,40 @@ export default function Tariffs() {
               </TableBody>
             </Table>
           )}
-          {!tariffs.isLoading && (tariffs.data ?? []).length === 0 && (
+          {outOfTerritoryRates.length > 0 && (
+            <div className="mt-4 border-t border-border/60 pt-3">
+              <button
+                type="button"
+                onClick={() => setShowOutOfTerritory((v) => !v)}
+                className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                {showOutOfTerritory ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                {outOfTerritoryRates.length} rate{outOfTerritoryRates.length === 1 ? "" : "s"} from utilities outside this site&apos;s service area
+              </button>
+              {showOutOfTerritory && (
+                <>
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    These utilities do not appear to serve {activeSiteState ? `this site's area` : "this area"} — shown for reference only; they are not
+                    switch options and are excluded from savings comparisons.
+                  </p>
+                  <Table>
+                    <TableBody>
+                      {outOfTerritoryRates.map((t) => (
+                        <TariffRowGroup
+                          key={t.id}
+                          t={t}
+                          rateUnit={commodity === "electric" ? "kWh" : commodity === "gas" ? "therm" : "gal"}
+                          meters={(meters.data ?? []).filter((m) => (m as { commodity?: string }).commodity === commodity || (m as { commodity?: string }).commodity == null)}
+                          onAssign={(mid) => assign.mutate({ meterId: mid, tariffId: t.id })}
+                        />
+                      ))}
+                    </TableBody>
+                  </Table>
+                </>
+              )}
+            </div>
+          )}
+          {!tariffs.isLoading && rates.length === 0 && (
             <p className="py-6 text-center text-sm text-muted-foreground">
               No seeded {commodity === "gas" ? "natural gas" : commodity} rates for this state filter — the snapshot's gas and water coverage is thinner than electric; assign rates manually or broaden the state filter.
             </p>

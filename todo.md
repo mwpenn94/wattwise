@@ -499,3 +499,11 @@
 - [x] TEL-4: Bill intake — telecom bill photo OCR (telecomBillOcr.ts + telecom.ocr procedure + Scan-a-bill prefill in add dialog; PDFs degrade honestly to manual entry; same budget/metering fail-loud contracts as utility-bill OCR)
 - [x] TEL-5: UI — telecom intake flow, insights on Explore/site view, Portfolio utility-exposure integration
 - [x] TEL-6: Tests (vitest specs for analytics + intake), full-suite green, live verification, checkpoint
+
+## Territory awareness + rate verification + telecom follow-ons (Jul 22)
+- [x] TERR-1: Audit UES (UNS Electric) rates in catalog vs uesaz.com published rates; refresh if stale
+- [x] TERR-2: Service-territory model — map utilities to service areas (AZ county/city level) so rate comparisons only show utilities plausibly serving the site
+- [x] TERR-3: Territory-aware UX — filter tariff comparison to in-territory utilities, "confirm your utility" affordance where territories overlap, out-of-territory rows hidden or clearly separated
+- [x] TERR-4: Tests for territory filtering + overlap handling
+- [x] TELX-1: Telecom findings folded into Explore opportunity feed
+- [x] TELX-2: Promo-expiry reminders in weekly cron (notify ~30 days before promo lapses)

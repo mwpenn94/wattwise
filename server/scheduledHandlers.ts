@@ -17,6 +17,7 @@ import { runDigestCycle } from "./digest";
 import { refreshServiceTerritories, territoryFreshness } from "./serviceTerritories";
 import { verifyIncentiveCatalog } from "./incentives";
 import { notifyOwner } from "./_core/notification";
+import { checkTelecomExpiries, type TelecomExpiry } from "./telecom";
 import { reassertNationalRates } from "./seed/runSeeders";
 import { SEED_VERSION } from "./seed/seedData";
 import { assessSeedFreshness } from "./seedLifecycle";
@@ -89,7 +90,20 @@ export async function refreshReferenceHandler(req: Request, res: Response) {
     // (the weekly re-assert would clobber runtime mutations anyway).
     const eia = await checkEiaRateDrift(now).catch((e) => ({ ran: false as const, reason: e instanceof Error ? e.message : String(e) }));
     const eiaDrifted = eia.ran && eia.drifted ? eia.drifted : [];
-    const material = incentives.expiringSoon.length > 0 || territories.superseded > 0 || rates.inserted > 0 || overdue.length > 0 || eiaDrifted.length > 0;
+    // TELX-2: telecom promo/contract expiry reminders — services whose promo
+    // price lapses (or contract window opens) within 30 days get a proactive
+    // owner notification instead of waiting for a Telecom page visit.
+    const telecomExpiring = await checkTelecomExpiries(now).catch((e) => {
+      console.warn("[refreshReference] telecom expiry check failed", e);
+      return [] as TelecomExpiry[];
+    });
+    const material =
+      incentives.expiringSoon.length > 0 ||
+      territories.superseded > 0 ||
+      rates.inserted > 0 ||
+      overdue.length > 0 ||
+      eiaDrifted.length > 0 ||
+      telecomExpiring.length > 0;
     if (material) {
       const parts: string[] = [];
       if (incentives.expiringSoon.length > 0) parts.push(`Incentive programs expiring within 90 days: ${incentives.expiringSoon.join(", ")} — verify renewal terms and update the catalog.`);
@@ -102,6 +116,12 @@ export async function refreshReferenceHandler(req: Request, res: Response) {
             .slice(0, 8)
             .map((d) => `${d.state} ${d.metric.replaceAll("_", " ")} seeded ${d.seeded} vs live ${d.live}`)
             .join("; ")}${eiaDrifted.length > 8 ? ` (+${eiaDrifted.length - 8} more)` : ""}. Update STATE_PROFILES in server/seed/nationalData.ts.`,
+        );
+      if (telecomExpiring.length > 0)
+        parts.push(
+          `Telecom action windows (next 30 days): ${telecomExpiring
+            .map((t) => t.summary)
+            .join("; ")} — review on the Telecom page before the price changes.`,
         );
       await notifyOwner({
         title: "Meterly reference-data refresh: attention needed",
@@ -116,6 +136,7 @@ export async function refreshReferenceHandler(req: Request, res: Response) {
       staleSeeds: overdue.map((s) => s.source),
       freshness,
       eia,
+      telecomExpiring: telecomExpiring.map((t) => t.summary),
     });
   } catch (err) {
     res.status(500).json({

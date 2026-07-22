@@ -397,3 +397,55 @@ export async function analyzeTelecomServices(
     totalAnnualSavingsHi: totalHi,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* TELX-2: cron-facing expiry sweep                                    */
+/* ------------------------------------------------------------------ */
+
+/** One entry per service whose promo price lapses OR whose contract
+ *  early-termination window ends within the next `windowDays` (default 30).
+ *  Read-only — the weekly cron folds these into the owner notification so
+ *  action windows are never discovered late on a page visit. */
+export interface TelecomExpiry {
+  serviceId: number;
+  siteId: number;
+  userId: number;
+  kind: "promo_expiry" | "contract_window";
+  /** human-readable one-liner for the notification body */
+  summary: string;
+}
+
+export async function checkTelecomExpiries(now: number, windowDays = 30): Promise<TelecomExpiry[]> {
+  const db = await getDb();
+  if (!db) return [];
+  const all = await db.select().from(telecomServices);
+  const horizon = now + windowDays * DAY_MS;
+  const out: TelecomExpiry[] = [];
+  for (const s of all) {
+    if (s.promoEndsAt != null && s.promoEndsAt > now && s.promoEndsAt <= horizon) {
+      const days = Math.ceil((s.promoEndsAt - now) / DAY_MS);
+      const jump =
+        s.postPromoCostUsd != null && s.postPromoCostUsd > s.monthlyCostUsd
+          ? ` (price rises $${round(s.monthlyCostUsd)}→$${round(s.postPromoCostUsd)}/mo)`
+          : "";
+      out.push({
+        serviceId: s.id,
+        siteId: s.siteId,
+        userId: s.userId,
+        kind: "promo_expiry",
+        summary: `${svcLabel(s)} promo ends in ${days}d${jump}`,
+      });
+    }
+    if (s.contractEndsAt != null && s.contractEndsAt > now && s.contractEndsAt <= horizon) {
+      const days = Math.ceil((s.contractEndsAt - now) / DAY_MS);
+      out.push({
+        serviceId: s.id,
+        siteId: s.siteId,
+        userId: s.userId,
+        kind: "contract_window",
+        summary: `${svcLabel(s)} contract ends in ${days}d — switch/renegotiate without early-termination fees`,
+      });
+    }
+  }
+  return out;
+}

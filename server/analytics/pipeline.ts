@@ -44,6 +44,7 @@ import { generateCommodityOpportunities, type XcOpportunity } from "../commodity
 import { STATE_PROFILES } from "../seed/nationalData";
 import { resolveCommodityService } from "../commodityService";
 import { deriveBillVerifiedRate } from "../billCalibration";
+import { resolveTerritory, partitionByTerritory } from "../serviceTerritory";
 import type { Site, Meter } from "../../drizzle/schema";
 
 /** Opportunity candidate as it flows through ranking/persistence — electric
@@ -445,12 +446,25 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         { sectorClass, hasSolar: site.hasSolar ?? false },
         peakKw,
       ).eligible;
-    // Sweep = same-utility rates plus any eligible rates statewide (a large site
-    // may have no eligible rate at its own utility in the seeded snapshot).
-    const eligibleAnywhere = allTariffs.filter(isElig);
+    // TERR-2/3: territory-aware sweep. Utilities are territorial monopolies —
+    // a Tucson site must not see UNS Electric (Mohave/Santa Cruz only) rates as
+    // switch options. Resolve the site's plausible utilities from its explicit
+    // utilityName → city → zip3 (fail-open: unknown location = no filtering),
+    // and restrict the statewide backfill to in-territory rows. Out-of-territory
+    // rows are dropped from the sweep entirely; the disclosure below says so.
+    const territoryRes = resolveTerritory(
+      { state: site.state, city: site.city, zip: site.zip, utilityName: site.utilityName },
+      (meter?.commodity ?? "electric") as "electric" | "gas" | "water",
+    );
+    const { inTerritory: territoryTariffs } = partitionByTerritory(allTariffs, territoryRes);
+    // Sweep = same-utility rates plus any eligible IN-TERRITORY rates (a large
+    // site may have no eligible rate at its own utility in the seeded snapshot;
+    // with an unresolved territory this degrades to the old statewide behavior).
+    const eligibleAnywhere = territoryTariffs.filter(isElig);
     const sweepSet = new Map<number, (typeof allTariffs)[number]>();
     for (const t of [...utilityTariffs, ...eligibleAnywhere]) sweepSet.set(t.id, t);
-    const sweep = sweepSet.size > 0 ? Array.from(sweepSet.values()) : allTariffs;
+    // Last-resort fallback prefers in-territory rows before the full statewide list.
+    const sweep = sweepSet.size > 0 ? Array.from(sweepSet.values()) : territoryTariffs.length > 0 ? territoryTariffs : allTariffs;
 
     // Current basis: assigned tariff → else first ELIGIBLE same-utility rate →
     // else first eligible rate statewide → else first same-utility rate.
@@ -576,6 +590,24 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       ? `Re-priced a full year on ${comparisons.length} seeded rate${comparisons.length === 1 ? "" : "s"} — ${comparisons.filter((c) => c.eligible).length} eligible for this ${meter?.commodity ?? "electric"} meter`
       : "No rate sweep possible — no load profile or no seeded rates for this commodity/state",
   );
+  // TERR-3: disclose the territory basis on the current-cost result so every
+  // downstream dollar surface can say WHY these utilities (and not others)
+  // were compared, and flag overlap zones for the confirm-your-utility UX.
+  if (currentCost && comparisons.length > 0) {
+    const terrRes = resolveTerritory(
+      { state: site.state, city: site.city, zip: site.zip, utilityName: site.utilityName },
+      (meter?.commodity ?? "electric") as "electric" | "gas" | "water",
+    );
+    if (terrRes.matchPrefixes.length > 0) {
+      currentCost.disclosures.push(
+        terrRes.overlap
+          ? `Rate comparison limited to utilities plausibly serving this location (${terrRes.plausibleUtilities.join(", ")}). ${terrRes.basis}`
+          : `Rate comparison limited to ${terrRes.plausibleUtilities.join(", ")} — ${terrRes.basis} Utilities that do not serve this area are excluded.`,
+      );
+    } else {
+      currentCost.disclosures.push(`Territory unconfirmed — ${terrRes.basis}`);
+    }
+  }
 
   /* ---------- stage 4: benchmarking ---------- */
   let benchmark: PipelineResult["benchmark"] = null;
