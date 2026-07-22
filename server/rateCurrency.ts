@@ -61,7 +61,7 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     utilityName: "Arizona Public Service Co (APS)",
     commodity: "electric",
     state: "AZ",
-    sourceUrl: "https://www.aps.com/en/Utility/Regulatory-and-Legal/Rates-Schedules-and-Fees",
+    sourceUrl: "https://www.aps.com/en/Utility/Regulatory-and-Legal/Rates-Schedules-and-Adjustors",
     sourceLabel: "APS Rate Schedules (ACC filed)",
     governsUrdbIds: ["aps-r-tou-4pm7pm", "aps-r-tou-demand", "aps-r-basic", "aps-gs-xs", "aps-gs-s"],
     adjustorCycle: "annual",
@@ -72,6 +72,8 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     utilityName: "Salt River Project (SRP)",
     commodity: "electric",
     state: "AZ",
+    // srpnet.com bot-blocks non-browser fetches (403) — same note as Tucson
+    // Water: the monthly AGENT verifier with a real browser covers this source.
     sourceUrl: "https://www.srpnet.com/price-plans/residential-electric",
     sourceLabel: "SRP Standard Price Plans",
     governsUrdbIds: ["srp-ez3-tou", "srp-basic", "srp-e27-demand", "srp-gs-e36"],
@@ -94,7 +96,7 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     utilityName: "UNS Electric (UniSource)",
     commodity: "electric",
     state: "AZ",
-    sourceUrl: "https://docs.uesaz.com/wp-content/uploads/UNSE-Statement-of-Rates.pdf",
+    sourceUrl: "https://www.uesaz.com/electric-rates/",
     sourceLabel: "UNS Electric Statement of Rates (ACC Decision)",
     governsUrdbIds: ["unse-res-basic", "unse-res-tou", "unse-sgs"],
     adjustorCycle: "annual",
@@ -116,6 +118,9 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     utilityName: "Tucson Water",
     commodity: "water",
     state: "AZ",
+    // tucsonaz.gov blocks datacenter IPs (403) — the weekly fingerprint sweep
+    // will report unreachable; the monthly AGENT verifier (real browser) is the
+    // effective check for this source. Kept as the canonical official URL.
     sourceUrl: "https://www.tucsonaz.gov/Departments/Water/Rates",
     sourceLabel: "Tucson Water rate ordinance",
     governsUrdbIds: ["tucsonwater-res"],
@@ -219,22 +224,38 @@ export interface SweepResult {
  * lightly normalized (scripts/nonces stripped) to avoid per-request noise. */
 export async function fingerprintSource(url: string, fetchImpl: typeof fetch = fetch): Promise<string> {
   const res = await fetchImpl(url, {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; MeterlyRateCurrency/1.0)" },
+    headers: {
+      // Full browser-like headers: several utility sites (CDN bot rules) 403
+      // plain bot UAs but serve standard browser requests.
+      "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml,application/pdf,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+    redirect: "follow",
     signal: AbortSignal.timeout(20_000),
   });
   if (!res.ok) throw new Error(`fetch ${url} -> ${res.status}`);
   const contentType = res.headers.get("content-type") ?? "";
   const buf = Buffer.from(await res.arrayBuffer());
   if (contentType.includes("text/html")) {
-    // Normalize volatile HTML: drop script/style bodies, nonces, csrf tokens,
-    // and whitespace runs so only content changes flip the hash.
+    // Normalize volatile HTML by hashing VISIBLE TEXT ONLY: drop script/style
+    // bodies, comments, then strip every tag (attributes carry per-request
+    // tokens — nonces, csrf, cache-busted asset URLs, session ids — that
+    // caused false change detections). A rate change necessarily changes the
+    // rendered text; markup churn alone no longer flips the hash.
     const text = buf
       .toString("utf8")
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/nonce="[^"]*"/gi, "")
-      .replace(/csrf[^"']*["'][^"']*["']/gi, "")
-      .replace(/\s+/g, " ");
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<!--[\s\S]*?-->/g, " ")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&[a-z#0-9]+;/gi, " ")
+      // Volatile infrastructure noise: some sites print the serving node
+      // (e.g. aps.com footer "Current server address is 10.20.64.10"). Strip
+      // bare IPv4 addresses — tariff text never depends on them.
+      .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
     return createHash("sha256").update(text).digest("hex");
   }
   return createHash("sha256").update(buf).digest("hex");

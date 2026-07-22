@@ -528,12 +528,12 @@
 - [x] UNIT-1: Unit-level pricing/service attribution — meter-level tariff assignment honored in pipeline (attribution level: meter | site | site_bills | state | national, disclosed on Dashboard), owner/entity subtotals on Portfolio, multi-meter sites analyze the correct unit (explicit meterId)
 
 ## Autonomous rate-currency engine (owner directive Jul 22: "dynamically keep rates current without prompting")
-- [ ] CURR-1: rate_sources registry table — official source URLs per utility×commodity, cadence, content fingerprint (etag/hash), adjustor cycle (PGA/GSC quarterly), fail counts
-- [ ] CURR-2: tariffs schema — sourceUrl, lastVerifiedAt, verifyStatus (current | change_detected | due | superseded); seeder stamps filed rows
-- [ ] CURR-3: rate_verifications audit-trail table — every check recorded (status, observed values, applied flag, evidence)
-- [ ] CURR-4: weekly Heartbeat extension — source fingerprint sweep (detects tariff PDF changes cheaply), effective-date/adjustor-cycle horizon scan, staleness escalation (filed rows unverified > window flagged due)
-- [ ] CURR-5: /api/scheduled/rateVerify endpoint — GET returns prioritized verification targets; POST accepts agent findings (confirmed/changed/source_moved/unreachable) with conservative auto-apply for small adjustor-only deltas + owner notification, never silent large changes
-- [ ] CURR-6: monthly AGENT cron — spawns agent to fetch official tariff sources (PDFs/pages), compare against seeded values, POST structured findings back
-- [ ] CURR-7: UI disclosure — "verified <date>" chips on Tariffs page + rate provenance surfaces; change_detected/due amber states; rate-currency panel
-- [ ] CURR-8: tests (handler auth, target ordering, confirmed/changed/auto-apply paths, fingerprint change detection, staleness escalation) + full suite green
-- [ ] CURR-9: deploy checkpoint, then create the AGENT cron + verify weekly job update live
+- [x] CURR-1: rate_sources registry table — 9 official sources covering all 23 filed rows (URL, label, governed urdbIds, adjustor cycle, cadence, sha256 content fingerprint, fail counts); migration 0019
+- [x] CURR-2: tariffs schema — sourceUrl, lastVerifiedAt, verifyStatus columns; seeder stamps filed rows verified-at-seed; registerRateSources re-asserts sourceUrl onto governed rows
+- [x] CURR-3: rate_verifications audit-trail table — every check recorded (status, observed values JSON, appliedAutomatically flag, evidence, method)
+- [x] CURR-4: weekly Heartbeat extension — sweepRateSources in refreshReference cron (Mon 06:00 UTC): visible-text-only HTML fingerprinting (hardened against nonce/IP/markup churn — verified stable across double-fetch on all 4 HTML sources), PDF exact-hash, adjustor-cycle-aware cadence (PGA≤45d, GSC≤100d), staleness escalation to due
+- [x] CURR-5: /api/scheduled/rateVerify endpoint — GET prioritized targets (change_detected > due > stale), POST findings with bounded auto-apply (≤8% volumetric adjustor-band delta auto-applies with audit row; larger flags for review, never silently mutates) + owner notification; cron-only auth verified live (403 unauthenticated on prod)
+- [x] CURR-6: monthly AGENT cron created — "Monthly filed-rate verification (Meterly)", 3rd of month 07:30 UTC, taskUid rfvGk5hnNtjeaqn2ZoJ3ZZ persisted in platform_config; prompt: fetch queue → read official PDFs/pages → POST structured findings (covers SRP + Tucson Water which bot-block server fetches)
+- [x] CURR-7: UI disclosure — Filed-rate currency panel on Tariffs page: per-source verified date, status chips (current/change_detected/due amber), source links
+- [x] CURR-8: tests — rateCurrency.test.ts 15 specs (registry idempotency, target ordering, confirmed/auto-apply/flag/unreachable/source_moved paths, fingerprint change detection, staleness escalation); full suite 503 passed
+- [x] CURR-9: deployed (checkpoint 8b74cc1f auto-published); AGENT cron live; sweep validated against prod DB twice — fixed 2 dead source URLs (APS, UNS Electric), browser-grade fetch headers, changed:[] stable rebaseline
