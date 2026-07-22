@@ -315,6 +315,16 @@ export const tariffs = mysqlTable(
     nemBanking: mysqlEnum("nemBanking", ["monthly", "annual", "none"]),
     /** credit expiry / true-up description, e.g. "April true-up at avoided cost" */
     nemCreditExpiry: varchar("nemCreditExpiry", { length: 32 }),
+    /** CURR-2 (Jul 22) rate-currency engine: official source document URL this
+     * row's values were verified against, and when. verifyStatus drives UI
+     * disclosure chips: change_detected = weekly fingerprint sweep saw the
+     * source document change; due = past verify cadence; superseded = a newer
+     * filed row replaced this one. */
+    sourceUrl: varchar("sourceUrl", { length: 512 }),
+    lastVerifiedAt: bigint("lastVerifiedAt", { mode: "number" }),
+    verifyStatus: mysqlEnum("verifyStatus", ["current", "change_detected", "due", "superseded"])
+      .default("current")
+      .notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   (t) => [
@@ -1205,3 +1215,64 @@ export const platformConfig = mysqlTable("platform_config", {
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 export type PlatformConfigRow = typeof platformConfig.$inferSelect;
+
+/** CURR-1 (Jul 22) — autonomous rate-currency engine: one row per official
+ * rate source (utility × commodity). The weekly Heartbeat fingerprints each
+ * sourceUrl (sha256 of fetched bytes) to detect filed-tariff changes cheaply;
+ * the monthly AGENT cron re-verifies actual rate values against the source
+ * document and POSTs findings to /api/scheduled/rateVerify. adjustorCycle
+ * encodes known change cadences (KY PSC GSC quarterly, AZ PGA monthly-ish)
+ * so verification priority rises ahead of probable effective dates. */
+export const rateSources = mysqlTable("rate_sources", {
+  id: int("id").autoincrement().primaryKey(),
+  /** stable key, e.g. "lge-ky-electric", "unsg-az-gas" */
+  sourceKey: varchar("sourceKey", { length: 96 }).notNull().unique(),
+  utilityName: varchar("utilityName", { length: 255 }).notNull(),
+  commodity: mysqlEnum("commodity", ["electric", "gas", "water"]).notNull(),
+  state: varchar("state", { length: 8 }).notNull(),
+  /** official tariff document / rates page */
+  sourceUrl: varchar("sourceUrl", { length: 512 }).notNull(),
+  /** human label for notifications, e.g. "LG&E P.S.C. Electric No. 13" */
+  sourceLabel: varchar("sourceLabel", { length: 255 }).notNull(),
+  /** urdbIds of the seeded tariff rows this source governs (JSON string[]) */
+  governsUrdbIds: json("governsUrdbIds").notNull(),
+  /** none | quarterly_gsc | quarterly_pga | monthly_pga | annual — drives due-horizon scan */
+  adjustorCycle: varchar("adjustorCycle", { length: 32 }).default("none").notNull(),
+  /** agent re-verification cadence in days */
+  verifyCadenceDays: int("verifyCadenceDays").default(90).notNull(),
+  /** sha256 of last fetched source bytes; null until first sweep */
+  contentFingerprint: varchar("contentFingerprint", { length: 64 }),
+  fingerprintAt: bigint("fingerprintAt", { mode: "number" }),
+  /** set when the weekly sweep sees the fingerprint change — raises agent priority */
+  changeDetectedAt: bigint("changeDetectedAt", { mode: "number" }),
+  lastVerifiedAt: bigint("lastVerifiedAt", { mode: "number" }),
+  consecutiveFailures: int("consecutiveFailures").default(0).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+export type RateSourceRow = typeof rateSources.$inferSelect;
+
+/** CURR-3 — audit trail: every verification check (weekly fingerprint sweep
+ * or monthly agent finding) is recorded so rate currency is provable, not
+ * asserted. `applied` marks conservative auto-applied adjustor deltas. */
+export const rateVerifications = mysqlTable(
+  "rate_verifications",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    sourceKey: varchar("sourceKey", { length: 96 }).notNull(),
+    urdbId: varchar("urdbId", { length: 64 }),
+    checkedAt: bigint("checkedAt", { mode: "number" }).notNull(),
+    /** confirmed | changed | change_detected | source_moved | unreachable */
+    status: varchar("status", { length: 32 }).notNull(),
+    /** observed values from the source document (JSON) when status=changed */
+    observed: json("observed"),
+    applied: boolean("applied").default(false).notNull(),
+    /** short human evidence: what the checker saw, quote or figure */
+    evidence: varchar("evidence", { length: 1024 }),
+    /** weekly_fingerprint | agent_verify | manual */
+    method: varchar("method", { length: 32 }).default("agent_verify").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [index("rate_verifications_source_idx").on(t.sourceKey, t.checkedAt)],
+);
+export type RateVerificationRow = typeof rateVerifications.$inferSelect;

@@ -13,7 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
-import { ChevronDown, ChevronUp, Receipt } from "lucide-react";
+import { ChevronDown, ChevronUp, Receipt, ShieldCheck } from "lucide-react";
 import { ProvChip } from "@/components/Honesty";
 
 export default function Tariffs() {
@@ -206,7 +206,104 @@ export default function Tariffs() {
           )}
         </CardContent>
       </Card>
+
+      <RateCurrencyPanel />
     </div>
+  );
+}
+
+/** CURR-7 — rate-currency disclosure panel: shows when each hand-modeled
+ * (filed) rate source was last verified against its official document, the
+ * automated check cadence, and any detected-but-unresolved changes. The
+ * verification itself runs on schedule (weekly fingerprint sweep + monthly
+ * agent re-verification) — this panel is the honest window into it. */
+function RateCurrencyPanel() {
+  const status = trpc.tariffs.rateCurrencyStatus.useQuery(undefined, { staleTime: 5 * 60 * 1000 });
+  const [showHistory, setShowHistory] = useState(false);
+  const history = trpc.tariffs.rateCurrencyHistory.useQuery(undefined, { enabled: showHistory });
+  if (status.isLoading || (status.data ?? []).length === 0) return null;
+  const rows = status.data ?? [];
+  const attention = rows.filter((r) => r.status !== "current");
+  return (
+    <Card className="mt-6 border-border/70">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <ShieldCheck className="h-4 w-4 text-primary" /> Filed-rate currency
+          {attention.length === 0 ? (
+            <Badge variant="outline" className="ml-1 border-emerald-500/40 text-[10px] text-emerald-400">all current</Badge>
+          ) : (
+            <Badge variant="outline" className="ml-1 border-amber-500/40 text-[10px] text-amber-400">{attention.length} need attention</Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
+          Hand-modeled rates are tied to their official tariff documents and re-verified automatically — a weekly sweep
+          fingerprints each source document to detect republications, and a monthly verification agent re-reads the filed
+          values. Imputed state-average rates are checked against live EIA data on the same weekly cycle.
+        </p>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="font-mono text-xs">Source</TableHead>
+              <TableHead className="font-mono text-xs">Governs</TableHead>
+              <TableHead className="font-mono text-xs">Last verified</TableHead>
+              <TableHead className="font-mono text-xs">Cadence</TableHead>
+              <TableHead className="font-mono text-xs">Status</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r) => (
+              <TableRow key={r.sourceKey}>
+                <TableCell className="max-w-64">
+                  <a href={r.sourceUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-foreground underline-offset-2 hover:underline">
+                    {r.sourceLabel}
+                  </a>
+                  <p className="text-[10px] text-muted-foreground">{r.utilityName} · {r.commodity} · {r.state}</p>
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">{r.governs} rate{r.governs === 1 ? "" : "s"}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {r.lastVerifiedAt ? `${new Date(r.lastVerifiedAt).toLocaleDateString()} (${r.ageDays}d ago)` : `seeded ${r.ageDays}d ago`}
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">{r.cadenceDays}d</TableCell>
+                <TableCell>
+                  {r.status === "current" ? (
+                    <Badge variant="outline" className="border-emerald-500/40 text-[10px] text-emerald-400">current</Badge>
+                  ) : r.status === "change_detected" ? (
+                    <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-400">change detected</Badge>
+                  ) : (
+                    <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-400">verification due</Badge>
+                  )}
+                  {r.consecutiveFailures >= 3 && (
+                    <p className="mt-0.5 text-[10px] text-red-400">source unreachable ×{r.consecutiveFailures}</p>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+        <button
+          type="button"
+          onClick={() => setShowHistory((v) => !v)}
+          className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+        >
+          {showHistory ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          Verification history
+        </button>
+        {showHistory && (
+          <div className="mt-2 space-y-1">
+            {(history.data ?? []).length === 0 && <p className="text-xs text-muted-foreground">No verification checks recorded yet — the first scheduled sweep will populate this.</p>}
+            {(history.data ?? []).map((v) => (
+              <p key={v.id} className="text-[11px] leading-relaxed text-muted-foreground">
+                <span className="font-mono">{new Date(v.checkedAt).toLocaleDateString()}</span> · {v.sourceKey} ·{" "}
+                <span className={v.status === "confirmed" ? "text-emerald-400" : "text-amber-400"}>{v.status}{v.applied ? " (auto-applied)" : ""}</span>
+                {v.evidence ? ` — ${v.evidence}` : ""}
+              </p>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

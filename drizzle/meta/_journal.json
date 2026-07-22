@@ -134,6 +134,13 @@
       "when": 1784737461401,
       "tag": "0018_silky_electro",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "5",
+      "when": 1784742376319,
+      "tag": "0019_superb_tigra",
+      "breakpoints": true
     }
   ]
 }

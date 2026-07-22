@@ -50,6 +50,8 @@ export const CONFIG_DEFAULTS: Array<{ key: string; value: string; description: s
   { key: "estimate.daily_ip_cap", value: "20", description: "Anonymous estimator requests per IP per day" },
   { key: "free.site_cap", value: "1", description: "Free-tier site quota" },
   { key: "free.scenario_cap", value: "3", description: "Free-tier scenarios per month" },
+  { key: "rate.auto_apply_max_pct", value: "15", description: "CURR: max % delta the rate-verification agent may auto-apply (adjustor band); larger changes flag for review" },
+  { key: "rate.verify_targets_per_run", value: "10", description: "CURR: verification targets handed to the monthly rate agent per run" },
 ];
 
 async function requireDb() {

@@ -22,6 +22,7 @@ import { reassertNationalRates } from "./seed/runSeeders";
 import { SEED_VERSION } from "./seed/seedData";
 import { assessSeedFreshness } from "./seedLifecycle";
 import { checkEiaRateDrift } from "./eiaRefresh";
+import { sweepRateSources, type SweepResult } from "./rateCurrency";
 
 export async function digestHandler(req: Request, res: Response) {
   try {
@@ -97,13 +98,24 @@ export async function refreshReferenceHandler(req: Request, res: Response) {
       console.warn("[refreshReference] telecom expiry check failed", e);
       return [] as TelecomExpiry[];
     });
+    // CURR-4: weekly rate-source fingerprint sweep — every registered official
+    // tariff document is fetched and sha256-hashed; a changed hash flips the
+    // governed filed-rate rows to change_detected (amber disclosure in UI) and
+    // raises the monthly verification agent's priority. Sources past their
+    // effective cadence (shortened for PGA/GSC adjustor cycles) flip to due.
+    const rateSweep: SweepResult = await sweepRateSources(now).catch((e) => {
+      console.warn("[refreshReference] rate-source sweep failed", e);
+      return { checked: 0, changed: [], due: [], unreachable: [] };
+    });
     const material =
       incentives.expiringSoon.length > 0 ||
       territories.superseded > 0 ||
       rates.inserted > 0 ||
       overdue.length > 0 ||
       eiaDrifted.length > 0 ||
-      telecomExpiring.length > 0;
+      telecomExpiring.length > 0 ||
+      rateSweep.changed.length > 0 ||
+      rateSweep.unreachable.length >= 3;
     if (material) {
       const parts: string[] = [];
       if (incentives.expiringSoon.length > 0) parts.push(`Incentive programs expiring within 90 days: ${incentives.expiringSoon.join(", ")} — verify renewal terms and update the catalog.`);
@@ -123,6 +135,12 @@ export async function refreshReferenceHandler(req: Request, res: Response) {
             .map((t) => t.summary)
             .join("; ")} — review on the Telecom page before the price changes.`,
         );
+      if (rateSweep.changed.length > 0)
+        parts.push(
+          `Filed-rate source documents changed since last sweep: ${rateSweep.changed.join(", ")} — affected tariff rows are flagged change_detected and the monthly rate-verification agent will extract the new values on its next run.`,
+        );
+      if (rateSweep.unreachable.length >= 3)
+        parts.push(`Rate-source URLs unreachable this sweep: ${rateSweep.unreachable.join(", ")} — sources may have moved; the verification agent will attempt relocation.`);
       await notifyOwner({
         title: "Meterly reference-data refresh: attention needed",
         content: parts.join(" "),
@@ -137,6 +155,7 @@ export async function refreshReferenceHandler(req: Request, res: Response) {
       freshness,
       eia,
       telecomExpiring: telecomExpiring.map((t) => t.summary),
+      rateSweep,
     });
   } catch (err) {
     res.status(500).json({

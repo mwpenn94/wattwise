@@ -170,6 +170,9 @@ export async function seedTariffs(db: Db) {
         effectiveDate: new Date(t.effectiveDate),
         source: "urdb_snapshot_modeled",
         sourceVersion: SEED_VERSION,
+        // CURR-2: filed rows are verified against their official source at
+        // modeling time — stamp the clock so currency tracking starts now.
+        lastVerifiedAt: Date.now(),
       });
     } else {
       // Version bump = corrected seed data: refresh structure/eligibility on the

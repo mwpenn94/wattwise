@@ -2082,6 +2082,17 @@ export const appRouter = router({
 
   /* ================= tariffs ================= */
   tariffs: router({
+    /* CURR-7 rate-currency disclosure — per-source verification status for the
+       Tariffs page panel: when each official source was last verified against,
+       whether a document change was detected, and what each source governs. */
+    rateCurrencyStatus: protectedProcedure.query(async () => {
+      const { rateCurrencyStatus } = await import("./rateCurrency");
+      return rateCurrencyStatus();
+    }),
+    rateCurrencyHistory: protectedProcedure.query(async () => {
+      const { recentVerifications } = await import("./rateCurrency");
+      return recentVerifications(50);
+    }),
     /* §3i-2 "one address, three utilities" — per-commodity provider registry
        derived from the seeded tariff snapshot for a state. Honesty: this lists
        providers WE HAVE RATES FOR, not a claim of who actually serves the

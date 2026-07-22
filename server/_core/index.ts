@@ -9,6 +9,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { digestHandler, refreshReferenceHandler } from "../scheduledHandlers";
+import { rateVerifyHandler } from "../rateVerifyHandler";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -40,6 +41,10 @@ async function startServer() {
   // Heartbeat cron callbacks — must be mounted before the Vite/static fallthrough
   app.post("/api/scheduled/digest", digestHandler);
   app.post("/api/scheduled/refreshReference", refreshReferenceHandler);
+  // CURR-5 rate-currency engine: GET = verification targets for the monthly
+  // AGENT cron; POST = agent findings applied conservatively.
+  app.get("/api/scheduled/rateVerify", rateVerifyHandler);
+  app.post("/api/scheduled/rateVerify", rateVerifyHandler);
   // tRPC API
   app.use(
     "/api/trpc",
