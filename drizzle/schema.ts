@@ -323,6 +323,84 @@ export const tariffs = mysqlTable(
   ],
 );
 
+/** 6b. telecom_services — internet / mobile / phone / TV services attached to a
+ * site. TELECOM (Jul 22): telecom is deliberately NOT a commodity-enum member —
+ * it has no meters, intervals, weather sensitivity, or tariff structure. It is
+ * a recurring-subscription spend with plan attributes, so it gets its own
+ * table and analytics module (server/telecom.ts) patterned on the vertical-
+ * pack honesty discipline: right-sizing findings only when the user supplied
+ * actual usage, market comparisons always disclosed as published-rate
+ * comparisons, never fabricated. */
+export const telecomServices = mysqlTable(
+  "telecom_services",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    serviceType: mysqlEnum("serviceType", ["internet", "mobile", "tv_bundle", "phone_landline"]).notNull(),
+    provider: varchar("provider", { length: 128 }).notNull(),
+    planName: varchar("planName", { length: 255 }),
+    /** current monthly recurring cost, all-in as billed */
+    monthlyCostUsd: double("monthlyCostUsd").notNull(),
+    /** promo pricing honesty: if the current price is promotional, what it
+     * jumps to and when — the single biggest telecom savings lever. */
+    promoEndsAt: bigint("promoEndsAt", { mode: "number" }),
+    postPromoCostUsd: double("postPromoCostUsd"),
+    /** contract lock: early-termination window ends here (null = no contract) */
+    contractEndsAt: bigint("contractEndsAt", { mode: "number" }),
+    /** internet plan attributes */
+    downloadMbps: double("downloadMbps"),
+    isBusiness: boolean("isBusiness").default(false).notNull(),
+    /** mobile plan attributes */
+    lines: int("lines"),
+    dataAllowanceGb: double("dataAllowanceGb"),
+    /** true when the plan is unlimited data (dataAllowanceGb ignored) */
+    unlimitedData: boolean("unlimitedData").default(false).notNull(),
+    /** user-reported ACTUAL usage — right-sizing only ever computes from these,
+     * never from assumptions. */
+    actualDataUsedGb: double("actualDataUsedGb"),
+    actualDownloadNeedMbps: double("actualDownloadNeedMbps"),
+    /** intake provenance */
+    source: mysqlEnum("source", ["manual", "bill_parsed"]).default("manual").notNull(),
+    notes: varchar("notes", { length: 512 }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [index("telecom_site_idx").on(t.siteId), index("telecom_user_idx").on(t.userId)],
+);
+
+export type TelecomService = typeof telecomServices.$inferSelect;
+export type InsertTelecomService = typeof telecomServices.$inferInsert;
+
+/** 6c. telecom_benchmarks — seeded national published-rate catalog (FCC Urban
+ * Rate Survey + published carrier/ISP pricing). Code-reviewed seed like
+ * STATE_PROFILES; refreshed deliberately, never silently mutated. */
+export const telecomBenchmarks = mysqlTable(
+  "telecom_benchmarks",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    serviceType: mysqlEnum("serviceType", ["internet", "mobile", "tv_bundle", "phone_landline"]).notNull(),
+    /** tier key, e.g. internet_100_300, mobile_unlimited_postpaid */
+    tierKey: varchar("tierKey", { length: 64 }).notNull().unique(),
+    tierLabel: varchar("tierLabel", { length: 255 }).notNull(),
+    /** applicability window for matching an internet service to this tier */
+    minMbps: double("minMbps"),
+    maxMbps: double("maxMbps"),
+    /** true when prices are per line (mobile) */
+    perLine: boolean("perLine").default(false).notNull(),
+    typicalLowUsd: double("typicalLowUsd").notNull(),
+    medianUsd: double("medianUsd").notNull(),
+    typicalHighUsd: double("typicalHighUsd").notNull(),
+    /** verbatim disclosure basis */
+    basis: varchar("basis", { length: 512 }).notNull(),
+    sourceVersion: varchar("sourceVersion", { length: 32 }).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [index("telecom_bench_type_idx").on(t.serviceType)],
+);
+
+export type TelecomBenchmark = typeof telecomBenchmarks.$inferSelect;
+
 /** 7. archetype_profiles — 8760 normalized shapes + end-use fractions. */
 export const archetypeProfiles = mysqlTable(
   "archetype_profiles",

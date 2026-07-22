@@ -15,6 +15,7 @@ import {
   zipSubregions,
   convergenceLog,
   seedFreshness,
+  telecomBenchmarks,
 } from "../../drizzle/schema";
 import { and, eq } from "drizzle-orm";
 import {
@@ -37,6 +38,7 @@ import {
   generateNationalGasWaterTariffs,
   zoneStationNormals,
 } from "./nationalData";
+import { TELECOM_BENCHMARKS, TELECOM_SEED_VERSION } from "./telecomData";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -454,6 +456,42 @@ export async function reassertNationalRates(sourceVersion: string): Promise<{ in
   return { inserted, updated };
 }
 
+/** Telecom published-rate benchmark catalog (server/seed/telecomData.ts).
+ * Version-keyed on TELECOM_SEED_VERSION so a vintage bump re-runs the upsert. */
+export async function seedTelecomBenchmarks(db: Db) {
+  const seederKey = `telecom_benchmarks_${TELECOM_SEED_VERSION}`;
+  if (await alreadySeeded(db, seederKey)) return 0;
+  let n = 0;
+  for (const b of TELECOM_BENCHMARKS) {
+    await db
+      .insert(telecomBenchmarks)
+      .values({ ...b, sourceVersion: TELECOM_SEED_VERSION })
+      .onDuplicateKeyUpdate({
+        set: {
+          tierLabel: b.tierLabel,
+          minMbps: b.minMbps,
+          maxMbps: b.maxMbps,
+          perLine: b.perLine,
+          typicalLowUsd: b.typicalLowUsd,
+          medianUsd: b.medianUsd,
+          typicalHighUsd: b.typicalHighUsd,
+          basis: b.basis,
+          sourceVersion: TELECOM_SEED_VERSION,
+        },
+      });
+    n++;
+  }
+  await recordRun(
+    db,
+    seederKey,
+    n,
+    "Published rates (FCC URS public domain; published carrier/ISP pricing)",
+    "https://www.fcc.gov/economics-analytics/industry-analysis-division/urban-rate-survey-data-resources",
+    "National telecom published-rate tiers (internet by speed, mobile per-line, TV bundle, landline) — Jul 2026 vintage; market comparisons, not quotes",
+  );
+  return n;
+}
+
 export async function seedConvergenceLog(db: Db) {
   if (await alreadySeeded(db, "convergence_log")) return 0;
   const entries = [
@@ -494,6 +532,7 @@ export function ensureSeeded(): Promise<void> {
           gasWaterTariffs: await seedNationalGasWaterTariffs(db),
           archetypes: await seedArchetypes(db),
           convergence: await seedConvergenceLog(db),
+          telecomBenchmarks: await seedTelecomBenchmarks(db),
         };
         // v1.22 S-LIFECYCLE: register per-seeder refresh cadences + config
         // defaults (idempotent; existing ops-tuned rows are preserved).

@@ -13,6 +13,7 @@ import Upload from "./console/Upload";
 import Wizard from "./console/Wizard";
 import Scenarios from "./console/Scenarios";
 import Tariffs from "./console/Tariffs";
+import Telecom from "./console/Telecom";
 import Account from "./console/Account";
 import Reports from "./console/Reports";
 import ConvergencePanel from "./console/ConvergencePanel";
@@ -29,6 +30,7 @@ export default function AppShell() {
         <Route path="/app/wizard" component={Wizard} />
         <Route path="/app/scenarios" component={Scenarios} />
         <Route path="/app/tariffs" component={Tariffs} />
+        <Route path="/app/telecom" component={Telecom} />
         <Route path="/app/reports" component={Reports} />
         <Route path="/app/convergence" component={ConvergencePanel} />
         <Route path="/app/account" component={Account} />

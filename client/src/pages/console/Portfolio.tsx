@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { AlertTriangle, BadgeCheck, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Zap } from "lucide-react";
+import { AlertTriangle, BadgeCheck, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Wifi, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -23,7 +23,7 @@ import { ProvenanceBadge } from "@/components/ProvenanceBadge";
 import { DisclaimerBanner } from "@/components/Honesty";
 import { MapView } from "@/components/Map";
 import { MapPin } from "lucide-react";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 
 export default function Portfolio() {
   // "all" = every site; "none" = ungrouped sites only; numeric = that entity
@@ -39,6 +39,7 @@ export default function Portfolio() {
   const rows = activeGroup ? allRows.filter((r) => activeGroup.siteIds.includes(r.siteId)) : allRows;
   const totals = portfolio.data?.totals;
   const rateConfidence = portfolio.data?.rateConfidence;
+  const telecom = portfolio.data?.telecom;
 
   // §3i-2 exception-first ranking: dollar opportunity + anomaly severity.
   // Anomalies get a large additive bump so a flagged site outranks a merely
@@ -138,6 +139,10 @@ export default function Portfolio() {
               figures stand on actual/verified pricing vs an imputed average,
               with one-click calibrate links for each imputed site. */}
           <RateConfidenceCard rows={rows} rateConfidence={rateConfidence} />
+
+          {/* TELECOM — recurring connectivity spend rollup with findings link.
+              Renders only when the user has entered telecom services. */}
+          <TelecomRollupCard telecom={telecom} />
 
           {/* §3i-2 exception-first view: ranked by $ opportunity + anomaly severity */}
           {ranked.length > 0 && (
@@ -263,6 +268,65 @@ export default function Portfolio() {
  * pricing tier and lists each imputed-rate site with a one-click calibrate
  * link (→ /app/upload?site=<id>, which preselects the site). Hides entirely
  * when nothing is analyzed yet — an empty confidence card would be noise. */
+function TelecomRollupCard({
+  telecom,
+}: {
+  telecom?: {
+    serviceCount: number;
+    monthlyTotalUsd: number;
+    annualTotalUsd: number;
+    findingCount: number;
+    savingsLoUsd: number;
+    savingsHiUsd: number;
+  } | null;
+}) {
+  const [, setLocation] = useLocation();
+  if (!telecom || telecom.serviceCount === 0) return null;
+  const savings =
+    telecom.savingsHiUsd > 0
+      ? telecom.savingsLoUsd > 0 && telecom.savingsLoUsd !== telecom.savingsHiUsd
+        ? `$${telecom.savingsLoUsd.toLocaleString()}–$${telecom.savingsHiUsd.toLocaleString()}/yr`
+        : `up to $${telecom.savingsHiUsd.toLocaleString()}/yr`
+      : null;
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <Wifi className="h-4 w-4 text-primary" /> Telecom &amp; connectivity
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Internet, mobile, TV, and landline across your portfolio — recurring subscription spend entered from bills,
+          checked against published national pricing.
+        </p>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <div>
+          <p className="text-xs text-muted-foreground">Services</p>
+          <p className="font-display text-lg font-bold">{telecom.serviceCount}</p>
+        </div>
+        <div>
+          <p className="text-xs text-muted-foreground">Monthly spend</p>
+          <p className="font-display text-lg font-bold">${telecom.monthlyTotalUsd.toLocaleString()}</p>
+        </div>
+        <div>
+          <p className="text-xs text-muted-foreground">Annualized</p>
+          <p className="font-display text-lg font-bold">${telecom.annualTotalUsd.toLocaleString()}</p>
+        </div>
+        <div>
+          <p className="text-xs text-muted-foreground">Savings findings</p>
+          <p className="font-display text-lg font-bold">
+            {telecom.findingCount}
+            {savings ? <span className="ml-2 text-sm font-semibold text-emerald-400">{savings}</span> : null}
+          </p>
+        </div>
+        <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation("/app/telecom")}>
+          Review telecom →
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 function RateConfidenceCard({
   rows,
   rateConfidence,

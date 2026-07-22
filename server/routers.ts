@@ -35,6 +35,7 @@ import { extractZipMembers } from "./ingest/archive";
 import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, type ParsedMeterSeries } from "./ingest/parsers";
 import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
+import { extractTelecomBill } from "./ingest/telecomBillOcr";
 import { runBulkScreen } from "./bulkScreen";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
@@ -72,6 +73,14 @@ import { placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
 import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { reconcileBill } from "./billReconciliation";
 import { deriveBillVerifiedRate } from "./billCalibration";
+import {
+  analyzeTelecomServices,
+  listAllTelecomServices,
+  listTelecomServices,
+  loadBenchmarks,
+  removeTelecomService,
+  upsertTelecomService,
+} from "./telecom";
 import { registerGeometryCacheDb } from "./geometryCacheDb";
 import { assessSeedFreshness, recordParseOutcome, recordUnknownTariff, sweepUnverifiedTariffs } from "./seedLifecycle";
 import { incentiveEconomics } from "./incentives";
@@ -1448,6 +1457,20 @@ export const appRouter = router({
           imputedCount: analyzedTiers.filter((r) => r.rateTier === "state_average_imputed" || r.rateTier === "national_assumption").length,
           unknownCount: analyzedTiers.filter((r) => r.rateTier == null).length,
         };
+        // TELECOM — portfolio rollup: monthly/annual telecom spend across all
+        // the user's services plus the capped savings range from the analyzer.
+        // Fail-open: telecom is optional; an empty result renders nothing.
+        const telecomAnalysis = await analyzeTelecomServices(ctx.user.id).catch(() => null);
+        const telecom = telecomAnalysis
+          ? {
+              serviceCount: telecomAnalysis.services.length,
+              monthlyTotalUsd: Math.round(telecomAnalysis.monthlyTotalUsd),
+              annualTotalUsd: Math.round(telecomAnalysis.annualTotalUsd),
+              findingCount: telecomAnalysis.findings.length,
+              savingsLoUsd: telecomAnalysis.totalAnnualSavingsLo,
+              savingsHiUsd: telecomAnalysis.totalAnnualSavingsHi,
+            }
+          : null;
         const utilityExposure = Array.from(exposureMap.entries())
           .map(([utility, v]) => ({
             utility,
@@ -1461,6 +1484,7 @@ export const appRouter = router({
           sites: siteRollups,
           utilityExposure,
           rateConfidence,
+          telecom,
           totals: {
             siteCount: siteRollups.length,
             analyzedCount: siteRollups.filter((r) => r.analyzed).length,
@@ -2744,6 +2768,80 @@ export const appRouter = router({
       solar: SOLAR_DISCLOSURE,
       battery: BATTERY_DISCLOSURE,
     })),
+  }),
+
+  /* ================= telecom: internet / mobile / TV / landline ================= */
+  telecom: router({
+    list: protectedProcedure
+      .input(z.object({ siteId: z.number() }))
+      .query(({ ctx, input }) => listTelecomServices(input.siteId, ctx.user.id)),
+    /** TEL-4: telecom bill photo OCR — prefills the add-service form. Same
+     * hardening gate, budget kill-switch, and fail-loud metering contract as
+     * utility-bill OCR. PDFs degrade honestly (no rasterizer in runtime). */
+    ocr: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          filename: z.string(),
+          contentBase64: z.string().max(30_000_000),
+          mime: z.enum(["image/png", "image/jpeg", "application/pdf"]),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        const buf = Buffer.from(input.contentBase64, "base64");
+        const gate = preParseGate(buf, input.mime === "application/pdf" ? "bill_pdf" : "bill_image");
+        if (!gate.ok) throw new TRPCError({ code: "BAD_REQUEST", message: gate.reason ?? "File rejected" });
+        if (input.mime === "application/pdf") {
+          return {
+            status: "manual_entry_required" as const,
+            reason: "PDF bills can't be auto-parsed yet — please upload a photo/screenshot of the bill, or enter the fields manually.",
+          };
+        }
+        const dataUrl = `data:${input.mime};base64,${input.contentBase64}`;
+        const outcome = await extractTelecomBill(dataUrl, ctx.user.id, tierOf(ctx.user));
+        await h.audit(ctx.user.id, "telecom_bill_ocr", "site", String(input.siteId), { outcome: outcome.status });
+        await recordParseOutcome("llm_telecom_extractor_v1", outcome.status === "extracted").catch(() => undefined);
+        return outcome;
+      }),
+    listAll: protectedProcedure.query(({ ctx }) => listAllTelecomServices(ctx.user.id)),
+    upsert: protectedProcedure
+      .input(
+        z.object({
+          id: z.number().optional(),
+          siteId: z.number(),
+          serviceType: z.enum(["internet", "mobile", "tv_bundle", "phone_landline"]),
+          provider: z.string().min(1).max(128),
+          planName: z.string().max(255).nullish(),
+          monthlyCostUsd: z.number().positive().max(100000),
+          promoEndsAt: z.number().nullish(),
+          postPromoCostUsd: z.number().positive().max(100000).nullish(),
+          contractEndsAt: z.number().nullish(),
+          downloadMbps: z.number().positive().max(100000).nullish(),
+          isBusiness: z.boolean().optional(),
+          lines: z.number().int().min(1).max(100).nullish(),
+          dataAllowanceGb: z.number().positive().max(100000).nullish(),
+          unlimitedData: z.boolean().optional(),
+          actualDataUsedGb: z.number().min(0).max(100000).nullish(),
+          actualDownloadNeedMbps: z.number().positive().max(100000).nullish(),
+          notes: z.string().max(512).nullish(),
+        }),
+      )
+      .mutation(({ ctx, input }) => upsertTelecomService(ctx.user.id, input)),
+    remove: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(({ ctx, input }) => removeTelecomService(input.id, ctx.user.id)),
+    analyze: protectedProcedure
+      .input(z.object({ siteId: z.number().optional() }))
+      .query(async ({ ctx, input }) => {
+        await seeded();
+        return analyzeTelecomServices(ctx.user.id, input.siteId);
+      }),
+    benchmarks: publicProcedure.query(async () => {
+      await seeded();
+      return loadBenchmarks();
+    }),
   }),
 
   /* ================= account: usage metering + data export ================= */

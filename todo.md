@@ -490,3 +490,12 @@
 - [x] KEY-1: Register free EIA API key end-to-end (user's browser + email), set EIA_API_KEY production secret, verify live drift check runs against real EIA data
 - [x] CONF-1: Portfolio rate-confidence rollup — count of sites on imputed vs bill-verified/filed rates, per-site tier chips, one-click calibrate links
 - [x] SEAS-1: Seasonal bill calibration — with 3+ bills, derive monthly blended-rate curve (seasonal variation) instead of single annual figure; surfaced in pipeline basis strings + tests
+
+## Telecom utilities extension (Jul 22 — internet / cell phone / data)
+- [x] TEL-0: Architecture review — decide how telecom fits the commodity model (bill-based, no interval data, no weather normalization; plan-vs-usage right-sizing instead)
+- [x] TEL-1: Data model — telecom service records (service type, provider, plan name, monthly cost, contract/promo end, usage allowance vs actual usage), schema migration
+- [x] TEL-2: Benchmark seed data — market-rate catalog for internet tiers and mobile plans (national/regional medians, code-reviewed seed like STATE_PROFILES)
+- [x] TEL-3: Analytics — plan right-sizing (overprovisioned speed/data), promo-expiry detection, market-delta savings opportunities with confidence labels + honest disclosures
+- [x] TEL-4: Bill intake — telecom bill photo OCR (telecomBillOcr.ts + telecom.ocr procedure + Scan-a-bill prefill in add dialog; PDFs degrade honestly to manual entry; same budget/metering fail-loud contracts as utility-bill OCR)
+- [x] TEL-5: UI — telecom intake flow, insights on Explore/site view, Portfolio utility-exposure integration
+- [x] TEL-6: Tests (vitest specs for analytics + intake), full-suite green, live verification, checkpoint
