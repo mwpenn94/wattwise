@@ -141,6 +141,13 @@
       "when": 1784742376319,
       "tag": "0019_superb_tigra",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "5",
+      "when": 1784752194612,
+      "tag": "0020_mixed_logan",
+      "breakpoints": true
     }
   ]
 }

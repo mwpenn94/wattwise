@@ -314,6 +314,65 @@ export function resolveTerritory(site: SiteLocation, commodity: "electric" | "ga
 }
 
 /**
+ * NAT-4 (Jul 22) — unified nationwide territory resolution.
+ * Precedence:
+ *  1. Curated catalog (AZ_TERRITORIES, multi-state): city/zip3/county
+ *     precision with overlap detection — highest fidelity where hand-built.
+ *  2. Nationwide ZIP3 registry (EIA-861-derived serviceTerritories table):
+ *     every covered ZIP3 × commodity → serving utilities. Registry utility
+ *     names equal tariffs.utilityName for urdb_bulk rows, so partitioning
+ *     works end to end nationwide.
+ *  3. Fail open — statewide comparison, disclosed. An unknown territory must
+ *     never hide the entire rate catalog.
+ */
+export async function resolveTerritoryUnified(
+  site: SiteLocation,
+  commodity: "electric" | "gas" | "water",
+): Promise<TerritoryResolution> {
+  const catalogRes = resolveTerritory(site, commodity);
+  if (catalogRes.confidence !== "unknown") return catalogRes;
+  try {
+    const { lookupTerritory } = await import("./serviceTerritories");
+    const lk = await lookupTerritory(site.zip, commodity);
+    if (lk.covered && lk.utilities.length > 0) {
+      // An explicit utility on the site record narrows the registry hit.
+      const siteUtil = norm(site.utilityName);
+      const named = siteUtil
+        ? lk.utilities.filter((u) => {
+            const nu = norm(u);
+            return nu.includes(siteUtil) || siteUtil.includes(nu.replace(/\s*\(.*\)$/, ""));
+          })
+        : [];
+      const chosen = named.length > 0 ? named : lk.utilities;
+      return {
+        plausibleUtilities: chosen,
+        matchPrefixes: chosen.map((u) => norm(u)),
+        confidence: named.length > 0 ? "name_match" : "zip_match",
+        overlap: chosen.length > 1,
+        basis:
+          named.length > 0
+            ? `Utility confirmed on the site record (${site.utilityName}).`
+            : chosen.length > 1
+              ? `ZIP ${norm(site.zip).slice(0, 3)}xx is served by multiple ${commodity} utilities — confirm which serves you.`
+              : `Territory resolved from the nationwide ZIP-level registry (EIA-861-derived).`,
+      };
+    }
+    if (lk.covered && lk.served === false) {
+      return {
+        plausibleUtilities: [],
+        matchPrefixes: [],
+        confidence: "unknown",
+        overlap: false,
+        basis: `No ${commodity} service is recorded for this ZIP area — statewide comparison shown.`,
+      };
+    }
+  } catch {
+    /* registry unavailable → fail open below */
+  }
+  return catalogRes;
+}
+
+/**
  * Partition tariff rows into in-territory and out-of-territory sets for a
  * resolution. With an unknown resolution everything is in-territory (fail open).
  */

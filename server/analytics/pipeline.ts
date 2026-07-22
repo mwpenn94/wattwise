@@ -44,7 +44,7 @@ import { generateCommodityOpportunities, type XcOpportunity } from "../commodity
 import { STATE_PROFILES } from "../seed/nationalData";
 import { resolveCommodityService } from "../commodityService";
 import { deriveBillVerifiedRate } from "../billCalibration";
-import { resolveTerritory, partitionByTerritory } from "../serviceTerritory";
+import { resolveTerritoryUnified, partitionByTerritory } from "../serviceTerritory";
 import { effectiveSchedules } from "../operatingHours";
 import type { Site, Meter } from "../../drizzle/schema";
 
@@ -449,11 +449,22 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     // utilityName → city → zip3 (fail-open: unknown location = no filtering),
     // and restrict the statewide backfill to in-territory rows. Out-of-territory
     // rows are dropped from the sweep entirely; the disclosure below says so.
-    const territoryRes = resolveTerritory(
+    // NAT-4: unified resolution — curated catalog first, then the nationwide
+    // EIA-861 ZIP3 registry, then fail-open. Works across all covered states.
+    const territoryRes = await resolveTerritoryUnified(
       { state: site.state, city: site.city, zip: site.zip, utilityName: site.utilityName },
       (meter?.commodity ?? "electric") as "electric" | "gas" | "water",
     );
     const { inTerritory: territoryTariffs } = partitionByTerritory(allTariffs, territoryRes);
+    // NAT-5 auto-enrollment: if the site names a utility for which the catalog
+    // has NO utility-specific rows (only state-representative synthesized ones),
+    // queue that utility for the monthly acquisition agent — the gap fills
+    // itself without the owner asking. Fire-and-forget; never blocks analysis.
+    if (site.utilityName && utilityTariffs.filter((t) => t.source !== "state_representative_synthesized").length === 0) {
+      void import("../urdbImport")
+        .then((m) => m.enqueueAcquisition(site.utilityName!, site.state ?? "", (meter?.commodity ?? "electric") as "electric" | "gas" | "water", site.id))
+        .catch(() => {});
+    }
     // Sweep = same-utility rates plus any eligible IN-TERRITORY rates (a large
     // site may have no eligible rate at its own utility in the seeded snapshot;
     // with an unresolved territory this degrades to the old statewide behavior).
@@ -591,7 +602,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // downstream dollar surface can say WHY these utilities (and not others)
   // were compared, and flag overlap zones for the confirm-your-utility UX.
   if (currentCost && comparisons.length > 0) {
-    const terrRes = resolveTerritory(
+    const terrRes = await resolveTerritoryUnified(
       { state: site.state, city: site.city, zip: site.zip, utilityName: site.utilityName },
       (meter?.commodity ?? "electric") as "electric" | "gas" | "water",
     );

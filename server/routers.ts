@@ -36,7 +36,7 @@ import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, t
 import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
 import { extractTelecomBill } from "./ingest/telecomBillOcr";
-import { resolveTerritory, partitionByTerritory } from "./serviceTerritory";
+import { resolveTerritoryUnified, partitionByTerritory } from "./serviceTerritory";
 import { runBulkScreen } from "./bulkScreen";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
@@ -2093,6 +2093,32 @@ export const appRouter = router({
       const { recentVerifications } = await import("./rateCurrency");
       return recentVerifications(50);
     }),
+    /* NAT-6 rate-change timeline — material rate events (changes detected,
+       auto-applied adjustor moves, acquisitions, flags) with utility labels,
+       for the Dashboard activity card. Pure confirmations are excluded: the
+       timeline shows movement, not heartbeat noise. */
+    rateChangeTimeline: protectedProcedure.input(z.object({ limit: z.number().int().min(1).max(50).optional() }).optional()).query(async ({ input }) => {
+      const { recentVerifications, rateCurrencyStatus } = await import("./rateCurrency");
+      const [history, sources] = await Promise.all([recentVerifications(200), rateCurrencyStatus()]);
+      const bySourceKey = new Map(sources.map((s) => [s.sourceKey, s]));
+      const material = history.filter((v) => v.status === "changed" || v.status === "change_detected" || v.status === "source_moved");
+      const events = material.slice(0, input?.limit ?? 15).map((v) => {
+        const src = bySourceKey.get(v.sourceKey);
+        const isAcquire = v.method === "agent_acquire";
+        return {
+          at: v.checkedAt,
+          kind: isAcquire ? ("acquired" as const) : v.applied ? ("auto_applied" as const) : v.status === "change_detected" ? ("change_detected" as const) : v.status === "source_moved" ? ("source_moved" as const) : ("flagged" as const),
+          utilityName: src?.utilityName ?? v.sourceKey.replace(/^acq-\d+$/, "newly acquired utility"),
+          state: src?.state ?? null,
+          commodity: src?.commodity ?? null,
+          sourceLabel: src?.sourceLabel ?? null,
+          evidence: v.evidence,
+          applied: v.applied,
+          method: v.method,
+        };
+      });
+      return { events, totalMaterial: material.length };
+    }),
     /* §3i-2 "one address, three utilities" — per-commodity provider registry
        derived from the seeded tariff snapshot for a state. Honesty: this lists
        providers WE HAVE RATES FOR, not a claim of who actually serves the
@@ -2128,7 +2154,7 @@ export const appRouter = router({
         if (input?.siteId != null) {
           const site = await h.getSite(input.siteId, ctx.user.id);
           if (site) {
-            const res = resolveTerritory(
+            const res = await resolveTerritoryUnified(
               { state: site.state, city: site.city, zip: site.zip, utilityName: site.utilityName },
               (input?.commodity ?? "electric") as "electric" | "gas" | "water",
             );

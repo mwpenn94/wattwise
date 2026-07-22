@@ -1217,8 +1217,65 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       )}
+
+      {/* NAT-6 rate-change timeline — material rate movements from the
+          autonomous currency engine (auto-applied adjustor moves, detected
+          document changes, newly acquired utilities). Renders nothing when
+          the engine has seen no movement. */}
+      <RateActivityCard />
       </div>
     </div>
+  );
+}
+
+/** NAT-6 — Dashboard rate-activity card: the audit trail of the autonomous
+ * rate-currency engine, so rate movements affecting analyses are visible
+ * without visiting the Tariffs page. Hidden entirely when there are no
+ * material events (a quiet engine is the normal state). */
+function RateActivityCard() {
+  const { data } = trpc.tariffs.rateChangeTimeline.useQuery({ limit: 8 }, { staleTime: 5 * 60 * 1000 });
+  if (!data || data.events.length === 0) return null;
+  const kindMeta: Record<string, { label: string; cls: string }> = {
+    auto_applied: { label: "auto-applied", cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
+    change_detected: { label: "change detected", cls: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+    flagged: { label: "needs review", cls: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+    acquired: { label: "rates acquired", cls: "bg-sky-500/15 text-sky-600 dark:text-sky-400" },
+    source_moved: { label: "source moved", cls: "bg-muted text-muted-foreground" },
+  };
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="font-display text-base">Rate activity</CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Movements caught by the autonomous rate-verification engine — every filed rate is monitored against its official source.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {data.events.map((e, i) => {
+          const meta = kindMeta[e.kind] ?? kindMeta.source_moved;
+          return (
+            <div key={i} className="flex items-start gap-3 rounded-md border border-border/50 px-3 py-2">
+              <Badge variant="secondary" className={`shrink-0 text-[10px] ${meta.cls}`}>{meta.label}</Badge>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium">
+                  {e.utilityName}
+                  {e.state ? <span className="text-muted-foreground"> · {e.state}</span> : null}
+                  {e.commodity ? <span className="text-muted-foreground"> · {e.commodity}</span> : null}
+                </div>
+                {e.evidence ? <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{e.evidence}</div> : null}
+              </div>
+              <span className="shrink-0 text-xs text-muted-foreground">{new Date(e.at).toLocaleDateString()}</span>
+            </div>
+          );
+        })}
+        {data.totalMaterial > data.events.length ? (
+          <p className="text-xs text-muted-foreground">
+            {data.totalMaterial - data.events.length} older event(s) — full history on the{" "}
+            <Link href="/app/tariffs" className="underline">Tariffs page</Link>.
+          </p>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
 

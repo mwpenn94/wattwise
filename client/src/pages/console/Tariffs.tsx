@@ -224,6 +224,7 @@ function RateCurrencyPanel() {
   if (status.isLoading || (status.data ?? []).length === 0) return null;
   const rows = status.data ?? [];
   const attention = rows.filter((r) => r.status !== "current");
+  const pendingCases = rows.filter((r) => r.sourceKind === "docket" && r.status === "change_detected");
   return (
     <Card className="mt-6 border-border/70">
       <CardHeader>
@@ -234,13 +235,17 @@ function RateCurrencyPanel() {
           ) : (
             <Badge variant="outline" className="ml-1 border-amber-500/40 text-[10px] text-amber-400">{attention.length} need attention</Badge>
           )}
+          {pendingCases.length > 0 && (
+            <Badge variant="outline" className="ml-1 border-sky-500/40 text-[10px] text-sky-400">{pendingCases.length} pending case update{pendingCases.length === 1 ? "" : "s"}</Badge>
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent>
         <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
           Hand-modeled rates are tied to their official tariff documents and re-verified automatically — a weekly sweep
           fingerprints each source document to detect republications, and a monthly verification agent re-reads the filed
-          values. Imputed state-average rates are checked against live EIA data on the same weekly cycle.
+          values. Imputed state-average rates are checked against live EIA data on the same weekly cycle. Docket-watch
+          sources track pending rate cases at the commission, giving advance notice of filed-but-not-yet-effective changes.
         </p>
         <Table>
           <TableHeader>
@@ -261,7 +266,9 @@ function RateCurrencyPanel() {
                   </a>
                   <p className="text-[10px] text-muted-foreground">{r.utilityName} · {r.commodity} · {r.state}</p>
                 </TableCell>
-                <TableCell className="text-xs text-muted-foreground">{r.governs} rate{r.governs === 1 ? "" : "s"}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {r.sourceKind === "docket" ? <span className="text-sky-400">docket watch</span> : <>{r.governs} rate{r.governs === 1 ? "" : "s"}</>}
+                </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
                   {r.lastVerifiedAt ? `${new Date(r.lastVerifiedAt).toLocaleDateString()} (${r.ageDays}d ago)` : `seeded ${r.ageDays}d ago`}
                 </TableCell>
@@ -270,7 +277,11 @@ function RateCurrencyPanel() {
                   {r.status === "current" ? (
                     <Badge variant="outline" className="border-emerald-500/40 text-[10px] text-emerald-400">current</Badge>
                   ) : r.status === "change_detected" ? (
-                    <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-400">change detected</Badge>
+                    r.sourceKind === "docket" ? (
+                      <Badge variant="outline" className="border-sky-500/40 text-[10px] text-sky-400">docket activity</Badge>
+                    ) : (
+                      <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-400">change detected</Badge>
+                    )
                   ) : (
                     <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-400">verification due</Badge>
                   )}

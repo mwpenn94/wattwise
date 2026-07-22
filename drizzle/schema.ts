@@ -1234,6 +1234,10 @@ export const rateSources = mysqlTable("rate_sources", {
   sourceUrl: varchar("sourceUrl", { length: 512 }).notNull(),
   /** human label for notifications, e.g. "LG&E P.S.C. Electric No. 13" */
   sourceLabel: varchar("sourceLabel", { length: 255 }).notNull(),
+  /** NAT-7 (Jul 22): "tariff" sources govern seeded rows; "docket" sources are
+   * state-commission rate-case pages watched for pending (filed-but-not-yet-
+   * effective) changes — they never mutate tariffs, only surface advance notice. */
+  sourceKind: mysqlEnum("sourceKind", ["tariff", "docket"]).default("tariff").notNull(),
   /** urdbIds of the seeded tariff rows this source governs (JSON string[]) */
   governsUrdbIds: json("governsUrdbIds").notNull(),
   /** none | quarterly_gsc | quarterly_pga | monthly_pga | annual — drives due-horizon scan */
@@ -1276,3 +1280,29 @@ export const rateVerifications = mysqlTable(
   (t) => [index("rate_verifications_source_idx").on(t.sourceKey, t.checkedAt)],
 );
 export type RateVerificationRow = typeof rateVerifications.$inferSelect;
+
+/** NAT-5 (Jul 22) — auto-enrollment: when a site's territory resolves to a
+ * utility with no filed-quality tariff rows, the system queues that utility
+ * for agent-driven rate acquisition automatically — no owner prompting. The
+ * monthly verification agent drains this queue (rateVerify GET mode:acquire). */
+export const rateAcquisitionQueue = mysqlTable(
+  "rate_acquisition_queue",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    utilityName: varchar("utilityName", { length: 255 }).notNull(),
+    state: varchar("state", { length: 8 }).notNull(),
+    commodity: mysqlEnum("commodity", ["electric", "gas", "water"]).notNull(),
+    /** siteId that triggered enrollment (first requester) */
+    requestedBySiteId: int("requestedBySiteId"),
+    status: mysqlEnum("status", ["pending", "dispatched", "acquired", "failed"])
+      .default("pending")
+      .notNull(),
+    /** how many sites/analyses have hit this gap — drives priority */
+    demandCount: int("demandCount").default(1).notNull(),
+    lastError: varchar("lastError", { length: 512 }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [index("raq_utility_idx").on(t.utilityName, t.state, t.commodity)],
+);
+export type RateAcquisitionRow = typeof rateAcquisitionQueue.$inferSelect;

@@ -11,6 +11,7 @@ import { getDb } from "./db";
 import { rateSources, rateVerifications, tariffs } from "../drizzle/schema";
 import {
   RATE_SOURCE_SEEDS,
+  applyAcquisition,
   applyAgentFinding,
   effectiveCadenceDays,
   fingerprintSource,
@@ -311,5 +312,174 @@ describe("weekly sweep", () => {
     // audit row written by the sweep
     const audits = await db.select().from(rateVerifications).where(eq(rateVerifications.sourceKey, key));
     expect(audits.some((a) => a.method === "weekly_fingerprint" && a.status === "change_detected")).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* NAT-5 — acquire-mode: the agent fills catalog gaps end to end.      */
+/* ------------------------------------------------------------------ */
+describe("applyAcquisition", () => {
+  async function mkQueueEntry(utilityName: string) {
+    const db = await getDb();
+    if (!db) return null;
+    const { rateAcquisitionQueue } = await import("../drizzle/schema");
+    await db.insert(rateAcquisitionQueue).values({
+      utilityName,
+      state: "ZZ",
+      commodity: "electric",
+      status: "pending",
+    });
+    const rows = await db
+      .select()
+      .from(rateAcquisitionQueue)
+      .where(eq(rateAcquisitionQueue.utilityName, utilityName));
+    return rows[0]?.id ?? null;
+  }
+
+  async function cleanupAcq(utilityName: string, queueId: number | null) {
+    const db = await getDb();
+    if (!db) return;
+    const { rateAcquisitionQueue } = await import("../drizzle/schema");
+    await db.delete(rateAcquisitionQueue).where(eq(rateAcquisitionQueue.utilityName, utilityName));
+    await db.delete(tariffs).where(eq(tariffs.utilityName, utilityName));
+    if (queueId != null) {
+      await db.delete(rateVerifications).where(eq(rateVerifications.sourceKey, `acq-${queueId}`));
+    }
+  }
+
+  it("acquired → inserts agent_acquired rows, marks queue acquired, writes audit", async () => {
+    const util = `${TEST_PREFIX}acq-util`;
+    const queueId = await mkQueueEntry(util);
+    if (queueId == null) return;
+    try {
+      const res = await applyAcquisition({
+        queueId,
+        status: "acquired",
+        rates: [
+          { sector: "Residential", rateName: "Test RS", fixedMonthly: 12, energyRatePerUnit: 0.12 },
+          { sector: "Commercial", rateName: "Test GS", fixedMonthly: 30, energyRatePerUnit: 0.1 },
+        ],
+        sourceUrl: "https://official.example/tariff.pdf",
+        evidence: "read from official tariff",
+      });
+      expect(res.action).toBe("acquired");
+      const db = await getDb();
+      if (!db) return;
+      const rows = await db.select().from(tariffs).where(eq(tariffs.utilityName, util));
+      expect(rows.length).toBe(2);
+      expect(rows.every((r) => r.source === "agent_acquired" && r.verifyStatus === "current")).toBe(true);
+      expect(rows.every((r) => r.sourceUrl === "https://official.example/tariff.pdf")).toBe(true);
+      const { rateAcquisitionQueue } = await import("../drizzle/schema");
+      const q = (await db.select().from(rateAcquisitionQueue).where(eq(rateAcquisitionQueue.id, queueId)))[0];
+      expect(q.status).toBe("acquired");
+      const audits = await db.select().from(rateVerifications).where(eq(rateVerifications.sourceKey, `acq-${queueId}`));
+      expect(audits.some((a) => a.method === "agent_acquire" && a.applied)).toBe(true);
+    } finally {
+      await cleanupAcq(util, queueId);
+    }
+  });
+
+  it("sanity bounds reject hallucinated rates — queue flips to failed, nothing inserted", async () => {
+    const util = `${TEST_PREFIX}acq-bad`;
+    const queueId = await mkQueueEntry(util);
+    if (queueId == null) return;
+    try {
+      const res = await applyAcquisition({
+        queueId,
+        status: "acquired",
+        rates: [
+          { sector: "Residential", rateName: "Absurd", fixedMonthly: 9000, energyRatePerUnit: 0.12 },
+          { sector: "Commercial", rateName: "AlsoAbsurd", fixedMonthly: 20, energyRatePerUnit: 9.99 },
+        ],
+        evidence: "hallucinated",
+      });
+      expect(res.action).toBe("failure_recorded");
+      const db = await getDb();
+      if (!db) return;
+      const rows = await db.select().from(tariffs).where(eq(tariffs.utilityName, util));
+      expect(rows.length).toBe(0);
+      const { rateAcquisitionQueue } = await import("../drizzle/schema");
+      const q = (await db.select().from(rateAcquisitionQueue).where(eq(rateAcquisitionQueue.id, queueId)))[0];
+      expect(q.status).toBe("failed");
+      expect(q.lastError).toContain("rejected");
+    } finally {
+      await cleanupAcq(util, queueId);
+    }
+  });
+
+  it("failed finding → records failure without touching tariffs", async () => {
+    const util = `${TEST_PREFIX}acq-fail`;
+    const queueId = await mkQueueEntry(util);
+    if (queueId == null) return;
+    try {
+      const res = await applyAcquisition({ queueId, status: "failed", evidence: "no official source found" });
+      expect(res.action).toBe("failure_recorded");
+      const db = await getDb();
+      if (!db) return;
+      const rows = await db.select().from(tariffs).where(eq(tariffs.utilityName, util));
+      expect(rows.length).toBe(0);
+    } finally {
+      await cleanupAcq(util, queueId);
+    }
+  });
+
+  it("unknown queueId → failure_recorded, no crash", async () => {
+    const res = await applyAcquisition({ queueId: 99_999_999, status: "acquired", rates: [], evidence: "x" });
+    expect(res.action).toBe("failure_recorded");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* NAT-7 — docket-watch sources: advance notice, govern nothing.       */
+/* ------------------------------------------------------------------ */
+describe("docket-watch sources", () => {
+  it("every docket seed governs zero rows and every tariff seed governs at least one", () => {
+    for (const s of RATE_SOURCE_SEEDS) {
+      if (s.sourceKind === "docket") {
+        expect(s.governsUrdbIds.length, `${s.sourceKey} is a docket but governs rows`).toBe(0);
+      } else {
+        expect(s.governsUrdbIds.length, `${s.sourceKey} is a tariff source but governs nothing`).toBeGreaterThan(0);
+      }
+    }
+    // the three pending-case watches from this session exist
+    const dockets = RATE_SOURCE_SEEDS.filter((s) => s.sourceKind === "docket").map((s) => s.sourceKey);
+    expect(dockets).toEqual(
+      expect.arrayContaining(["docket-aps-rate-case", "docket-tep-rates-pricing", "docket-lge-ky-psc"]),
+    );
+  });
+
+  it("sweep handles a changed docket source (empty governs) without touching tariffs", async () => {
+    const db = await getDb();
+    if (!db) return;
+    const key = `${TEST_PREFIX}docket`;
+    await db.insert(rateSources).values({
+      sourceKey: key,
+      utilityName: `Docket ${key}`,
+      commodity: "electric",
+      state: "ZZ",
+      sourceUrl: "https://docket-test.invalid/case",
+      sourceLabel: "Docket sweep test",
+      governsUrdbIds: [],
+      adjustorCycle: "none",
+      verifyCadenceDays: 45,
+      sourceKind: "docket",
+      contentFingerprint: "old-docket-fingerprint",
+      fingerprintAt: Date.now() - 7 * 86_400_000,
+      lastVerifiedAt: Date.now(),
+    });
+    const mockFetch: typeof fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("docket-test.invalid")) {
+        return new Response("<html><body>New rate case order filed</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      return new Response("err", { status: 503 });
+    }) as unknown as typeof fetch;
+    const result = await sweepRateSources(Date.now(), mockFetch);
+    expect(result.changed).toContain(key);
+    // audit row exists, and no tariff row anywhere was flipped by this docket
+    const audits = await db.select().from(rateVerifications).where(eq(rateVerifications.sourceKey, key));
+    expect(audits.some((a) => a.status === "change_detected")).toBe(true);
   });
 });

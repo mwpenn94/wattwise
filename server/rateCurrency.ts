@@ -50,6 +50,11 @@ export interface RateSourceSeed {
   governsUrdbIds: string[];
   adjustorCycle: "none" | "quarterly_gsc" | "quarterly_pga" | "monthly_pga" | "annual";
   verifyCadenceDays: number;
+  /** NAT-7: 'tariff' sources govern seeded rate rows; 'docket' sources track
+   * pending rate cases at the commission — a fingerprint change means the
+   * regulatory docket moved (new filing/order), giving ADVANCE notice of
+   * rate changes before they take effect. Dockets govern no tariff rows. */
+  sourceKind?: "tariff" | "docket";
 }
 
 /** Registry of official sources for every hand-modeled (filed) tariff row.
@@ -160,6 +165,43 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     adjustorCycle: "monthly_pga",
     verifyCadenceDays: 90,
   },
+  /* ---- NAT-7 pending-rate-case dockets (advance notice, govern nothing) ---- */
+  {
+    sourceKey: "docket-aps-rate-case",
+    utilityName: "Arizona Public Service Co (APS)",
+    commodity: "electric",
+    state: "AZ",
+    sourceUrl: "https://www.aps.com/en/Utility/Regulatory-and-Legal/Rate-case",
+    sourceLabel: "APS pending rate case (ACC Docket E-01345A-25-0105 watch)",
+    governsUrdbIds: [],
+    adjustorCycle: "none",
+    verifyCadenceDays: 45,
+    sourceKind: "docket",
+  },
+  {
+    sourceKey: "docket-tep-rates-pricing",
+    utilityName: "Tucson Electric Power (TEP)",
+    commodity: "electric",
+    state: "AZ",
+    sourceUrl: "https://www.tep.com/2026-rates/",
+    sourceLabel: "TEP pending rate review (ACC Docket 25-0103 watch)",
+    governsUrdbIds: [],
+    adjustorCycle: "none",
+    verifyCadenceDays: 45,
+    sourceKind: "docket",
+  },
+  {
+    sourceKey: "docket-lge-ky-psc",
+    utilityName: "Louisville Gas and Electric (LG&E)",
+    commodity: "electric",
+    state: "KY",
+    sourceUrl: "https://lge-ku.com/raterequest",
+    sourceLabel: "LG&E/KU rate request page (pending KY PSC change watch, electric + gas)",
+    governsUrdbIds: [],
+    adjustorCycle: "none",
+    verifyCadenceDays: 45,
+    sourceKind: "docket",
+  },
 ];
 
 /** Idempotent boot/refresh registration: missing sources are added; existing
@@ -183,6 +225,7 @@ export async function registerRateSources(): Promise<{ inserted: number; updated
         governsUrdbIds: s.governsUrdbIds,
         adjustorCycle: s.adjustorCycle,
         verifyCadenceDays: s.verifyCadenceDays,
+        sourceKind: s.sourceKind ?? "tariff",
       });
       inserted++;
     } else {
@@ -195,16 +238,20 @@ export async function registerRateSources(): Promise<{ inserted: number; updated
           governsUrdbIds: s.governsUrdbIds,
           adjustorCycle: s.adjustorCycle,
           verifyCadenceDays: s.verifyCadenceDays,
+          sourceKind: s.sourceKind ?? "tariff",
         })
         .where(eq(rateSources.sourceKey, s.sourceKey));
       updated++;
     }
     // Stamp sourceUrl onto the governed tariff rows so UI disclosures can
     // link "verified against <source>" without a join at render time.
-    await db
-      .update(tariffs)
-      .set({ sourceUrl: s.sourceUrl })
-      .where(inArray(tariffs.urdbId, s.governsUrdbIds));
+    // Docket sources govern nothing — skip the (empty inArray) stamp.
+    if (s.governsUrdbIds.length > 0) {
+      await db
+        .update(tariffs)
+        .set({ sourceUrl: s.sourceUrl })
+        .where(inArray(tariffs.urdbId, s.governsUrdbIds));
+    }
   }
   return { inserted, updated };
 }
@@ -300,10 +347,13 @@ export async function sweepRateSources(now = Date.now(), fetchImpl: typeof fetch
         .where(eq(rateSources.id, s.id));
       if (changed) {
         result.changed.push(s.sourceKey);
-        await db
-          .update(tariffs)
-          .set({ verifyStatus: "change_detected" })
-          .where(inArray(tariffs.urdbId, s.governsUrdbIds as string[]));
+        const govern = s.governsUrdbIds as string[];
+        if (govern.length > 0) {
+          await db
+            .update(tariffs)
+            .set({ verifyStatus: "change_detected" })
+            .where(inArray(tariffs.urdbId, govern));
+        }
         await db.insert(rateVerifications).values({
           sourceKey: s.sourceKey,
           checkedAt: now,
@@ -324,10 +374,13 @@ export async function sweepRateSources(now = Date.now(), fetchImpl: typeof fetch
     const anchor = s.lastVerifiedAt ?? s.createdAt.getTime();
     if (s.changeDetectedAt == null && now - anchor > cadence * DAY_MS) {
       result.due.push(s.sourceKey);
-      await db
-        .update(tariffs)
-        .set({ verifyStatus: "due" })
-        .where(and(inArray(tariffs.urdbId, s.governsUrdbIds as string[]), eq(tariffs.verifyStatus, "current")));
+      const gv = s.governsUrdbIds as string[];
+      if (gv.length > 0) {
+        await db
+          .update(tariffs)
+          .set({ verifyStatus: "due" })
+          .where(and(inArray(tariffs.urdbId, gv), eq(tariffs.verifyStatus, "current")));
+      }
     }
   }
   return result;
@@ -426,7 +479,7 @@ export interface AgentFinding {
 
 export interface ApplyResult {
   sourceKey: string;
-  action: "verified" | "auto_applied" | "flagged_for_review" | "source_updated" | "failure_recorded";
+  action: "verified" | "auto_applied" | "flagged_for_review" | "source_updated" | "failure_recorded" | "acquired";
   detail: string;
 }
 
@@ -599,6 +652,116 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* NAT-5 acquire-mode — the agent fills catalog gaps end to end.       */
+/* ------------------------------------------------------------------ */
+
+export interface AcquisitionFinding {
+  queueId: number;
+  status: "acquired" | "failed";
+  rates?: Array<{
+    sector: "Residential" | "Commercial";
+    rateName: string;
+    fixedMonthly: number;
+    energyRatePerUnit: number;
+    unit?: string;
+    effectiveDate?: string;
+    notes?: string;
+  }>;
+  sourceUrl?: string;
+  evidence: string;
+}
+
+/** Apply one acquisition finding: insert agent_acquired tariff rows for a
+ * utility the catalog lacked, mark the queue entry, and record the audit
+ * trail. Sanity bounds keep a hallucinated rate out of the catalog: energy
+ * rate must be $0.01–$1.50/unit and fixed charge ≤ $500/mo. */
+export async function applyAcquisition(a: AcquisitionFinding, now = Date.now()): Promise<ApplyResult> {
+  const db = await getDb();
+  if (!db) throw new Error("db unavailable");
+  const { rateAcquisitionQueue } = await import("../drizzle/schema");
+  const q = (await db.select().from(rateAcquisitionQueue).where(eq(rateAcquisitionQueue.id, a.queueId)).limit(1))[0];
+  const key = `acq-${a.queueId}`;
+  if (!q) return { sourceKey: key, action: "failure_recorded", detail: "unknown queueId" };
+
+  if (a.status === "failed" || !a.rates || a.rates.length === 0) {
+    await db
+      .update(rateAcquisitionQueue)
+      .set({ status: "failed", lastError: a.evidence.slice(0, 512) })
+      .where(eq(rateAcquisitionQueue.id, a.queueId));
+    await db.insert(rateVerifications).values({
+      sourceKey: key,
+      checkedAt: now,
+      status: "unreachable",
+      evidence: a.evidence.slice(0, 1024),
+      method: "agent_acquire",
+    });
+    return { sourceKey: key, action: "failure_recorded", detail: `acquisition failed for ${q.utilityName} (${q.state} ${q.commodity})` };
+  }
+
+  const unitDefault = q.commodity === "electric" ? "kWh" : q.commodity === "gas" ? "therm" : "kgal";
+  let inserted = 0;
+  const rejected: string[] = [];
+  for (const r of a.rates.slice(0, 6)) {
+    if (r.energyRatePerUnit < 0.01 || r.energyRatePerUnit > 1.5 || r.fixedMonthly > 500) {
+      rejected.push(`${r.rateName} (out of sanity bounds)`);
+      continue;
+    }
+    const sectorLc = r.sector.toLowerCase() as "residential" | "commercial";
+    const urdbId = `acq-${a.queueId}-${sectorLc}-${inserted}`;
+    const unit = r.unit ?? unitDefault;
+    await db.insert(tariffs).values({
+      urdbId,
+      utilityName: q.utilityName,
+      name: `${r.rateName} — agent-acquired from official source, ${r.effectiveDate ?? "effective date unverified"}`,
+      sector: sectorLc,
+      state: q.state,
+      commodity: q.commodity,
+      source: "agent_acquired",
+      sourceUrl: a.sourceUrl ?? null,
+      verifyStatus: "current",
+      lastVerifiedAt: now,
+      structure: {
+        fixedMonthly: r.fixedMonthly,
+        energy: [
+          {
+            label: `${r.rateName}${r.notes ? ` — ${r.notes.slice(0, 160)}` : ""} (agent-acquired; verify against your bill)`,
+            ratePerUnit: r.energyRatePerUnit,
+            unit,
+          },
+        ],
+      },
+    });
+    inserted++;
+  }
+
+  await db
+    .update(rateAcquisitionQueue)
+    .set(
+      inserted > 0
+        ? { status: "acquired", lastError: null }
+        : { status: "failed", lastError: `all ${a.rates.length} rate(s) rejected: ${rejected.join("; ")}`.slice(0, 512) },
+    )
+    .where(eq(rateAcquisitionQueue.id, a.queueId));
+  await db.insert(rateVerifications).values({
+    sourceKey: key,
+    checkedAt: now,
+    status: inserted > 0 ? "changed" : "unreachable",
+    observed: a.rates as unknown as Record<string, unknown>[],
+    applied: inserted > 0,
+    evidence: a.evidence.slice(0, 1024),
+    method: "agent_acquire",
+  });
+  return {
+    sourceKey: key,
+    action: inserted > 0 ? "acquired" : "failure_recorded",
+    detail:
+      inserted > 0
+        ? `${inserted} filed rate(s) acquired for ${q.utilityName} (${q.state} ${q.commodity})${rejected.length > 0 ? `; ${rejected.length} rejected by sanity bounds` : ""}`
+        : `all rates rejected by sanity bounds for ${q.utilityName}`,
+  };
+}
+
 /** Recent verification history for the UI panel. */
 export async function recentVerifications(limit = 50) {
   const db = await getDb();
@@ -628,6 +791,7 @@ export async function rateCurrencyStatus(now = Date.now()) {
       status: s.changeDetectedAt != null ? ("change_detected" as const) : ageDays > cadence ? ("due" as const) : ("current" as const),
       consecutiveFailures: s.consecutiveFailures,
       governs: (s.governsUrdbIds as string[]).length,
+      sourceKind: s.sourceKind,
     };
   });
 }
