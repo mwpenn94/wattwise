@@ -312,7 +312,9 @@ describe("weekly sweep", () => {
     // audit row written by the sweep
     const audits = await db.select().from(rateVerifications).where(eq(rateVerifications.sourceKey, key));
     expect(audits.some((a) => a.method === "weekly_fingerprint" && a.status === "change_detected")).toBe(true);
-  });
+    // 30s: the sweep now also runs docket auto-registration + the gas-LDC
+    // acquisition floor (DKT-2/GWD-2), which adds real DB round-trips.
+  }, 30000);
 });
 
 /* ------------------------------------------------------------------ */
@@ -481,5 +483,6 @@ describe("docket-watch sources", () => {
     // audit row exists, and no tariff row anywhere was flipped by this docket
     const audits = await db.select().from(rateVerifications).where(eq(rateVerifications.sourceKey, key));
     expect(audits.some((a) => a.status === "change_detected")).toBe(true);
-  });
+    // 30s: sweep also runs docket auto-registration + gas-LDC floor now.
+  }, 30000);
 });

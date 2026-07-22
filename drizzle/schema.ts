@@ -1271,6 +1271,9 @@ export const rateVerifications = mysqlTable(
     /** observed values from the source document (JSON) when status=changed */
     observed: json("observed"),
     applied: boolean("applied").default(false).notNull(),
+    /** IMP-1: per-site projected $/yr impact summary computed when the change
+     * was recorded ({affectedSites, totalUsdYrDelta, perSite[], disclosure}) */
+    impact: json("impact"),
     /** short human evidence: what the checker saw, quote or figure */
     evidence: varchar("evidence", { length: 1024 }),
     /** weekly_fingerprint | agent_verify | manual */

@@ -68,7 +68,7 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     state: "AZ",
     sourceUrl: "https://www.aps.com/en/Utility/Regulatory-and-Legal/Rates-Schedules-and-Adjustors",
     sourceLabel: "APS Rate Schedules (ACC filed)",
-    governsUrdbIds: ["aps-r-tou-4pm7pm", "aps-r-tou-demand", "aps-r-basic", "aps-gs-xs", "aps-gs-s"],
+    governsUrdbIds: ["aps-r-tou-4pm7pm", "aps-r-tou-demand", "aps-e32-m", "aps-e32-l", "aps-e34"],
     adjustorCycle: "annual",
     verifyCadenceDays: 120,
   },
@@ -81,7 +81,7 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     // Water: the monthly AGENT verifier with a real browser covers this source.
     sourceUrl: "https://www.srpnet.com/price-plans/residential-electric",
     sourceLabel: "SRP Standard Price Plans",
-    governsUrdbIds: ["srp-ez3-tou", "srp-basic", "srp-e27-demand", "srp-gs-e36"],
+    governsUrdbIds: ["srp-e23", "srp-e26-tou", "srp-e36-genl", "srp-e65-cpp"],
     adjustorCycle: "annual",
     verifyCadenceDays: 120,
   },
@@ -92,7 +92,7 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     state: "AZ",
     sourceUrl: "https://www.tep.com/rates/",
     sourceLabel: "TEP Pricing Plans (ACC filed)",
-    governsUrdbIds: ["tep-tou-basic", "tep-basic", "tep-gs-sgs"],
+    governsUrdbIds: ["tep-res-basic", "tep-lgs-14"],
     adjustorCycle: "annual",
     verifyCadenceDays: 120,
   },
@@ -103,7 +103,7 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     state: "AZ",
     sourceUrl: "https://www.uesaz.com/electric-rates/",
     sourceLabel: "UNS Electric Statement of Rates (ACC Decision)",
-    governsUrdbIds: ["unse-res-basic", "unse-res-tou", "unse-sgs"],
+    governsUrdbIds: ["uns-erres", "uns-errest", "uns-lgs"],
     adjustorCycle: "annual",
     verifyCadenceDays: 120,
   },
@@ -114,21 +114,22 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     state: "AZ",
     sourceUrl: "https://www.swgas.com/en/rates-and-regulation",
     sourceLabel: "Southwest Gas AZ rate schedules (G-5/G-25)",
-    governsUrdbIds: ["swgas-az-res", "swgas-az-comm"],
+    // Governs only the modeled G-5 residential row. AZ commercial gas is a
+    // state-representative imputed row (rep-az-gas-comm) governed by the EIA
+    // drift detector, not this document watch.
+    governsUrdbIds: ["swgas-az-res"],
     adjustorCycle: "monthly_pga",
     verifyCadenceDays: 90,
   },
   {
-    sourceKey: "tucsonwater-az-water",
-    utilityName: "Tucson Water",
+    sourceKey: "phxwater-az-water",
+    utilityName: "City of Phoenix Water Services",
     commodity: "water",
     state: "AZ",
-    // tucsonaz.gov blocks datacenter IPs (403) — the weekly fingerprint sweep
-    // will report unreachable; the monthly AGENT verifier (real browser) is the
-    // effective check for this source. Kept as the canonical official URL.
-    sourceUrl: "https://www.tucsonaz.gov/Departments/Water/Rates",
-    sourceLabel: "Tucson Water rate ordinance",
-    governsUrdbIds: ["tucsonwater-res"],
+    // Official water/sewer rates page (verified reachable Jul 2026).
+    sourceUrl: "https://www.phoenix.gov/administration/departments/waterservices/city-services-bill/water-sewer-rates.html",
+    sourceLabel: "City of Phoenix water rates (ordinance)",
+    governsUrdbIds: ["phxwater-az-comm"],
     adjustorCycle: "annual",
     verifyCadenceDays: 180,
   },
@@ -328,6 +329,25 @@ export async function sweepRateSources(now = Date.now(), fetchImpl: typeof fetch
   const db = await getDb();
   if (!db) throw new Error("db unavailable");
   await registerRateSources();
+  // DKT-2: territory-driven docket auto-registration — every state with sites
+  // gets a commission docket watch, so a site added in a new state is covered
+  // by the next weekly sweep with zero prompting. Best-effort: a docket
+  // registration failure must never block the tariff fingerprint sweep.
+  try {
+    const { ensureDocketCoverage } = await import("./stateDockets");
+    await ensureDocketCoverage();
+  } catch {
+    /* docket coverage is additive; sweep continues regardless */
+  }
+  // GWD-2: major gas LDC acquisition floor — idempotent (dedupes by
+  // utility+state+commodity), so weekly re-calls only bump demand counts on
+  // still-pending entries. Best-effort like docket coverage.
+  try {
+    const { seedGasDepthQueue } = await import("./gasWaterDepth");
+    await seedGasDepthQueue();
+  } catch {
+    /* gas depth floor is additive; sweep continues regardless */
+  }
   const sources = await db.select().from(rateSources);
   const result: SweepResult = { checked: 0, changed: [], due: [], unreachable: [] };
   for (const s of sources) {
@@ -557,6 +577,8 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
   const rows = await db.select().from(tariffs).where(inArray(tariffs.urdbId, govern));
   const byUrdb = new Map(rows.map((r) => [r.urdbId ?? "", r]));
   const pendingUpdates: Array<{ id: number; structure: unknown; urdbId: string; deltaDesc: string }> = [];
+  /** IMP-1: signed deltas captured for per-site impact projection */
+  const signedDeltas: Array<{ urdbId: string; volumetricDeltas: number[]; fixedMonthlyDelta: number }> = [];
   for (const o of observed) {
     const row = byUrdb.get(o.urdbId);
     if (!row) continue;
@@ -565,11 +587,14 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
       energy?: Array<{ label?: string; ratePerUnit?: number }>;
     };
     const deltas: string[] = [];
+    const volDeltas: number[] = [];
+    let fixedDelta = 0;
     if (o.fixedMonthly != null && st.fixedMonthly != null && st.fixedMonthly > 0) {
       const d = Math.abs(o.fixedMonthly - st.fixedMonthly) / st.fixedMonthly;
       if (d > 0) {
         maxDeltaPct = Math.max(maxDeltaPct, d * 100);
         deltas.push(`fixed ${st.fixedMonthly} → ${o.fixedMonthly}`);
+        fixedDelta = o.fixedMonthly - st.fixedMonthly;
         st.fixedMonthly = o.fixedMonthly;
       }
     }
@@ -582,12 +607,16 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
           if (d > 0) {
             maxDeltaPct = Math.max(maxDeltaPct, d * 100);
             deltas.push(`${match.label}: ${match.ratePerUnit} → ${or.ratePerUnit}`);
+            volDeltas.push(or.ratePerUnit - match.ratePerUnit);
             match.ratePerUnit = or.ratePerUnit;
           }
         }
       }
     }
-    if (deltas.length > 0) pendingUpdates.push({ id: row.id, structure: st, urdbId: o.urdbId, deltaDesc: deltas.join("; ") });
+    if (deltas.length > 0) {
+      pendingUpdates.push({ id: row.id, structure: st, urdbId: o.urdbId, deltaDesc: deltas.join("; ") });
+      signedDeltas.push({ urdbId: o.urdbId, volumetricDeltas: volDeltas, fixedMonthlyDelta: fixedDelta });
+    }
   }
 
   const withinBand = maxDeltaPct > 0 && maxDeltaPct <= capPct;
@@ -617,10 +646,23 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
       .update(rateSources)
       .set({ lastVerifiedAt: now, changeDetectedAt: null, consecutiveFailures: 0 })
       .where(eq(rateSources.id, src.id));
+    // IMP-1: project per-site $/yr impact and attach to the audit rows.
+    // Failure here must never fail the apply itself.
+    let impactNote = "";
+    try {
+      const { computeRateChangeImpact, attachImpactToVerifications } = await import("./rateImpact");
+      const impact = await computeRateChangeImpact(signedDeltas);
+      if (impact && impact.perSite.length > 0) {
+        await attachImpactToVerifications(f.sourceKey, now, impact);
+        impactNote = ` — projected impact: ${impact.affectedSites} site(s), ${impact.totalUsdYrDelta >= 0 ? "+" : ""}$${impact.totalUsdYrDelta.toFixed(0)}/yr`;
+      }
+    } catch {
+      /* impact projection is best-effort */
+    }
     return {
       sourceKey: f.sourceKey,
       action: "auto_applied",
-      detail: `adjustor-band update applied (max delta ${maxDeltaPct.toFixed(1)}% ≤ ${capPct}% cap): ${pendingUpdates.map((u) => u.deltaDesc).join(" | ")}`,
+      detail: `adjustor-band update applied (max delta ${maxDeltaPct.toFixed(1)}% ≤ ${capPct}% cap): ${pendingUpdates.map((u) => u.deltaDesc).join(" | ")}${impactNote}`,
     };
   }
 
@@ -645,10 +687,23 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
       method: "agent_verify",
     });
   }
+  // IMP-1: even for flagged (not-applied) changes, project the WOULD-BE impact
+  // so the owner sees dollar stakes when deciding. Best-effort.
+  let flaggedImpactNote = "";
+  try {
+    const { computeRateChangeImpact, attachImpactToVerifications } = await import("./rateImpact");
+    const impact = await computeRateChangeImpact(signedDeltas);
+    if (impact && impact.perSite.length > 0) {
+      await attachImpactToVerifications(f.sourceKey, now, impact);
+      flaggedImpactNote = ` — projected impact if adopted: ${impact.affectedSites} site(s), ${impact.totalUsdYrDelta >= 0 ? "+" : ""}$${impact.totalUsdYrDelta.toFixed(0)}/yr`;
+    }
+  } catch {
+    /* impact projection is best-effort */
+  }
   return {
     sourceKey: f.sourceKey,
     action: "flagged_for_review",
-    detail: `rate change beyond ${capPct}% auto-apply cap (max delta ${maxDeltaPct.toFixed(1)}%) — observed values recorded, rows flagged change_detected`,
+    detail: `rate change beyond ${capPct}% auto-apply cap (max delta ${maxDeltaPct.toFixed(1)}%) — observed values recorded, rows flagged change_detected${flaggedImpactNote}`,
   };
 }
 

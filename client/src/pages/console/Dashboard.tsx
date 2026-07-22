@@ -1263,6 +1263,24 @@ function RateActivityCard() {
                   {e.commodity ? <span className="text-muted-foreground"> · {e.commodity}</span> : null}
                 </div>
                 {e.evidence ? <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{e.evidence}</div> : null}
+                {e.impact && e.impact.affectedSites > 0 ? (
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5" title={e.impact.disclosure}>
+                    <Badge
+                      variant="secondary"
+                      className={`text-[10px] ${e.impact.totalUsdYrDelta > 0 ? "bg-rose-500/15 text-rose-600 dark:text-rose-400" : e.impact.totalUsdYrDelta < 0 ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground"}`}
+                    >
+                      {e.impact.affectedSites} site{e.impact.affectedSites === 1 ? "" : "s"} · {e.impact.totalUsdYrDelta >= 0 ? "+" : "−"}${Math.abs(e.impact.totalUsdYrDelta).toLocaleString(undefined, { maximumFractionDigits: 0 })}/yr projected
+                    </Badge>
+                    {e.impact.perSite.slice(0, 3).map((s) => (
+                      <span key={`${s.siteId}-${s.siteName}`} className="text-[10px] text-muted-foreground">
+                        {s.siteName}{s.estUsdYrDelta != null ? ` ${s.estUsdYrDelta >= 0 ? "+" : "−"}$${Math.abs(s.estUsdYrDelta).toLocaleString(undefined, { maximumFractionDigits: 0 })}/yr` : " (no usage basis)"}
+                      </span>
+                    ))}
+                    {e.impact.perSite.length > 3 ? (
+                      <span className="text-[10px] text-muted-foreground">+{e.impact.perSite.length - 3} more</span>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
               <span className="shrink-0 text-xs text-muted-foreground">{new Date(e.at).toLocaleDateString()}</span>
             </div>

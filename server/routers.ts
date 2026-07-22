@@ -2115,6 +2115,14 @@ export const appRouter = router({
           evidence: v.evidence,
           applied: v.applied,
           method: v.method,
+          /* IMP-2: per-site projected $/yr impact summary computed when the
+             change was recorded — null for older events / no affected sites */
+          impact: (v.impact ?? null) as null | {
+            affectedSites: number;
+            totalUsdYrDelta: number;
+            perSite: Array<{ siteId: number; siteName: string; estUsdYrDelta: number | null; usageBasis: string }>;
+            disclosure: string;
+          },
         };
       });
       return { events, totalMaterial: material.length };

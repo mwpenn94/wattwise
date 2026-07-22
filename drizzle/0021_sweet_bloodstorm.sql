@@ -1,0 +1,1 @@
+ALTER TABLE `rate_verifications` ADD `impact` json;

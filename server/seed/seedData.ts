@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.8"; // LG&E KY electric RS/GS/RTOD + LG&E KY gas RGS/CGS (KY PSC filed, eff. 2026) + UNS Gas GRRES/GGSVS (uesaz.com Statement of Rates, eff. 6/1/2026) + gas commodity territory map (KY LG&E, AZ UNS Gas)
+export const SEED_VERSION = "2026.07.9"; // SW Gas G-5 stable urdbId (swgas-az-res) so the rate-currency source binding actually governs the row
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -797,7 +797,9 @@ export const SEED_TARIFFS: SeedTariff[] = [
   },
   /* -------------------- Gas & water (commodity-generality proof) --------- */
   {
-    urdbId: null,
+    // stable id so the swgas-az-gas currency source's governsUrdbIds binds to
+    // this row (was null — change flags could never reach it)
+    urdbId: "swgas-az-res",
     utilityName: "Southwest Gas",
     name: "G-5 Residential Gas Service",
     sector: "residential",
@@ -816,7 +818,8 @@ export const SEED_TARIFFS: SeedTariff[] = [
     effectiveDate: "2024-01-01",
   },
   {
-    urdbId: null,
+    // stable id for currency-source binding (same fix as swgas-az-res)
+    urdbId: "phxwater-az-comm",
     utilityName: "City of Phoenix Water Services",
     name: "Municipal Water — Commercial",
     sector: "commercial",
