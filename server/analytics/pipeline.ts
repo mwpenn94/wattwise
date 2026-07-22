@@ -45,6 +45,7 @@ import { STATE_PROFILES } from "../seed/nationalData";
 import { resolveCommodityService } from "../commodityService";
 import { deriveBillVerifiedRate } from "../billCalibration";
 import { resolveTerritory, partitionByTerritory } from "../serviceTerritory";
+import { effectiveSchedules } from "../operatingHours";
 import type { Site, Meter } from "../../drizzle/schema";
 
 /** Opportunity candidate as it flows through ranking/persistence — electric
@@ -52,12 +53,8 @@ import type { Site, Meter } from "../../drizzle/schema";
  * savings) that gas/water cards carry for implementer-grade rebate math. */
 type OppCand = OpportunityCandidate & Partial<Pick<XcOpportunity, "estUnitsSavedPerYr" | "unit" | "commodity">>;
 
-/**
- * Unoccupied hours per year for a typical single-shift commercial facility:
- * ~12 h/weeknight × 261 weekdays + 24 h × 104 weekend days ≈ 4,900 h.
- * Used to scope after-hours baseload savings honestly (never 8760 h).
- */
-const AFTER_HOURS_PER_YEAR = 4900;
+// HRS-1: the flat 4,900 h single-shift AFTER_HOURS_PER_YEAR constant was
+// replaced by per-site schedule-derived unoccupied hours (server/operatingHours.ts).
 
 export interface PipelineResult {
   analysisId: number;
@@ -1257,6 +1254,18 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         // strip so summer-tier sites see WHY their summer dollars run hotter.
         monthlyCurve: billVerified?.monthlyCurve ?? null,
         seasonalSpreadPct: billVerified?.seasonalSpreadPct ?? null,
+        // UNIT-1 (Jul 22): attribution level — WHICH unit's assignment priced
+        // this site. meter = an explicitly assigned meter tariff; site = the
+        // territory/utility-resolved basis for the site; state/national =
+        // imputed. Multi-meter sites can carry different tariffs per meter;
+        // this names the one the dollars came from instead of implying one
+        // rate per site.
+        attribution: {
+          level: meter?.currentTariffId != null && !rateIsFallback ? "meter" : !rateIsFallback ? "site" : billVerified ? "site_bills" : stateAvgRate ? "state" : "national",
+          meterId: meter?.id ?? null,
+          meterLabel: meter?.label ?? null,
+          meterTariffAssigned: meter?.currentTariffId != null,
+        },
       },
       // Batch-45 (pass 1928): structure-level flag so the dashboard can say
       // "your rate has no demand charges" ONLY when the structure truly has
@@ -1439,23 +1448,31 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     // overnight baseload from interval data (regression_split evidence)
     const baseloadKw = overnightBaseload(points, tz);
     if (baseloadKw != null && demand.avgKw > 0 && baseloadKw / demand.avgKw > 0.55) {
-      oppCands.push({
-        key: "baseload_reduction",
-        title: "After-hours baseload reduction (equipment shutdown audit)",
-        category: "operations",
-        // Savings apply only during unoccupied hours (~12 h/night × 365 + weekend
-        // adjustment ≈ 4,900 h/yr for a typical single-shift facility), NOT 8760 h —
-        // an overnight-measured baseload cannot be "saved" during occupied hours.
-        // Batch-15 (pass 149): the low estimate maps directly to the 10% reduction
-        // named in the rationale — the earlier extra ×0.5 made the displayed range
-        // inconsistent with the stated 10–25% reduction band.
-        annualSavingsUsdLo: baseloadKw * 0.1 * AFTER_HOURS_PER_YEAR * kWhRate,
-        annualSavingsUsdHi: baseloadKw * 0.25 * AFTER_HOURS_PER_YEAR * kWhRate,
-        capexBand: "none",
-        confidence: "medium",
-        rationale: `Overnight baseload averages ${baseloadKw.toFixed(1)} kW — ${((baseloadKw / demand.avgKw) * 100).toFixed(0)}% of your average load runs 24/7. Measured directly from your interval data. Savings estimated over ~${AFTER_HOURS_PER_YEAR.toLocaleString()} unoccupied hours/year.`,
-        disclosures: rateIsFallback ? [MODELED_ESTIMATES_DISCLAIMER, fallbackRateDisclosure] : [MODELED_ESTIMATES_DISCLAIMER],
-      });
+      // HRS-1: unoccupied hours come from the site's operating schedules (user
+      // rows or archetype default) instead of the flat 4,900 h single-shift
+      // constant — an overnight-measured baseload cannot be "saved" during
+      // occupied hours, and a 24/7 site has (honestly) near-zero such hours.
+      const hrs = await effectiveSchedules(site.id, site.buildingType ?? null);
+      const unoccHours = Math.max(hrs.unoccupiedHoursPerYear, 0);
+      const hoursNote = hrs.userConfirmed
+        ? `your schedule (${hrs.disclosure})`
+        : `an assumed schedule (${hrs.disclosure}) — adjust operating hours in Sites if this is wrong`;
+      if (unoccHours >= 200) {
+        oppCands.push({
+          key: "baseload_reduction",
+          title: "After-hours baseload reduction (equipment shutdown audit)",
+          category: "operations",
+          // Batch-15 (pass 149): the low estimate maps directly to the 10% reduction
+          // named in the rationale — the earlier extra ×0.5 made the displayed range
+          // inconsistent with the stated 10–25% reduction band.
+          annualSavingsUsdLo: baseloadKw * 0.1 * unoccHours * kWhRate,
+          annualSavingsUsdHi: baseloadKw * 0.25 * unoccHours * kWhRate,
+          capexBand: "none",
+          confidence: hrs.userConfirmed ? "medium" : "low",
+          rationale: `Overnight baseload averages ${baseloadKw.toFixed(1)} kW — ${((baseloadKw / demand.avgKw) * 100).toFixed(0)}% of your average load runs 24/7. Measured directly from your interval data. Savings estimated over ~${unoccHours.toLocaleString()} unoccupied hours/year based on ${hoursNote}.`,
+          disclosures: rateIsFallback ? [MODELED_ESTIMATES_DISCLAIMER, fallbackRateDisclosure] : [MODELED_ESTIMATES_DISCLAIMER],
+        });
+      }
     }
   }
   // Batch-38 (pass 1559): savingsVsCurrent is null when no cost basis exists —

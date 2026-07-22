@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.7"; // UES residential ERRES/ERREST added (verified vs uesaz.com Jul 2026) + AZ service-territory map
+export const SEED_VERSION = "2026.07.8"; // LG&E KY electric RS/GS/RTOD + LG&E KY gas RGS/CGS (KY PSC filed, eff. 2026) + UNS Gas GRRES/GGSVS (uesaz.com Statement of Rates, eff. 6/1/2026) + gas commodity territory map (KY LG&E, AZ UNS Gas)
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -635,6 +635,165 @@ export const SEED_TARIFFS: SeedTariff[] = [
     },
     freshness: "urdb_stale",
     effectiveDate: "2024-06-01",
+  },
+  /* -------------------- LG&E (Louisville Gas and Electric, KY) ----------- */
+  // Verified against LG&E's filed electric tariff (P.S.C. Electric No. 13),
+  // rates effective with service on/after Feb 16 2026, published Jul 2026:
+  // https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Electric-Rates-072126.pdf
+  // Basic Service Charges are filed PER DAY; the engine's fixedMonthly uses
+  // the average-month equivalent (×30.437 days) — disclosed in labels.
+  {
+    urdbId: "lge-rs",
+    utilityName: "Louisville Gas and Electric (LG&E)",
+    name: "Residential Service (RS) — $0.47/day BSC billed monthly-equivalent",
+    sector: "residential",
+    commodity: "electric",
+    state: "KY",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 14.31, // $0.47/day × 30.437 avg days
+      energy: [
+        // Filed total $0.11362/kWh = infrastructure $0.07476 + variable $0.03886.
+        { label: "All energy (infra $0.07476 + variable $0.03886)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.11362 },
+      ],
+      demand: [],
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2026-02-16",
+  },
+  {
+    urdbId: "lge-rtod-energy",
+    utilityName: "Louisville Gas and Electric (LG&E)",
+    name: "Residential Time-of-Day Energy (RTOD-Energy) — 500-customer pilot cap",
+    sector: "residential",
+    commodity: "electric",
+    state: "KY",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 14.31, // $0.47/day × 30.437 avg days
+      energy: [
+        // LG&E RTOD on-peak: 1pm–7pm weekdays (filed hours); off-peak all other hours.
+        { label: "On-peak 1-7pm wkdy", months: ALL_MONTHS, daysOfWeek: WEEKDAYS, hourStart: 13, hourEnd: 19, ratePerUnit: 0.19172 },
+        { label: "Off-peak", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.09177 },
+      ],
+      demand: [],
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2026-02-16",
+  },
+  {
+    urdbId: "lge-gs",
+    utilityName: "Louisville Gas and Electric (LG&E)",
+    name: "General Service (GS) single-phase — $1.29/day BSC billed monthly-equivalent",
+    sector: "commercial",
+    commodity: "electric",
+    state: "KY",
+    peakKwMin: null,
+    peakKwMax: 50,
+    structure: {
+      fixedMonthly: 39.26, // $1.29/day single-phase × 30.437 avg days ($2.05/day three-phase not modeled)
+      energy: [
+        // Filed total $0.13248/kWh = infrastructure $0.09353 + variable $0.03895.
+        { label: "All energy (infra $0.09353 + variable $0.03895)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.13248 },
+      ],
+      demand: [],
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2026-02-16",
+  },
+  // Verified against LG&E's filed gas tariff (P.S.C. Gas No. 14), rates
+  // effective with service on/after May 1 2026 (Case No. 2026-00064):
+  // https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Gas-Rates-062226.pdf
+  // Filed unit is $ per 100 cubic feet (Ccf); the engine prices gas meters in
+  // THERMS, so rates are converted at 1 Ccf ≈ 1.037 therms — disclosed in labels.
+  {
+    urdbId: "lge-rgs",
+    utilityName: "Louisville Gas and Electric (LG&E)",
+    name: "Residential Gas Service (RGS) — filed $1.20620/Ccf priced per therm",
+    sector: "residential",
+    commodity: "gas",
+    state: "KY",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 21.91, // $0.72/day per delivery point × 30.437 avg days
+      energy: [
+        // $1.20620/Ccf (distribution $0.63684 + gas supply $0.56936) ÷ 1.037 therms/Ccf.
+        { label: "All gas ($1.20620/Ccf ÷ 1.037 therms/Ccf; incl. gas supply cost component)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 1.1632 },
+      ],
+      demand: [],
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2026-05-01",
+  },
+  {
+    urdbId: "lge-cgs",
+    utilityName: "Louisville Gas and Electric (LG&E)",
+    name: "Firm Commercial Gas Service (CGS) <5,000 cf/hr — filed $1.00700/Ccf priced per therm",
+    sector: "commercial",
+    commodity: "gas",
+    state: "KY",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 88.27, // $2.90/day per delivery point (<5,000 cf/hr meters) × 30.437 avg days
+      energy: [
+        // $1.00700/Ccf (distribution $0.43764 + gas supply $0.56936) ÷ 1.037 therms/Ccf.
+        { label: "All gas ($1.00700/Ccf ÷ 1.037 therms/Ccf; incl. gas supply cost component)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.9711 },
+      ],
+      demand: [],
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2026-05-01",
+  },
+  /* -------------------- UNS Gas (UniSource, AZ) --------------------------- */
+  // Verified against the UNS Gas Statement of Rates (Tariff Sheet 1.1,
+  // Decision No. 81653), effective 6/1/2026:
+  // https://docs.uesaz.com/wp-content/uploads/UNSG-Tariff-Sheet-1.1.pdf
+  // Effective tariff rates INCLUDE the PGA gas adjustor and LFCR as filed
+  // (taxes/assessments excluded). Serves Mohave, Yavapai, Coconino, Navajo and
+  // Santa Cruz counties — NOT Southwest Gas territory (e.g. Kingman).
+  {
+    urdbId: "unsg-grres",
+    utilityName: "UniSource Energy Services (UNS Gas)",
+    name: "Residential Gas Service (GRRES) — effective rate incl. PGA + LFCR",
+    sector: "residential",
+    commodity: "gas",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 11.96,
+      energy: [
+        // $0.8304/therm = base $0.3801 + PGA $0.4487 + LFCR $0.0016.
+        { label: "All gas (base $0.3801 + PGA $0.4487 + LFCR $0.0016)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.8304 },
+      ],
+      demand: [],
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2026-06-01",
+  },
+  {
+    urdbId: "unsg-ggsvs",
+    utilityName: "UniSource Energy Services (UNS Gas)",
+    name: "Small Volume Commercial Gas (GGSVS) — effective rate incl. PGA + LFCR",
+    sector: "commercial",
+    commodity: "gas",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 28.37,
+      energy: [
+        // $0.7635/therm = base $0.3134 + PGA $0.4487 + LFCR $0.0014.
+        { label: "All gas (base $0.3134 + PGA $0.4487 + LFCR $0.0014)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.7635 },
+      ],
+      demand: [],
+    },
+    freshness: "urdb_stale",
+    effectiveDate: "2026-06-01",
   },
   /* -------------------- Gas & water (commodity-generality proof) --------- */
   {

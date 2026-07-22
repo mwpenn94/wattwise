@@ -507,3 +507,22 @@
 - [x] TERR-4: Tests for territory filtering + overlap handling
 - [x] TELX-1: Telecom findings folded into Explore opportunity feed
 - [x] TELX-2: Promo-expiry reminders in weekly cron (notify ~30 days before promo lapses)
+
+## Rate coverage audit + extension (all commodities) — session Jul 22 round 3
+- [x] COV-1: Audit catalog coverage — every seeded tariff (electric/gas/water) + telecom benchmarks vs the user's actual site locations; identify gap utilities (gaps found: LG&E KY electric+gas filed rates, UNS Gas AZ filed rates, no KY territory entries, no gas-commodity territory granularity)
+- [x] COV-2: Verify/refresh rates for utilities serving actual sites — LG&E KY electric RS/RTOD/GS (P.S.C. Electric No. 13, eff. 2/16/2026) + LG&E gas RGS/CGS (P.S.C. Gas No. 14, eff. 5/1/2026, $/Ccf→$/therm disclosed) + UNS Gas GRRES/GGSVS (Statement of Rates Tariff Sheet 1.1, eff. 6/1/2026, PGA+LFCR included) — 7 filed rows, SEED_VERSION 2026.07.8
+- [x] COV-3: Extend territory catalog to gas commodity + KY geography (UNS Gas 5-county AZ entry — Kingman gas ≠ SW Gas; LG&E Louisville-metro electric + gas entries; SW Gas counties note; fail-open preserved for KU/Lexington)
+- [x] COV-4: Telecom benchmark regionalization — reviewed: current national medians carry honest market-comparison disclosures; regional (fiber-vs-cable availability) splits deferred until per-market source data is verified (no fabricated regional numbers)
+- [x] COV-5: Tests for new catalog rows + territory entries (4 new serviceTerritory specs: KY LG&E elec+gas city match, Lexington fail-open, Kingman UNS Gas partition, Phoenix SW Gas; 13 passing)
+
+## Footprint bugs (user-reported) — session Jul 22 round 4
+- [x] GEO-BUG-1: Footprint widget often fails to render/load — degraded (single-source) results were poisoning the 6h in-memory cache AND the 180-day persistent cache; degraded results now get a 5-min hold only and NEVER persist (geometry.ts GEO-BUG-1 guard)
+- [x] GEO-BUG-2: user_drawn footprints win precedence — dataset confirms cannot overwrite a user-drawn ring without an explicit force flag (routers.ts geometry.confirm guard)
+- [x] GEO-BUG-3: Poisoned persistent cache entries purged (geometry_resolve_cache cleared of pre-fix rows; repopulates full-success-only)
+- [x] GEO-BUG-4: Regression tests for precedence + persistence contract (geometryGuard.test.ts + geometryPersistentCache.test.ts: degraded-not-persisted, full-success-persists, user_drawn force guard; 6+4 specs passing)
+- [x] PDF-BUG-1: Print/export-to-PDF color preserved — print-color-adjust: exact + WebkitPrintColorAdjust on heatmap cells and print CSS; SiteInsightsReport color audit
+- [x] HRS-1: Operating-hours model — site_schedules table (kind, days, startHour/endHour, months, usageSharePct, source), migration 0018, multi-schedule support
+- [x] HRS-2: Assumed hours surfaced in UI with provenance label + edit affordance (OperatingHoursPanel.tsx)
+- [x] HRS-3: Schedules wired into analytics — effectiveSchedules() feeds unoccupied-hours detection and after-hours waste math in pipeline.ts with disclosures
+- [x] HRS-4: Tests for schedule model + analytics integration (operatingHours.test.ts)
+- [x] UNIT-1: Unit-level pricing/service attribution — meter-level tariff assignment honored in pipeline (attribution level: meter | site | site_bills | state | national, disclosed on Dashboard), owner/entity subtotals on Portfolio, multi-meter sites analyze the correct unit (explicit meterId)

@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Building2, FolderKanban, MoreVertical, Pencil, Plus, Trash2, Users, Zap } from "lucide-react";
+import { Building2, Clock, FolderKanban, MoreVertical, Pencil, Plus, Trash2, Users, Zap } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -30,6 +30,7 @@ import {
 import { useLocation } from "wouter";
 import { ProvChip } from "@/components/Honesty";
 import QuickStart from "@/components/QuickStart";
+import OperatingHoursPanel from "@/components/OperatingHoursPanel";
 
 const BUILDING_TYPES = [
   ["single_family", "Single-family home"],
@@ -468,6 +469,7 @@ function SiteActions({ site }: { site: { id: number; name: string; address?: str
   const [editOpen, setEditOpen] = useState(false);
   const [metersOpen, setMetersOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [hoursOpen, setHoursOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [form, setForm] = useState({
     name: site.name,
@@ -513,6 +515,9 @@ function SiteActions({ site }: { site: { id: number; name: string; address?: str
           <DropdownMenuItem onClick={() => setMetersOpen(true)}>
             <Zap className="mr-2 h-3.5 w-3.5" /> Manage meters
           </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setHoursOpen(true)}>
+            <Clock className="mr-2 h-3.5 w-3.5" /> Operating hours…
+          </DropdownMenuItem>
           <DropdownMenuItem onClick={() => setShareOpen(true)}>
             <Users className="mr-2 h-3.5 w-3.5" /> Share access…
           </DropdownMenuItem>
@@ -524,6 +529,7 @@ function SiteActions({ site }: { site: { id: number; name: string; address?: str
       </DropdownMenu>
 
       {shareOpen && <SharePanel siteId={site.id} open={shareOpen} onClose={() => setShareOpen(false)} />}
+      {hoursOpen && <OperatingHoursPanel siteId={site.id} open={hoursOpen} onClose={() => setHoursOpen(false)} />}
 
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent className="max-w-md">

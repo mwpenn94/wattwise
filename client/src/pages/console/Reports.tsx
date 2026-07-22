@@ -41,12 +41,14 @@ const KIND_META: Record<Kind, { title: string; tier: "plus" | "pro"; desc: strin
 };
 
 function Chip({ chip }: { chip: string }) {
+  // Darker -700 text prints legibly on white paper (screen chips live on the
+  // dark theme; the print view is white, where 500-tint text washes out).
   const cls =
     chip === "Measured"
-      ? "bg-emerald-500/15 text-emerald-500 border-emerald-500/30"
+      ? "bg-emerald-500/15 text-emerald-500 border-emerald-500/30 print:text-emerald-700 print:bg-emerald-50"
       : chip === "Good"
-        ? "bg-sky-500/15 text-sky-500 border-sky-500/30"
-        : "bg-amber-500/15 text-amber-500 border-amber-500/30";
+        ? "bg-sky-500/15 text-sky-500 border-sky-500/30 print:text-sky-700 print:bg-sky-50"
+        : "bg-amber-500/15 text-amber-500 border-amber-500/30 print:text-amber-700 print:bg-amber-50";
   return <Badge variant="outline" className={`ml-1 px-1.5 py-0 text-[10px] ${cls}`}>{chip}</Badge>;
 }
 
@@ -163,7 +165,7 @@ export default function Reports() {
 
       {/* print view */}
       {printKind && printPayload && (
-        <div className="hidden print:block text-black">
+        <div className="print-report hidden print:block text-black">
           <PrintReport kind={printKind} token={printPayload.token} data={printPayload.data} origin={verifyOrigin} />
         </div>
       )}

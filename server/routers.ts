@@ -100,7 +100,8 @@ async function maybeReconcileBill(billId: number, meterId: number, userId: numbe
   }
 }
 import { createHash } from "crypto";
-import { intervals as intervalsTable } from "../drizzle/schema";
+import { intervals as intervalsTable, siteSchedules } from "../drizzle/schema";
+import { effectiveSchedules } from "./operatingHours";
 import { and, asc, eq, gte, lte } from "drizzle-orm";
 
 /* ---------- tier helpers ---------- */
@@ -1025,9 +1026,25 @@ export const appRouter = router({
           osmId: z.string().optional(),
           heightM: z.number().positive().max(500).nullable().optional(),
           stories: z.number().int().positive().max(120).nullable().optional(),
+          /** GEO-BUG-2: replacing a hand-drawn footprint with a dataset candidate requires explicit intent. */
+          force: z.boolean().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
+        // GEO-BUG-2 (Jul 22): a user-drawn footprint is the strongest statement
+        // of truth we have — never let a dataset candidate silently clobber it.
+        // The client must send force:true (after an explicit "replace my drawn
+        // footprint?" confirmation) to overwrite user_drawn with anything else.
+        if (input.source !== "user_drawn" && !input.force) {
+          const existing = await h.getSiteGeometry(input.siteId, ctx.user.id);
+          if (existing?.footprintSource === "user_drawn") {
+            throw new TRPCError({
+              code: "PRECONDITION_FAILED",
+              message:
+                "This site has a footprint you drew yourself — keeping it. To replace your drawn footprint with this mapped candidate, confirm the replacement explicitly.",
+            });
+          }
+        }
         const cand: import("./geometry").FootprintCandidate = {
           ring: input.ring as [number, number][],
           areaSqft: Math.round(geo.ringAreaSqm(input.ring as [number, number][]) * 10.7639),
@@ -1472,6 +1489,37 @@ export const appRouter = router({
               savingsHiUsd: telecomAnalysis.totalAnnualSavingsHi,
             }
           : null;
+        // UNIT-1 (Jul 22): entity-level subtotals — the owner/organization layer
+        // of the attribution hierarchy (meter → site → entity). Sites without an
+        // entity roll up under "Unassigned" honestly; subtotals only appear when
+        // the user actually uses entities (progressive participation).
+        const entitySubtotals =
+          allEntities.length > 0
+            ? (() => {
+                const byEntity = new Map<number | null, { annualCostUsd: number; annualUsageKwh: number; siteCount: number; analyzedCount: number; openOpportunityUsd: number }>();
+                for (const r of siteRollups) {
+                  const key = r.entityId ?? null;
+                  const cur = byEntity.get(key) ?? { annualCostUsd: 0, annualUsageKwh: 0, siteCount: 0, analyzedCount: 0, openOpportunityUsd: 0 };
+                  cur.annualCostUsd += r.annualCostUsd ?? 0;
+                  cur.annualUsageKwh += r.annualUsageKwh ?? 0;
+                  cur.siteCount += 1;
+                  cur.analyzedCount += r.analyzed ? 1 : 0;
+                  cur.openOpportunityUsd += r.topOpportunityUsd ?? 0;
+                  byEntity.set(key, cur);
+                }
+                return Array.from(byEntity.entries())
+                  .map(([entityId, v]) => ({
+                    entityId,
+                    name: entityId == null ? "Unassigned" : allEntities.find((e) => e.id === entityId)?.name ?? `Entity ${entityId}`,
+                    siteCount: v.siteCount,
+                    analyzedCount: v.analyzedCount,
+                    annualCostUsd: Math.round(v.annualCostUsd),
+                    annualUsageKwh: Math.round(v.annualUsageKwh),
+                    openOpportunityUsd: Math.round(v.openOpportunityUsd),
+                  }))
+                  .sort((a, b) => b.annualCostUsd - a.annualCostUsd);
+              })()
+            : null;
         const utilityExposure = Array.from(exposureMap.entries())
           .map(([utility, v]) => ({
             utility,
@@ -1486,6 +1534,7 @@ export const appRouter = router({
           utilityExposure,
           rateConfidence,
           telecom,
+          entitySubtotals,
           totals: {
             siteCount: siteRollups.length,
             analyzedCount: siteRollups.filter((r) => r.analyzed).length,
@@ -1967,7 +2016,17 @@ export const appRouter = router({
       const site = await h.getSite(input.siteId, ctx.user.id);
       if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
       const meters = await h.listMeters(input.siteId, ctx.user.id);
-      const meter = input.meterId ? meters.find((m) => m.id === input.meterId) ?? null : meters[0] ?? null;
+      // UNIT-1: multi-meter sites must analyze the right unit. Explicit meterId
+      // wins; otherwise prefer the MAIN electric meter over whatever row happens
+      // to sort first — meters[0] could be a gas/water row or a submeter, which
+      // would silently price the site on the wrong commodity ladder.
+      const meter = input.meterId
+        ? meters.find((m) => m.id === input.meterId) ?? null
+        : meters.find((m) => m.commodity === "electric" && m.meterRole === "main") ??
+          meters.find((m) => m.commodity === "electric" && m.meterRole !== "submeter") ??
+          meters.find((m) => m.meterRole === "main") ??
+          meters[0] ??
+          null;
       const tier = tierOf(ctx.user);
       const result = await runAnalysisPipeline(site, meter, ctx.user.id, tier);
       // AC5: instrumented free-tier cost cap
@@ -2868,6 +2927,80 @@ export const appRouter = router({
       await seeded();
       return loadBenchmarks();
     }),
+  }),
+
+  /* ================= HRS-1: operating-hours schedules ================= */
+  schedules: router({
+    /** Effective summary for a site: user rows when present else the archetype
+     * default — with occupied/unoccupied hrs/yr and disclosure for the UI. */
+    effective: protectedProcedure
+      .input(z.object({ siteId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        return effectiveSchedules(site.id, site.buildingType ?? null);
+      }),
+    list: protectedProcedure
+      .input(z.object({ siteId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        const db = (await getDb())!;
+        return db.select().from(siteSchedules).where(eq(siteSchedules.siteId, site.id));
+      }),
+    upsert: protectedProcedure
+      .input(
+        z.object({
+          id: z.number().optional(),
+          siteId: z.number(),
+          name: z.string().min(1).max(128),
+          kind: z.enum(["business", "always_on", "production", "custom"]),
+          days: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+          startHour: z.number().int().min(0).max(23),
+          endHour: z.number().int().min(1).max(24),
+          months: z.array(z.number().int().min(1).max(12)).max(12).nullish(),
+          usageSharePct: z.number().min(0).max(100),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        const db = (await getDb())!;
+        const values = {
+          siteId: site.id,
+          name: input.name,
+          kind: input.kind,
+          days: Array.from(new Set(input.days)).sort((a, b) => a - b),
+          startHour: input.startHour,
+          endHour: input.endHour,
+          months: input.months && input.months.length > 0 && input.months.length < 12 ? Array.from(new Set(input.months)).sort((a, b) => a - b) : null,
+          usageSharePct: input.usageSharePct,
+          source: "user" as const,
+        };
+        if (input.id) {
+          const [existing] = await db.select().from(siteSchedules).where(eq(siteSchedules.id, input.id));
+          if (!existing || existing.siteId !== site.id) throw new TRPCError({ code: "NOT_FOUND", message: "Schedule not found" });
+          await db.update(siteSchedules).set(values).where(eq(siteSchedules.id, input.id));
+          await h.audit(ctx.user.id, "schedule_update", "site", String(site.id), { scheduleId: input.id, name: input.name });
+          return { id: input.id };
+        }
+        const res = await db.insert(siteSchedules).values(values);
+        const id = Number((res as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
+        await h.audit(ctx.user.id, "schedule_create", "site", String(site.id), { scheduleId: id, name: input.name });
+        return { id };
+      }),
+    remove: protectedProcedure
+      .input(z.object({ id: z.number(), siteId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        const db = (await getDb())!;
+        const [existing] = await db.select().from(siteSchedules).where(eq(siteSchedules.id, input.id));
+        if (!existing || existing.siteId !== site.id) throw new TRPCError({ code: "NOT_FOUND", message: "Schedule not found" });
+        await db.delete(siteSchedules).where(eq(siteSchedules.id, input.id));
+        await h.audit(ctx.user.id, "schedule_delete", "site", String(site.id), { scheduleId: input.id });
+        return { ok: true };
+      }),
   }),
 
   /* ================= account: usage metering + data export ================= */

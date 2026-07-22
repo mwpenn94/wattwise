@@ -30,6 +30,13 @@
  * - SRP: metro Phoenix (Maricopa + NW Pinal) — srpnet.com
  * - Southwest Gas: most of AZ incl. Phoenix, Tucson; UNS Gas covers
  *   Mohave/Yavapai/Coconino/Navajo/Santa Cruz — swgas.com, uesaz.com/about
+ * - UNS Gas (AZ): Mohave (Kingman, Lake Havasu City), Yavapai (Prescott),
+ *   Coconino (Flagstaff), Navajo (Show Low), Santa Cruz (Nogales) counties —
+ *   uesaz.com/about + UNSG Statement of Rates "District: Entire UNS Gas
+ *   Service Area". Kingman gas = UNS Gas, NOT Southwest Gas.
+ * - LG&E (KY): electric + gas in Louisville metro (Jefferson County and
+ *   surrounding Bullitt/Oldham/Shelby/Spencer/Hardin/Meade/Trimble/Henry) —
+ *   lge-ku.com service area map, Jul 2026.
  */
 
 export type TerritoryConfidence = "city_match" | "zip_match" | "county_match" | "name_match" | "unknown";
@@ -52,8 +59,9 @@ export interface TerritoryEntry {
 }
 
 /**
- * AZ territory catalog. Deliberately coarse: zip3 granularity plus city names.
- * A city listed under two utilities produces an "overlap" resolution.
+ * Territory catalog (AZ + KY). Deliberately coarse: zip3 granularity plus city
+ * names. A city listed under two utilities produces an "overlap" resolution.
+ * (Name kept for import stability; the catalog is multi-state.)
  */
 export const AZ_TERRITORIES: TerritoryEntry[] = [
   {
@@ -113,13 +121,70 @@ export const AZ_TERRITORIES: TerritoryEntry[] = [
     utilityLabel: "Southwest Gas",
     commodity: "gas",
     state: "AZ",
-    // SW Gas covers most AZ population centers (Phoenix, Tucson, Yuma...).
+    // SW Gas covers most AZ population centers (Phoenix, Tucson, Yuma...) but
+    // NOT the UNS Gas counties (Mohave/Yavapai/Coconino/Navajo/Santa Cruz).
     cities: [
       "phoenix", "tempe", "mesa", "chandler", "gilbert", "scottsdale", "glendale", "peoria",
       "tucson", "oro valley", "marana", "sahuarita", "casa grande", "yuma", "sierra vista",
     ],
     zip3: ["850", "851", "852", "853", "856", "857", "859"],
     counties: ["maricopa", "pima", "pinal", "yuma", "cochise"],
+  },
+  {
+    utilityMatch: "uns gas",
+    utilityLabel: "UniSource Energy Services (UNS Gas)",
+    commodity: "gas",
+    state: "AZ",
+    // UNS Gas: northern AZ + Mohave + Santa Cruz counties (uesaz.com/about).
+    // Kingman and Lake Havasu City gas customers are UNS Gas, not SW Gas.
+    cities: [
+      "kingman", "lake havasu city", "lake havasu", "golden valley",
+      "flagstaff", "williams", "page", "sedona", "cottonwood", "camp verde",
+      "prescott", "prescott valley", "chino valley", "dewey", "payson",
+      "show low", "pinetop", "lakeside", "snowflake", "taylor", "holbrook", "winslow",
+      "nogales", "rio rico", "patagonia", "tubac",
+    ],
+    zip3: ["860", "863", "864", "865", "855"],
+    counties: ["mohave", "yavapai", "coconino", "navajo", "santa cruz"],
+  },
+  /* ---------------------------- Kentucky (LG&E) --------------------------- */
+  // LG&E serves electric AND gas in the Louisville metro. KU (Kentucky
+  // Utilities, same parent) serves most of the rest of the state — not seeded
+  // yet, so no KU entry (fail-open keeps non-Louisville KY sites statewide).
+  {
+    // Match prefix "louisville gas" catches both the filed rows
+    // ("Louisville Gas and Electric (LG&E)") and the older state-average
+    // imputed rows ("Louisville Gas & Electric (gas)").
+    utilityMatch: "louisville gas",
+    utilityLabel: "Louisville Gas and Electric (LG&E)",
+    commodity: "electric",
+    state: "KY",
+    cities: [
+      "louisville", "jeffersontown", "st. matthews", "saint matthews", "shively",
+      "middletown", "lyndon", "prospect", "anchorage", "okolona", "fern creek",
+      "valley station", "pleasure ridge park", "highview", "newburg",
+      "mount washington", "shepherdsville", "hillview", "la grange", "crestwood",
+      "pewee valley", "shelbyville", "simpsonville", "taylorsville",
+    ],
+    zip3: ["402", "400", "401"],
+    counties: ["jefferson", "bullitt", "oldham", "shelby", "spencer", "trimble", "henry", "hardin", "meade"],
+  },
+  {
+    utilityMatch: "louisville gas",
+    utilityLabel: "Louisville Gas and Electric (LG&E)",
+    commodity: "gas",
+    state: "KY",
+    // LG&E's gas territory extends somewhat beyond its electric footprint
+    // (17 KY counties); same metro core modeled here.
+    cities: [
+      "louisville", "jeffersontown", "st. matthews", "saint matthews", "shively",
+      "middletown", "lyndon", "prospect", "anchorage", "okolona", "fern creek",
+      "valley station", "pleasure ridge park", "highview", "newburg",
+      "mount washington", "shepherdsville", "hillview", "la grange", "crestwood",
+      "pewee valley", "shelbyville", "simpsonville", "taylorsville", "elizabethtown", "bardstown",
+    ],
+    zip3: ["402", "400", "401", "427"],
+    counties: ["jefferson", "bullitt", "oldham", "shelby", "spencer", "trimble", "henry", "hardin", "meade", "nelson", "marion", "larue", "green", "metcalfe", "adair", "barren", "hart"],
   },
   {
     utilityMatch: "city of phoenix water",

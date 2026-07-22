@@ -433,6 +433,8 @@ export interface ResolvedFootprints {
  * pin jitter still hits. Bounded to 500 entries (FIFO eviction). */
 const RESOLVE_CACHE = new Map<string, { at: number; value: ResolvedFootprints }>();
 const RESOLVE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+/** GEO-BUG-1: degraded (single-source-fallback) results are held only briefly so both upstreams get retried soon. */
+const DEGRADED_CACHE_TTL_MS = 5 * 60 * 1000;
 const RESOLVE_CACHE_MAX = 500;
 
 function cacheKey(p: LatLng): string {
@@ -526,10 +528,20 @@ export async function resolveFootprints(
       const oldest = RESOLVE_CACHE.keys().next().value;
       if (oldest != null) RESOLVE_CACHE.delete(oldest);
     }
-    RESOLVE_CACHE.set(key, { at: Date.now(), value });
-    // NEXT-3: write-through to the persistent layer (never on transport
-    // failure — same rule as the in-memory cache). Fire-and-forget.
-    if (persistentCache) {
+    // GEO-BUG-1 (Jul 22): a DEGRADED result (one source family down, e.g. OSM
+    // throttled → esri-only fallback) must not be cached long-term — that is
+    // exactly how a wrong/partial esri ring poisoned the cache and kept
+    // shadowing the correct OSM footprint on every later re-resolve. Degraded
+    // results get a short in-memory hold only and NEVER reach the persistent
+    // layer; the next resolve retries both upstreams.
+    const degraded = osmFailed || esriFailed;
+    RESOLVE_CACHE.set(key, {
+      at: degraded ? Date.now() - (RESOLVE_CACHE_TTL_MS - DEGRADED_CACHE_TTL_MS) : Date.now(),
+      value,
+    });
+    // NEXT-3: write-through to the persistent layer — full-success results
+    // only (never transport failures, never degraded fallbacks).
+    if (persistentCache && !degraded) {
       persistentCache.put(key, provider, candidates).catch(() => {
         /* fail-open */
       });

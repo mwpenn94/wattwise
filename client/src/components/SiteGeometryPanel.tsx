@@ -110,10 +110,20 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     onSuccess: () => {
       utils.sites.geometryGet.invalidate({ siteId });
       utils.sites.dimensionReceipts.invalidate({ siteId });
+      setPendingReplace(null);
       toast.success("Footprint confirmed — geometry now feeds your dimensional receipts");
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e, vars) => {
+      // GEO-BUG-2: server guards a hand-drawn footprint against silent
+      // replacement — surface an explicit keep/replace choice instead.
+      if (e.data?.code === "PRECONDITION_FAILED" && vars && vars.source !== "user_drawn") {
+        setPendingReplace(vars);
+        return;
+      }
+      toast.error(e.message);
+    },
   });
+  const [pendingReplace, setPendingReplace] = useState<Record<string, unknown> | null>(null);
 
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [fallback, setFallback] = useState<Candidate | null>(null);
@@ -165,6 +175,23 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     };
     cands.forEach((c, i) => paint(c.ring, sel === i, false));
     if (fb && sel === "prism") paint(fb.ring, true, true);
+    // GEO-BUG-3: always paint the stored/confirmed footprint (emerald) under
+    // the candidates so "what I have" vs "what's suggested" is never ambiguous
+    // — previously a re-resolve visually replaced the confirmed footprint.
+    const storedRing = (geom?.footprint as { coordinates?: Ring[] } | null)?.coordinates?.[0];
+    if (storedRing && storedRing.length >= 3) {
+      const poly = new google.maps.Polygon({
+        paths: storedRing.map(([lng, lat]) => ({ lat, lng })),
+        strokeColor: "#059669",
+        strokeWeight: 2.5,
+        strokeOpacity: 0.95,
+        fillColor: "#10b981",
+        fillOpacity: 0.1,
+        clickable: false,
+        map: mapRef.current,
+      });
+      overlaysRef.current.push(poly);
+    }
     const focus = sel === "prism" ? fb : typeof sel === "number" ? cands[sel] : (cands[0] ?? fb);
     if (focus) {
       const b = new google.maps.LatLngBounds();
@@ -176,7 +203,7 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
   useEffect(() => {
     if (mapReady) paintCandidates(candidates, fallback, selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapReady, candidates, fallback, selected]);
+  }, [mapReady, candidates, fallback, selected, geom]);
 
   // Draw-your-own footprint: tap vertices; markers + a live preview polygon
   // track the ring. POI icons are disabled while drawing so taps near labeled
@@ -233,6 +260,7 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
   }, [drawing, drawnRing, mapReady]);
 
   const startResolve = () => {
+    setResolveError(null);
     resolve.mutate(
       { siteId },
       {
@@ -244,10 +272,15 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
           setNote(res.note);
           setSelected(cands.length > 0 ? 0 : fb ? "prism" : null);
         },
-        onError: (e) => toast.error(e.message),
+        onError: (e) => {
+          // GEO-BUG-3: don't leave the widget blank on a failed lookup — show a
+          // visible error state with a retry, and keep any stored geometry view.
+          setResolveError(e.message || "Footprint lookup failed — the map sources may be busy.");
+        },
       },
     );
   };
+  const [resolveError, setResolveError] = useState<string | null>(null);
 
   const confirmSelected = () => {
     if (drawing && drawnRing.length >= 3) {
@@ -320,7 +353,7 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
                 </div>
               )}
               <div className="text-xs text-muted-foreground">
-                Source: {geom!.footprintSource ? geom!.footprintSource.replace(/_/g, " ") : "prism estimate"}
+                Source: {geom!.footprintSource === "user_drawn" ? "drawn by you — protected from auto-overwrite" : geom!.footprintSource ? geom!.footprintSource.replace(/_/g, " ") : "prism estimate"}
                 {geom!.odblDerived ? " · © OpenStreetMap contributors (ODbL)" : ""}
               </div>
               <Button size="sm" variant="outline" onClick={startResolve} disabled={resolve.isPending}>
@@ -341,6 +374,37 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
             <Loader2 className="h-4 w-4 animate-spin" /> Looking up mapped footprints near your site…
           </div>
         )}
+
+        {resolveError && !resolve.isPending ? (
+          <div className="rounded-md border border-amber-300/50 bg-amber-500/10 p-2.5 text-xs space-y-1.5">
+            <p className="text-amber-700 dark:text-amber-400">{resolveError}</p>
+            <Button size="sm" variant="outline" onClick={startResolve}>
+              <RotateCcw className="h-3.5 w-3.5 mr-1" /> Try again
+            </Button>
+          </div>
+        ) : null}
+
+        {pendingReplace ? (
+          <div className="rounded-md border border-amber-300/50 bg-amber-500/10 p-2.5 text-xs space-y-1.5">
+            <p className="text-amber-700 dark:text-amber-400">
+              This site already has a footprint you drew yourself — it stays unless you explicitly replace it with this
+              mapped candidate.
+            </p>
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => setPendingReplace(null)}>
+                Keep my drawn footprint
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={confirm.isPending}
+                onClick={() => confirm.mutate({ ...(pendingReplace as Parameters<typeof confirm.mutate>[0]), force: true })}
+              >
+                Replace with mapped candidate
+              </Button>
+            </div>
+          </div>
+        ) : null}
 
         {(candidates.length > 0 || fallback) && !resolve.isPending ? (
           <div className="space-y-3">

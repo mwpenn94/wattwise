@@ -7,12 +7,12 @@
  */
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { AlertTriangle, BadgeCheck, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Wifi, Zap } from "lucide-react";
+import { AlertTriangle, BadgeCheck, Building2, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Wifi, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -40,6 +40,7 @@ export default function Portfolio() {
   const totals = portfolio.data?.totals;
   const rateConfidence = portfolio.data?.rateConfidence;
   const telecom = portfolio.data?.telecom;
+  const entitySubtotals = portfolio.data?.entitySubtotals ?? null;
 
   // §3i-2 exception-first ranking: dollar opportunity + anomaly severity.
   // Anomalies get a large additive bump so a flagged site outranks a merely
@@ -143,6 +144,58 @@ export default function Portfolio() {
           {/* TELECOM — recurring connectivity spend rollup with findings link.
               Renders only when the user has entered telecom services. */}
           <TelecomRollupCard telecom={telecom} />
+
+          {/* UNIT-1 (Jul 22): owner/entity subtotals — the organization layer of
+              the attribution hierarchy (meter → site → entity). Renders only
+              when the user actually uses entities. */}
+          {entitySubtotals != null && entitySubtotals.length > 0 && filter === "all" && (
+            <Card className="mt-4 border-border/70">
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Building2 className="h-4 w-4 text-muted-foreground" /> Spend by owner
+                </CardTitle>
+                <CardDescription>
+                  Subtotals per organization — sites not assigned to an entity roll up under “Unassigned”.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b text-left text-xs text-muted-foreground">
+                        <th className="py-1.5 pr-3 font-medium">Owner</th>
+                        <th className="py-1.5 pr-3 font-medium">Sites</th>
+                        <th className="py-1.5 pr-3 font-medium">Annual cost (modeled)</th>
+                        <th className="py-1.5 pr-3 font-medium">Annual usage</th>
+                        <th className="py-1.5 font-medium">Open opportunity</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {entitySubtotals.map((e) => (
+                        <tr key={String(e.entityId)} className="border-b border-border/50 last:border-0">
+                          <td className="py-1.5 pr-3">
+                            {e.entityId != null ? (
+                              <button className="text-left underline-offset-2 hover:underline" onClick={() => setFilter(String(e.entityId))}>
+                                {e.name}
+                              </button>
+                            ) : (
+                              <span className="text-muted-foreground">{e.name}</span>
+                            )}
+                          </td>
+                          <td className="py-1.5 pr-3 tabular-nums">
+                            {e.analyzedCount}/{e.siteCount} analyzed
+                          </td>
+                          <td className="py-1.5 pr-3 tabular-nums">{e.annualCostUsd > 0 ? fmtUsd(e.annualCostUsd) : "—"}</td>
+                          <td className="py-1.5 pr-3 tabular-nums">{e.annualUsageKwh > 0 ? `${fmtNum(e.annualUsageKwh)} kWh` : "—"}</td>
+                          <td className="py-1.5 tabular-nums">{e.openOpportunityUsd > 0 ? fmtUsd(e.openOpportunityUsd) : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* §3i-2 exception-first view: ranked by $ opportunity + anomaly severity */}
           {ranked.length > 0 && (

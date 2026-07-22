@@ -110,7 +110,7 @@ function DemandLineSvg({ points, width = 660, height = 150 }: { points: Array<{ 
       {ticks.map((t) => (
         <text key={t.x} x={t.x} y={height - 5} fontSize={8} fill="#777" textAnchor="middle">{t.label}</text>
       ))}
-      <path d={d} fill="none" stroke="#111" strokeWidth={1} />
+      <path d={d} fill="none" stroke="#d97706" strokeWidth={1.2} />
       <text x={8} y={12} fontSize={8} fill="#555">kW</text>
     </svg>
   );
@@ -134,17 +134,49 @@ function LoadDurationSvg({ curve, width = 320, height = 130 }: { curve: Array<{ 
           <text x={38} y={py(maxKw * f) + 3} fontSize={8} fill="#777" textAnchor="end">{num(maxKw * f, 0)}</text>
         </g>
       ))}
-      <path d={d} fill="none" stroke="#111" strokeWidth={1.1} />
+      <path d={d} fill="none" stroke="#d97706" strokeWidth={1.2} />
       <text x={6} y={12} fontSize={8} fill="#555">kW</text>
       <text x={width / 2} y={height + 0} fontSize={8} fill="#555" textAnchor="middle" />
     </svg>
   );
 }
 
+/** Color for a normalized 0..1 heat value — same warm amber ramp as the
+ *  on-screen heatmap so the printed report matches what the user sees.
+ *  (PDF-BUG-1: the old grayscale ramp made printed heatmaps unreadable and
+ *  looked like a black-and-white export bug. print-color-adjust: exact is set
+ *  both inline and in the .print-report CSS, so color survives print-to-PDF.) */
+function heatColor(t: number): string {
+  const c = Math.max(0, Math.min(1, t));
+  if (c <= 0.02) return "rgb(250,250,249)"; // near-zero → warm off-white
+  // off-white → amber → deep orange-red, matching the screen ramp
+  const stops: Array<[number, [number, number, number]]> = [
+    [0, [254, 243, 199]], // amber-100
+    [0.35, [252, 211, 77]], // amber-300
+    [0.65, [245, 158, 11]], // amber-500
+    [0.85, [217, 119, 6]], // amber-600
+    [1, [154, 52, 18]], // orange-900
+  ];
+  let lo = stops[0];
+  let hi = stops[stops.length - 1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (c >= stops[i][0] && c <= stops[i + 1][0]) {
+      lo = stops[i];
+      hi = stops[i + 1];
+      break;
+    }
+  }
+  const f = hi[0] === lo[0] ? 0 : (c - lo[0]) / (hi[0] - lo[0]);
+  const rgb = lo[1].map((v, i) => Math.round(v + (hi[1][i] - v) * f));
+  return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+}
+
 /** Weekday × hour heatmap as pure divs (the on-screen canvas prints blank). */
 function HeatmapPrint({ grid }: { grid: number[][] }) {
   const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const max = Math.max(...grid.flat(), 0.001);
+  const cellStyle = (t: number): React.CSSProperties =>
+    ({ backgroundColor: heatColor(t), height: 10, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }) as React.CSSProperties;
   return (
     <div>
       <div className="grid" style={{ gridTemplateColumns: "34px repeat(24, 1fr)", gap: 1 }}>
@@ -155,21 +187,17 @@ function HeatmapPrint({ grid }: { grid: number[][] }) {
         {grid.map((row, d) => (
           <React.Fragment key={d}>
             <div className="text-[8px] text-neutral-600 pr-1 leading-3">{DAYS[d] ?? d}</div>
-            {row.map((v, h) => {
-              const t = Math.max(0, Math.min(1, v / max));
-              // grayscale ramp prints reliably on any printer
-              const shade = Math.round(245 - t * 190);
-              return <div key={h} style={{ backgroundColor: `rgb(${shade},${shade},${shade})`, height: 10, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" } as React.CSSProperties} />;
-            })}
+            {row.map((v, h) => (
+              <div key={h} style={cellStyle(v / max)} />
+            ))}
           </React.Fragment>
         ))}
       </div>
       <div className="flex items-center gap-1 mt-1 text-[8px] text-neutral-500">
         <span>low</span>
-        {[0, 0.25, 0.5, 0.75, 1].map((t) => {
-          const shade = Math.round(245 - t * 190);
-          return <div key={t} style={{ backgroundColor: `rgb(${shade},${shade},${shade})`, width: 14, height: 8, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" } as React.CSSProperties} />;
-        })}
+        {[0, 0.25, 0.5, 0.75, 1].map((t) => (
+          <div key={t} style={{ ...cellStyle(t), width: 14, height: 8 }} />
+        ))}
         <span>high · hour of day across weekdays</span>
       </div>
     </div>

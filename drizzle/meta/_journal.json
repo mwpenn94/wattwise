@@ -127,6 +127,13 @@
       "when": 1784731891902,
       "tag": "0017_pink_dracula",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "5",
+      "when": 1784737461401,
+      "tag": "0018_silky_electro",
+      "breakpoints": true
     }
   ]
 }

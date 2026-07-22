@@ -145,6 +145,8 @@ export default function Dashboard() {
       tier?: string;
       monthlyCurve?: Array<{ month: number; rate: number; billCount: number }> | null;
       seasonalSpreadPct?: number | null;
+      // UNIT-1: which unit's assignment priced this site (meter | site | site_bills | state | national)
+      attribution?: { level?: string; meterId?: number | null; meterLabel?: string | null; meterTariffAssigned?: boolean } | null;
     } | null;
     demandReview?: DemandReviewData | null;
     tariffComparisons?: Array<{
@@ -448,6 +450,19 @@ export default function Dashboard() {
             </Button>
           </Link>
         </div>
+      )}
+
+      {/* UNIT-1 (Jul 22): pricing-attribution note — names WHICH unit's
+          assignment priced this site's dollars (a specific meter's assigned
+          tariff vs the site-level basis). Only rendered for tariff-priced
+          sites where a meter-level assignment exists, since that's the case
+          where "which meter?" genuinely matters on multi-meter sites. */}
+      {summary?.ratePricing?.attribution?.level === "meter" && summary.ratePricing.attribution.meterLabel && (
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Pricing attribution: dollars on this page are priced from the tariff assigned to meter{" "}
+          <span className="font-medium text-foreground">{summary.ratePricing.attribution.meterLabel}</span>. Other meters
+          on this site may carry different rates — assign tariffs per meter in Sites → Meters to price each separately.
+        </p>
       )}
 
       {/* SEAS-1 (Jul 21): seasonal rate strip — only rendered when the

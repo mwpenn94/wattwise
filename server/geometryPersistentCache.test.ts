@@ -77,16 +77,28 @@ afterEach(() => {
 });
 
 describe("persistent resolve cache", () => {
-  it("writes through to the persistent layer on a successful resolve", async () => {
+  it("writes through to the persistent layer on a full-success resolve (both sources up)", async () => {
     const { rows, cache } = fakeStore();
     setPersistentResolveCache(cache);
-    const out = await resolveFootprints(POINT, { osmFetcher: okOsmFetcher, esriFetcher: failingEsriFetcher });
+    // GEO-BUG-1: persistence requires BOTH upstreams healthy — a degraded
+    // (single-source) result must never be written to the durable layer.
+    const okEsriFetcher = async () => ({ features: [] });
+    const out = await resolveFootprints(POINT, { osmFetcher: okOsmFetcher, esriFetcher: okEsriFetcher });
     expect(out.provider).toBe("osm");
     // write-through is fire-and-forget; let the microtask drain
     await new Promise((r) => setTimeout(r, 10));
     expect(rows.has(GRID_KEY)).toBe(true);
     expect(rows.get(GRID_KEY)!.provider).toBe("osm");
     expect(rows.get(GRID_KEY)!.candidates.length).toBeGreaterThan(0);
+  });
+
+  it("GEO-BUG-1: degraded (single-source) resolves are NOT persisted", async () => {
+    const { rows, cache } = fakeStore();
+    setPersistentResolveCache(cache);
+    const out = await resolveFootprints(POINT, { osmFetcher: okOsmFetcher, esriFetcher: failingEsriFetcher });
+    expect(out.provider).toBe("osm"); // resolve still succeeds for the user
+    await new Promise((r) => setTimeout(r, 10));
+    expect(rows.has(GRID_KEY)).toBe(false); // but never poisons the durable cache
   });
 
   it("serves from the persistent layer when upstreams are down (cold-start survival)", async () => {

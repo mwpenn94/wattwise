@@ -41,13 +41,44 @@ describe("resolveTerritory", () => {
   });
 
   it("fails open outside the catalog: unknown state yields no filtering", () => {
-    const r = resolveTerritory({ state: "KY", city: "Louisville" }, "electric");
+    const r = resolveTerritory({ state: "TN", city: "Nashville" }, "electric");
     expect(r.confidence).toBe("unknown");
     expect(r.matchPrefixes).toEqual([]);
-    const rows = [{ utilityName: "LG&E" }, { utilityName: "Kentucky Utilities" }];
+    const rows = [{ utilityName: "Nashville Electric Service" }, { utilityName: "Middle Tennessee EMC" }];
     const p = partitionByTerritory(rows, r);
     expect(p.inTerritory).toHaveLength(2);
     expect(p.outOfTerritory).toHaveLength(0);
+  });
+
+  it("KY: Louisville resolves to LG&E for electric AND gas (RATE-LGE)", () => {
+    const e = resolveTerritory({ state: "KY", city: "Louisville" }, "electric");
+    expect(e.confidence).toBe("city_match");
+    expect(e.plausibleUtilities).toEqual(["Louisville Gas and Electric (LG&E)"]);
+    const g = resolveTerritory({ state: "KY", city: "Louisville" }, "gas");
+    expect(g.confidence).toBe("city_match");
+    expect(g.plausibleUtilities).toEqual(["Louisville Gas and Electric (LG&E)"]);
+  });
+
+  it("KY fails open outside the LG&E metro (Lexington = KU, not seeded)", () => {
+    const r = resolveTerritory({ state: "KY", city: "Lexington" }, "electric");
+    expect(r.confidence).toBe("unknown");
+    expect(r.matchPrefixes).toEqual([]);
+  });
+
+  it("AZ gas: Kingman resolves to UNS Gas, not Southwest Gas (RATE-UES-GAS)", () => {
+    const r = resolveTerritory({ state: "AZ", city: "Kingman" }, "gas");
+    expect(r.confidence).toBe("city_match");
+    expect(r.plausibleUtilities).toEqual(["UniSource Energy Services (UNS Gas)"]);
+    const rows = [{ utilityName: "UniSource Energy Services (UNS Gas)" }, { utilityName: "Southwest Gas" }];
+    const p = partitionByTerritory(rows, r);
+    expect(p.inTerritory.map((x) => x.utilityName)).toEqual(["UniSource Energy Services (UNS Gas)"]);
+    expect(p.outOfTerritory.map((x) => x.utilityName)).toEqual(["Southwest Gas"]);
+  });
+
+  it("AZ gas: Phoenix stays Southwest Gas (UNS Gas does not serve Maricopa)", () => {
+    const r = resolveTerritory({ state: "AZ", city: "Phoenix" }, "gas");
+    expect(r.plausibleUtilities).toEqual(["Southwest Gas"]);
+    expect(r.overlap).toBe(false);
   });
 
   it("fails open when the AZ location matches nothing (unincorporated)", () => {

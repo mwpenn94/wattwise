@@ -331,6 +331,37 @@ export const tariffs = mysqlTable(
  * pack honesty discipline: right-sizing findings only when the user supplied
  * actual usage, market comparisons always disclosed as published-rate
  * comparisons, never fabricated. */
+/** HRS-1: operating-hours schedules — multiple rows per site support split
+ * usage across distinct schedules (office wing vs 24/7 server room vs seasonal
+ * production line). usageSharePct weights each schedule's share of site load;
+ * source distinguishes archetype defaults (assumed) from user-entered truth. */
+export const siteSchedules = mysqlTable(
+  "site_schedules",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    name: varchar("name", { length: 128 }).notNull(),
+    /** business | always_on | production | custom */
+    kind: varchar("kind", { length: 32 }).default("business").notNull(),
+    /** JSON array of weekday numbers 0(Sun)-6(Sat) the schedule is active */
+    days: json("days").notNull(),
+    /** local start hour 0-23 */
+    startHour: int("startHour").notNull(),
+    /** local end hour 1-24; endHour <= startHour means overnight wrap; 0/24 = 24h */
+    endHour: int("endHour").notNull(),
+    /** JSON array of month numbers 1-12 when seasonal; NULL = all year */
+    months: json("months"),
+    /** share of the site's usage attributed to this schedule (0-100) */
+    usageSharePct: double("usageSharePct").default(100).notNull(),
+    /** archetype_default | user */
+    source: varchar("source", { length: 32 }).default("user").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [index("idx_site_schedules_site").on(t.siteId)],
+);
+export type SiteSchedule = typeof siteSchedules.$inferSelect;
+
 export const telecomServices = mysqlTable(
   "telecom_services",
   {

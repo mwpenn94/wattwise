@@ -192,7 +192,7 @@ export async function seedTariffs(db: Db) {
     }
     n++;
   }
-  await recordRun(db, "tariffs", n, "Public tariff schedules (modeled; verify against bill)", "https://apps.openei.org/USURDB/", "APS/SRP/TEP/UNS electric + SW Gas + Phoenix water; ratchets, TOU, CP, export rates (AZ net-billing) included; freshness=urdb_stale");
+  await recordRun(db, "tariffs", n, "Public tariff schedules (modeled; verify against bill)", "https://apps.openei.org/USURDB/", "APS/SRP/TEP/UNS electric + LG&E KY electric/gas (filed, eff. 2026) + UNS Gas AZ (Statement of Rates eff. 6/1/2026) + SW Gas + Phoenix water; ratchets, TOU, CP, export rates included; freshness=urdb_stale");
   return n;
 }
 
