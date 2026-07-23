@@ -92,7 +92,9 @@ describe("source registry", () => {
     if (lge.length > 0) {
       expect(lge[0].sourceUrl).toContain("lge-ku.com");
     }
-  });
+    // 20s: registry now includes telecom benchmark sources (TEL1C-2), and
+    // each registration is a couple of DB round-trips on the shared dev DB.
+  }, 20000);
 
   it("covers every filed (hand-modeled) tariff urdbId in exactly one source", () => {
     const seen = new Map<string, string>();
@@ -145,7 +147,8 @@ describe("verification targets", () => {
     const staleIdx = targets.findIndex((t) => t.sourceKey === `${TEST_PREFIX}stale`);
     expect(changedIdx).toBeGreaterThanOrEqual(0);
     expect(staleIdx === -1 || changedIdx < staleIdx).toBe(true);
-  });
+    // 20s: getVerifyTargets re-registers the (larger) source registry first.
+  }, 20000);
 });
 
 describe("applyAgentFinding", () => {
@@ -439,6 +442,10 @@ describe("docket-watch sources", () => {
     for (const s of RATE_SOURCE_SEEDS) {
       if (s.sourceKind === "docket") {
         expect(s.governsUrdbIds.length, `${s.sourceKey} is a docket but governs rows`).toBe(0);
+      } else if (s.sourceKind === "benchmark") {
+        // TEL1C-2: benchmark sources govern telecom tiers, never tariff rows
+        expect(s.governsUrdbIds.length, `${s.sourceKey} is a benchmark but governs tariff rows`).toBe(0);
+        expect((s.governsTierKeys ?? []).length, `${s.sourceKey} is a benchmark but governs no tiers`).toBeGreaterThan(0);
       } else {
         expect(s.governsUrdbIds.length, `${s.sourceKey} is a tariff source but governs nothing`).toBeGreaterThan(0);
       }

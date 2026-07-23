@@ -17,6 +17,7 @@ import {
   removeTelecomService,
   upsertTelecomService,
 } from "./telecom";
+import { marketPriceFactor } from "./telecomMarket";
 import { ensureSeeded } from "./seed/runSeeders";
 import * as h from "./dbHelpers";
 import { getDb } from "./db";
@@ -135,8 +136,11 @@ describe("analyzer findings", () => {
     await removeTelecomService(id, userId);
   });
 
-  it("flags market delta only when above typicalHigh, at low confidence", async () => {
-    // 500 Mbps res tier: typicalHigh=85, median=65
+  it("flags market delta only when above typicalHigh, at low confidence, market-adjusted (TEL1C-1)", async () => {
+    // 500 Mbps res tier: national typicalHigh=85, median=65. The AZ test site
+    // (no zip/city → rural prior, AZ fiber bump) gets a market price factor
+    // and competition factor from resolveTelecomMarket — expectations are
+    // computed from the SAME market context, not hardcoded national numbers.
     const id = await upsertTelecomService(userId, {
       siteId,
       serviceType: "internet",
@@ -155,10 +159,18 @@ describe("analyzer findings", () => {
     const flagged = a.findings.find((x) => x.serviceId === id && x.kind === "market_delta");
     expect(flagged).toBeDefined();
     expect(flagged!.confidence).toBe("low");
-    expect(flagged!.estAnnualSavingsHi).toBe(Math.round((120 - 65) * 12));
-    expect(flagged!.estAnnualSavingsLo).toBe(Math.round((120 - 85) * 12));
+    // recompute expectation from the analysis's own market context
+    expect(a.market).not.toBeNull();
+    const priceF = marketPriceFactor(a.market!);
+    const compF = a.market!.competitionFactor;
+    const adjMedian = Math.round(65 * priceF);
+    const adjHigh = Math.round(85 * priceF);
+    expect(flagged!.estAnnualSavingsHi).toBe(Math.round((120 - adjMedian) * 12 * compF));
+    expect(flagged!.estAnnualSavingsLo).toBe(Math.round((120 - adjHigh) * 12 * Math.min(1, compF)));
     // address-availability disclosure always present on market comparisons
     expect(flagged!.disclosures.join(" ")).toMatch(/address/i);
+    // market-context disclosure present when adjustment applied
+    if (priceF !== 1.0) expect(flagged!.disclosures.join(" ")).toMatch(/prior|market/i);
     expect(a.findings.find((x) => x.serviceId === inRangeId && x.kind === "market_delta")).toBeUndefined();
     await removeTelecomService(id, userId);
     await removeTelecomService(inRangeId, userId);
@@ -233,9 +245,8 @@ describe("analyzer findings", () => {
   });
 
   it("caps total savings at the single largest finding per service (never additive)", async () => {
-    // One service that triggers BOTH promo expiry ($480/yr hi) and market
-    // delta: $120 vs 500Mbps tier median 65 → $660/yr hi. Total must be the
-    // max (660), not the sum (1140).
+    // One service that triggers BOTH promo expiry and market delta (values
+    // market-adjusted per TEL1C-1). Total must be the max, never the sum.
     const id = await upsertTelecomService(userId, {
       siteId,
       serviceType: "internet",

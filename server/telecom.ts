@@ -18,10 +18,16 @@
  *  - no finding is emitted without a stated basis, and savings are ranges
  *    anchored at published medians, never point promises.
  */
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { getDb } from "./db";
-import { telecomBenchmarks, telecomServices, type TelecomBenchmark, type TelecomService } from "../drizzle/schema";
+import { sites, telecomBenchmarks, telecomServices, type TelecomBenchmark, type TelecomService } from "../drizzle/schema";
 import { assertSiteOwner } from "./dbHelpers";
+import {
+  alternateTechnologies,
+  marketPriceFactor,
+  resolveTelecomMarket,
+  type TelecomMarketContext,
+} from "./telecomMarket";
 
 /* ------------------------------------------------------------------ */
 /* CRUD helpers                                                        */
@@ -109,6 +115,59 @@ export async function removeTelecomService(id: number, userId: number): Promise<
 }
 
 /* ------------------------------------------------------------------ */
+/* TEL1C-3 — cascading identification                                  */
+/* ------------------------------------------------------------------ */
+
+/** Writes the telecom-setup invite insight at site creation — the same
+ * cascading-identification pattern meters/commodities use: the site's
+ * location resolves a telecom MARKET (technology mix, density class) and the
+ * insight invites the user to enter their actual services so plan-vs-market
+ * comparisons can run. Idempotent per site (kind-guarded); honest that the
+ * mix is a market prior, never a serviceability check for the address. */
+export async function addTelecomSetupInvite(
+  siteId: number,
+  loc: { city?: string | null; state?: string | null; zip?: string | null },
+): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  const { insights } = await import("../drizzle/schema");
+  // Kind-guard: one invite per site, and never after services exist.
+  const [existing, services] = await Promise.all([
+    db
+      .select({ id: insights.id })
+      .from(insights)
+      .where(and(eq(insights.siteId, siteId), eq(insights.kind, "telecom_setup_invite")))
+      .limit(1),
+    db.select({ id: telecomServices.id }).from(telecomServices).where(eq(telecomServices.siteId, siteId)).limit(1),
+  ]);
+  if (existing.length > 0 || services.length > 0) return;
+  const market = resolveTelecomMarket(loc);
+  const techList = market.technologies.map((t) => t.label).join(", ");
+  const wiredCount = market.technologies.filter((t) => t.technology === "fiber" || t.technology === "cable" || t.technology === "dsl").length;
+  await db.insert(insights).values({
+    siteId,
+    kind: "telecom_setup_invite",
+    title: "Connectivity is a utility too — add internet/mobile services to include them",
+    body:
+      `Based on this site's location (${market.densityClass} market), the plausible access technologies are: ${techList}. ` +
+      (wiredCount >= 2
+        ? `With ${wiredCount} overlapping wired options, competitive pressure typically supports meaningful negotiation — `
+        : `With limited wired overlap, switching leverage is thinner, but promo-expiry and right-sizing checks still apply — `) +
+      `add your internet, mobile, TV, or landline services (or snap a bill photo) and their spend joins your site's cost picture with plan-vs-market findings. ` +
+      `This technology mix is a market prior from FCC deployment data, not a serviceability check for your exact address.`,
+    severity: "info",
+    confidence: "medium",
+    provenance: {
+      method: "telecom_setup_invite_v1",
+      densityClass: market.densityClass,
+      technologies: market.technologies.map((t) => t.technology),
+      disclosures: market.disclosures,
+    },
+    metrics: null,
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* Benchmark matching                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -120,6 +179,21 @@ export async function loadBenchmarks(): Promise<TelecomBenchmark[]> {
 
 /** Match a service to its benchmark tier. Internet matches on speed window +
  * business flag; mobile on plan kind; TV/landline on the single tier. */
+/** TEL1C-2: benchmark rows now carry verifyStatus from the rate-currency
+ * engine (weekly fingerprint sweep of FCC/carrier sources + monthly agent
+ * verification). Non-current benchmarks are still USABLE — the market
+ * doesn't vanish — but every finding that cites them says so explicitly. */
+export function benchmarkCurrencyDisclosure(bench: TelecomBenchmark): string[] {
+  const vs = (bench as { verifyStatus?: string }).verifyStatus;
+  if (vs === "change_detected") {
+    return ["The published pricing behind this benchmark changed recently and is pending re-verification — treat the dollar range as indicative."];
+  }
+  if (vs === "due" || vs === "stale") {
+    return ["This benchmark is past its verification window — published market pricing may have shifted since it was last confirmed."];
+  }
+  return [];
+}
+
 export function matchBenchmark(svc: TelecomService, catalog: TelecomBenchmark[]): TelecomBenchmark | null {
   if (svc.serviceType === "internet") {
     const mbps = svc.downloadMbps;
@@ -177,6 +251,10 @@ export interface TelecomAnalysis {
   findings: TelecomFinding[];
   totalAnnualSavingsLo: number;
   totalAnnualSavingsHi: number;
+  /** TEL1C-1: location-driven market context (multi-provider, multi-technology).
+   * Set when analyzing a single site; null for cross-site portfolio analysis
+   * (each service still gets its own site's market internally). */
+  market: TelecomMarketContext | null;
 }
 
 const DAY_MS = 86_400_000;
@@ -203,6 +281,29 @@ export async function analyzeTelecomServices(
   const services = siteId != null ? await listTelecomServices(siteId, userId) : await listAllTelecomServices(userId);
   const catalog = await loadBenchmarks();
   const findings: TelecomFinding[] = [];
+
+  /* TEL1C-1 (owner Jul 23): resolve the multi-technology market context from
+   * each service's site location — same cascade discipline as electric/gas
+   * territory resolution, but modeled as a technology MIX (wired fiber/cable/
+   * DSL, fixed-wireless, satellite can all overlap in one geography) rather
+   * than one provider per territory. Internet benchmark medians are market-
+   * adjusted and savings ranges competition-scaled, basis disclosed on every
+   * finding. Mobile stays nationally priced (carrier pricing does not vary
+   * by address). */
+  const siteMarkets = new Map<number, TelecomMarketContext>();
+  {
+    const db = await getDb();
+    if (db) {
+      const ids = Array.from(new Set(services.map((s) => s.siteId).concat(siteId != null ? [siteId] : [])));
+      if (ids.length > 0) {
+        const rows = await db
+          .select({ id: sites.id, city: sites.city, state: sites.state, zip: sites.zip })
+          .from(sites)
+          .where(inArray(sites.id, ids));
+        for (const r of rows) siteMarkets.set(r.id, resolveTelecomMarket(r));
+      }
+    }
+  }
 
   for (const svc of services) {
     const label = svcLabel(svc);
@@ -235,25 +336,70 @@ export async function analyzeTelecomServices(
       }
     }
 
-    /* 2. Market delta — published-rate comparison, low confidence. */
+    /* 2. Market delta — published-rate comparison, low confidence.
+     * TEL1C-1: internet comparisons are market-adjusted by the site's
+     * technology-mix price factor; savings scale with local competition. */
     const bench = matchBenchmark(svc, catalog);
+    const mkt = siteMarkets.get(svc.siteId) ?? null;
+    const adjustable = svc.serviceType === "internet" && mkt != null;
+    const priceF = adjustable ? marketPriceFactor(mkt) : 1.0;
+    const compF = adjustable ? mkt.competitionFactor : 1.0;
     if (bench != null) {
       const compareCost = bench.perLine ? perLineCost : svc.monthlyCostUsd;
-      if (compareCost > bench.typicalHighUsd) {
-        const deltaMedianMo = compareCost - bench.medianUsd;
-        const deltaHighMo = compareCost - bench.typicalHighUsd;
+      const adjMedian = round(bench.medianUsd * priceF);
+      const adjHigh = round(bench.typicalHighUsd * priceF);
+      const adjLow = round(bench.typicalLowUsd * priceF);
+      if (compareCost > adjHigh) {
+        const deltaMedianMo = compareCost - adjMedian;
+        const deltaHighMo = compareCost - adjHigh;
         const scale = bench.perLine ? lines : 1;
+        const marketNote =
+          adjustable && priceF !== 1.0 ? ` (adjusted for your ${mkt.densityClass} market's technology mix)` : "";
         findings.push({
           serviceId: svc.id,
           serviceLabel: label,
           kind: "market_delta",
           title: `${svc.provider} is above the typical published range`,
-          body: `You pay $${compareCost.toFixed(0)}/mo${bench.perLine ? " per line" : ""} for ${bench.tierLabel.toLowerCase()}; published national pricing typically runs $${bench.typicalLowUsd.toFixed(0)}–$${bench.typicalHighUsd.toFixed(0)}/mo (median $${bench.medianUsd.toFixed(0)}). Matching the median would save about $${round(deltaMedianMo * 12 * scale)}/yr.`,
-          estAnnualSavingsLo: round(deltaHighMo * 12 * scale),
-          estAnnualSavingsHi: round(deltaMedianMo * 12 * scale),
+          body: `You pay $${compareCost.toFixed(0)}/mo${bench.perLine ? " per line" : ""} for ${bench.tierLabel.toLowerCase()}; published pricing${marketNote} typically runs $${adjLow}–$${adjHigh}/mo (median $${adjMedian}). Matching the median would save about $${round(deltaMedianMo * 12 * scale * Math.min(1, compF))}–$${round(deltaMedianMo * 12 * scale * compF)}/yr.`,
+          estAnnualSavingsLo: round(deltaHighMo * 12 * scale * Math.min(1, compF)),
+          estAnnualSavingsHi: round(deltaMedianMo * 12 * scale * compF),
           confidence: "low",
-          disclosures: [bench.basis, "Actual available pricing depends on providers serving your address and current offers."],
+          disclosures: [
+            bench.basis,
+            ...benchmarkCurrencyDisclosure(bench),
+            ...(adjustable ? mkt.disclosures : []),
+            "Actual available pricing depends on providers serving your address and current offers.",
+          ],
         });
+      }
+      /* TEL1C-1: alternate-technology switch option — when the market
+       * plausibly offers a cheaper access technology (e.g., 5G fixed-wireless
+       * vs cable), surface it as a disclosed switch, never like-for-like. */
+      if (adjustable && compareCost > adjMedian) {
+        const alts = alternateTechnologies(svc, mkt).filter((a) => a.priceFactor < priceF);
+        if (alts.length > 0) {
+          const best = alts[0];
+          const altMedian = round(bench.medianUsd * best.priceFactor);
+          const saveMo = compareCost - altMedian;
+          if (saveMo > 10) {
+            findings.push({
+              serviceId: svc.id,
+              serviceLabel: label,
+              kind: "market_delta",
+              title: `${best.label} plausibly serves your market at lower typical pricing`,
+              body: `About ${Math.round(best.availabilityPrior * 100)}% of ${mkt.densityClass} locations like this site have ${best.label} available. Published ${best.label} pricing for comparable speeds runs around $${altMedian}/mo versus your $${compareCost.toFixed(0)}/mo — roughly $${round(saveMo * 12)}/yr if serviceable at your address.`,
+              estAnnualSavingsLo: round(saveMo * 12 * 0.5),
+              estAnnualSavingsHi: round(saveMo * 12),
+              confidence: "low",
+              disclosures: [
+                "Technology availability is a market prior, not an address-level serviceability check — confirm with the provider before planning around it.",
+                "Switching access technologies (e.g., cable to fixed-wireless) has real tradeoffs in latency, upload speed, and congestion behavior.",
+                bench.basis,
+                ...benchmarkCurrencyDisclosure(bench),
+              ],
+            });
+          }
+        }
       }
       /* Mobile: unlimited postpaid users also see the MVNO option (disclosed switch). */
       if (svc.serviceType === "mobile" && svc.unlimitedData && bench.tierKey === "mobile_unlimited_postpaid") {
@@ -272,6 +418,7 @@ export async function analyzeTelecomServices(
             confidence: "low",
             disclosures: [
               mvno.basis,
+              ...benchmarkCurrencyDisclosure(mvno),
               "MVNO tradeoffs are real: data deprioritization during congestion, limited international/hotspot features, and device-financing differences. This is a switch option, not a like-for-like repricing.",
             ],
           });
@@ -304,6 +451,7 @@ export async function analyzeTelecomServices(
           disclosures: [
             "Based on the actual speed need you entered — if your household adds heavy simultaneous use (4K streams, large uploads, many devices), revisit before downgrading.",
             neededTier.basis,
+            ...benchmarkCurrencyDisclosure(neededTier),
           ],
         });
       }
@@ -328,6 +476,7 @@ export async function analyzeTelecomServices(
           disclosures: [
             "Based on the actual data usage you entered — check a few months of bills for seasonality (travel months can spike).",
             limited.basis,
+            ...benchmarkCurrencyDisclosure(limited),
           ],
         });
       }
@@ -395,6 +544,7 @@ export async function analyzeTelecomServices(
     findings,
     totalAnnualSavingsLo: totalLo,
     totalAnnualSavingsHi: totalHi,
+    market: siteId != null ? (siteMarkets.get(siteId) ?? null) : null,
   };
 }
 

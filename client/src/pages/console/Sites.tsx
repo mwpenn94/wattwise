@@ -27,7 +27,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { useLocation } from "wouter";
+import { Link, useLocation } from "wouter";
 import { ProvChip } from "@/components/Honesty";
 import QuickStart from "@/components/QuickStart";
 import OperatingHoursPanel from "@/components/OperatingHoursPanel";
@@ -211,6 +211,7 @@ export default function Sites() {
                 {s.climateZone && <span>CZ {s.climateZone}</span>}
               </div>
               <SiteMeters siteId={s.id} state={s.state} />
+              <SiteTelecom siteId={s.id} />
               <SiteEntityPicker siteId={s.id} entityId={(s as { entityId?: number | null }).entityId ?? null} />
             </CardContent>
           </Card>
@@ -732,6 +733,29 @@ function MeterManager({ siteId }: { siteId: number }) {
           <Plus className="mr-1 h-3.5 w-3.5" /> Add meter
         </Button>
       </div>
+    </div>
+  );
+}
+
+/** TUX-4 (owner Jul 23): telecom services line on each site card — connectivity
+ * is part of the site's utility picture, same visual weight as meters. Shows
+ * entered services + monthly subscription spend; quiet (renders nothing) when
+ * no services exist so the card stays clean — the setup invite lives in the
+ * insights feed, not here. */
+function SiteTelecom({ siteId }: { siteId: number }) {
+  const services = trpc.telecom.list.useQuery({ siteId });
+  if (!services.data || services.data.length === 0) return null;
+  const monthly = services.data.reduce((s, x) => s + (x.monthlyCostUsd ?? 0), 0);
+  const kinds = Array.from(new Set(services.data.map((x) => x.serviceType.replace(/_/g, " "))));
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+      <span className="inline-flex items-center gap-1 rounded border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+        📶 {services.data.length} telecom · ${Math.round(monthly)}/mo
+      </span>
+      <span className="font-mono text-[10px] text-muted-foreground">{kinds.join(" · ")}</span>
+      <Link href="/app/telecom" className="font-mono text-[10px] text-primary hover:underline">
+        manage →
+      </Link>
     </div>
   );
 }

@@ -136,6 +136,9 @@ export default function Dashboard() {
     benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
     emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number; mapped?: boolean } | null;
     currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
+    /* TEL1C-4/TUX-2: connectivity subscription spend from the pipeline summary —
+       user-entered dollars in the same cost picture as metered commodities. */
+    telecomSpend?: { serviceCount: number; monthlyUsd: number; annualUsd: number; findingCount: number; savingsLoUsd: number; savingsHiUsd: number } | null;
     basisStructureHasDemandCharges?: boolean | null;
     // NEXT-1/NEXT-2: machine-readable rate provenance from the pipeline summary
     ratePricing?: {
@@ -168,6 +171,26 @@ export default function Dashboard() {
   // owner-capex items (audience: landlord) render in their own "worth raising"
   // card — never as a payback the renter is asked to buy.
   const oppRows = allOppRows.filter((o) => ((o.provenance as Record<string, unknown> | null)?.audience ?? "occupant") !== "landlord");
+  /* TUX-3 (owner Jul 23): telecom findings feed the SAME ranked list as building
+     measures — one unified feed, no separate widget. Persisted telecom rows
+     (pipeline TEL1C-4, measure prefix telecom_) win once an analysis has run;
+     the live-query fallback covers sites whose last analysis predates TEL1C-4
+     so findings never vanish, without double-rendering. */
+  const hasPersistedTelecomOpps = allOppRows.some((o) => o.measure?.startsWith("telecom_"));
+  const telecomFindings = hasPersistedTelecomOpps ? [] : (telecom.data?.findings ?? []).filter((f) => f.estAnnualSavingsLo != null);
+  /* TUX-2: live telecom totals as fallback when the persisted summary predates
+     TEL1C-4 (older analyses have no telecomSpend field). */
+  const telecomSpendLive =
+    telecom.data != null && telecom.data.services.length > 0
+      ? {
+          serviceCount: telecom.data.services.length,
+          monthlyUsd: Math.round(telecom.data.monthlyTotalUsd),
+          annualUsd: Math.round(telecom.data.annualTotalUsd),
+          findingCount: telecom.data.findings.length,
+          savingsLoUsd: telecom.data.totalAnnualSavingsLo,
+          savingsHiUsd: telecom.data.totalAnnualSavingsHi,
+        }
+      : null;
   const landlordRows = allOppRows.filter((o) => (o.provenance as Record<string, unknown> | null)?.audience === "landlord");
   const demand = summary?.demand ?? null;
   const benchmarkInsight = summary?.benchmark ?? null;
@@ -845,6 +868,43 @@ export default function Dashboard() {
                 <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
                   Modeled estimate on your interval data and the seeded rate structure — not a bill reproduction.
                 </p>
+                {/* TUX-2 (owner Jul 23): telecom spend joins the SAME cost picture —
+                    one all-services view, not a separate widget. Subscription spend
+                    is user-entered (actual), unlike the modeled commodity estimate,
+                    and the disclosure says so. */}
+                {(summary?.telecomSpend ?? telecomSpendLive) != null ? (
+                  (() => {
+                    const ts = (summary?.telecomSpend ?? telecomSpendLive)!;
+                    return (
+                      <div className="mt-2 border-t border-dashed border-border pt-2">
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground sm:grid-cols-4">
+                          <span>
+                            connectivity {fmtUsd(ts.annualUsd)} <span className="text-[10px]">({ts.serviceCount} service{ts.serviceCount === 1 ? "" : "s"})</span>
+                          </span>
+                          <span className="text-foreground sm:col-span-2">
+                            all services {fmtUsd(costInsight.breakdown.total + ts.annualUsd)}/yr
+                          </span>
+                          <Link href="/app/telecom" className="text-primary hover:underline">
+                            manage →
+                          </Link>
+                        </div>
+                        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                          Connectivity is your entered subscription spend (actual dollars), shown alongside the modeled utility estimate — the two bases differ and are labeled, never blended.
+                        </p>
+                      </div>
+                    );
+                  })()
+                ) : telecom.data != null && (telecom.data.services?.length ?? 0) === 0 ? (
+                  <div className="mt-2 border-t border-dashed border-border pt-2">
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      Connectivity is a utility too —{" "}
+                      <Link href="/app/telecom" className="text-primary hover:underline">
+                        add internet/mobile services
+                      </Link>{" "}
+                      to include subscription spend in this cost picture and get plan-vs-market findings.
+                    </p>
+                  </div>
+                ) : null}
               </div>
             )}
           </CardContent>
@@ -1024,7 +1084,7 @@ export default function Dashboard() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {oppRows.length === 0 ? (
+          {oppRows.length === 0 && telecomFindings.length === 0 ? (
             <p className="py-4 text-center text-sm text-muted-foreground">Run analysis to generate ranked measures.</p>
           ) : (
             <div className="space-y-3">
@@ -1055,6 +1115,12 @@ export default function Dashboard() {
                       const com = (o.provenance as Record<string, unknown> | null)?.commodity as string | undefined;
                       return com && com !== "electric" ? [com === "gas" ? "natural gas" : com] : [];
                     })(),
+                    /* TUX-3: persisted telecom measures carry their finding kind as a
+                       chip (promo expiry / market delta / right-size), mirroring the
+                       live-query cards they replace. */
+                    ...(o.measure?.startsWith("telecom_")
+                      ? [o.measure.replace(/^telecom_/, "").replace(/_\d+$/, "").replace(/_/g, " ")]
+                      : []),
                     ...(o.ratchetAware ? ["ratchet-aware"] : []),
                     ...(o.disaggregationMethod ? [o.disaggregationMethod.replace(/_/g, " ")] : []),
                   ]}
@@ -1067,12 +1133,23 @@ export default function Dashboard() {
                       : []),
                     ...(o.paybackBandYears ? [{ label: "payback", value: o.paybackBandYears }] : []),
                   ]}
-                  action={{
-                    label: "Model this in Scenarios",
-                    onClick: () => {
-                      window.location.href = `/app/scenarios?site=${activeSiteId}&measure=${o.measure}`;
-                    },
-                  }}
+                  action={
+                    /* TUX-3: telecom measures are contract actions (call/switch), not
+                       load scenarios — route to the Telecom page instead of Scenarios. */
+                    o.measure?.startsWith("telecom_")
+                      ? {
+                          label: "Review service",
+                          onClick: () => {
+                            window.location.href = `/app/telecom`;
+                          },
+                        }
+                      : {
+                          label: "Model this in Scenarios",
+                          onClick: () => {
+                            window.location.href = `/app/scenarios?site=${activeSiteId}&measure=${o.measure}`;
+                          },
+                        }
+                  }
                   secondaryAction={{
                     label: "I did this",
                     onClick: () =>
@@ -1088,27 +1165,12 @@ export default function Dashboard() {
                   ]}
                 />
               ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* TELX-1: telecom savings surface in the same feed — these are recurring-bill
-          dollars from the user's own entered services, kept in a sibling card because
-          they are contract actions (call/switch), not building measures for Scenarios. */}
-      {(telecom.data?.findings ?? []).length > 0 && (
-        <Card className="mt-4 border-border/70">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 font-display text-base">
-              <Wifi className="h-4 w-4 text-primary" /> Telecom &amp; connectivity savings
-            </CardTitle>
-            <p className="text-xs text-muted-foreground">
-              From the services you entered on the Telecom page — published benchmark ranges, not negotiated quotes.
-            </p>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {(telecom.data?.findings ?? []).map((f, i) => (
+              {/* TUX-3 (owner Jul 23): telecom findings rank INLINE with building
+                  measures — same feed, one list — instead of a separate sibling card
+                  the user had to scroll past. They are contract actions (call/switch),
+                  so the action routes to the Telecom page, not Scenarios; the chip
+                  keeps the cross-category feed legible, mirroring the gas/water chips. */}
+              {telecomFindings.map((f, i) => (
                 <InsightCard
                   key={`tel-${i}`}
                   title={f.title}
@@ -1117,25 +1179,28 @@ export default function Dashboard() {
                   headlineFallback="Action window — no dollar estimate"
                   why={f.body}
                   confidence={chipFromConfidence(f.confidence, false)}
-                  extraChips={[f.kind.replace(/_/g, " ")]}
+                  extraChips={["telecom", f.kind.replace(/_/g, " ")]}
                   metrics={
                     f.estAnnualSavingsLo != null && f.estAnnualSavingsHi != null && f.estAnnualSavingsLo !== f.estAnnualSavingsHi
                       ? [{ label: "range", value: `$${Math.round(f.estAnnualSavingsLo)}–$${Math.round(f.estAnnualSavingsHi)}/yr` }]
                       : []
                   }
                   action={{
-                    label: "Review on Telecom page",
+                    label: "Review service",
                     onClick: () => {
                       window.location.href = `/app/telecom`;
                     },
                   }}
-                  provenance={f.disclosures}
+                  provenance={[
+                    "From the connectivity services you entered — published benchmark ranges, not negotiated quotes.",
+                    ...f.disclosures,
+                  ]}
                 />
               ))}
             </div>
-          </CardContent>
-        </Card>
-      )}
+          )}
+        </CardContent>
+      </Card>
 
       {/* v1.18 §5 stage 5: landlord-benefit measures live in a separate card with
           an ask framing — the renter's feed above leads with in-control dollars. */}

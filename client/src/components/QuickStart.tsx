@@ -126,16 +126,28 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
    * THREE commodities. Shown as a rich toast right after creation so the user
    * sees the “whoa” before the analysis lands; every line is a candidate with
    * its own honesty note server-side (never presented as verified). */
-  function revealUtilities(triple?: { electric: { value: string | null }; gas: { value: string | null }; water: { value: string | null } }) {
+  function revealUtilities(
+    triple?: { electric: { value: string | null }; gas: { value: string | null }; water: { value: string | null } },
+    telecomMarket?: { densityClass: string; technologies: { label: string }[] } | null,
+  ) {
     if (!triple) return;
     const lines = [
       triple.electric.value ? `⚡ ${triple.electric.value}` : null,
       triple.gas.value ? `🔥 ${triple.gas.value}` : null,
       triple.water.value ? `💧 ${triple.water.value}` : null,
+      /* TEL1C-3 cascading identification: telecom is the FOURTH utility class in
+         the reveal — a technology MIX for the geography (multiple overlapping
+         providers/technologies), never a single provider claim. */
+      telecomMarket && telecomMarket.technologies.length > 0
+        ? `📶 ${telecomMarket.technologies
+            .slice(0, 3)
+            .map((t) => t.label)
+            .join("/")} plausible (${telecomMarket.densityClass} market)`
+        : null,
     ].filter((l): l is string => l != null);
     if (lines.length < 2) return; // one candidate isn't a reveal — stay quiet
-    toast.info(`One address → ${lines.length} likely utilities`, {
-      description: `${lines.join("  ·  ")} — candidates from your location, not confirmations. Override any of them as bills arrive.`,
+    toast.info(`One address → ${lines.length} likely utility services`, {
+      description: `${lines.join("  ·  ")} — candidates from your location, not confirmations. Override any of them as bills arrive; add telecom services to compare against market benchmarks.`,
       duration: 9000,
     });
   }
@@ -168,7 +180,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
       await utils.sites.list.invalidate();
       setPhase("analyzing");
       toast.success("Prospective site created from your pin — running a modeled-only quick analysis…");
-      revealUtilities(res.utilityTriple);
+      revealUtilities(res.utilityTriple, res.telecomMarket);
       await finishToDashboard(res.id);
       toast.success("Modeled estimate ready — it's a what-if for a location you're considering, not a reading of anyone's usage.");
     } catch (e) {
@@ -202,7 +214,7 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
           ? `Site created for ${res.parse.city ? `${res.parse.city}, ` : ""}${res.parse.state}${res.parse.zip ? ` ${res.parse.zip}` : ""}${selectedPlace ? " (verified address)" : ""} — running quick analysis…`
           : "Site created (location not recognized — US-median assumptions disclosed) — running quick analysis…",
       );
-      revealUtilities(res.utilityTriple);
+      revealUtilities(res.utilityTriple, res.telecomMarket);
       await finishToDashboard(res.id);
       toast.success("Quick-win analysis ready — remaining assumptions are disclosed; refine anything, anytime.");
     } catch (e) {

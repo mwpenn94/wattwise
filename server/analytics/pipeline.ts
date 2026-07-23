@@ -41,6 +41,7 @@ import { staleSeedsForDomain } from "../seedLifecycle";
 // Cross-commodity parity: gas/water opportunity generation rides along in the
 // same stage-7 pass as electric ranking (see the injection block below).
 import { generateCommodityOpportunities, type XcOpportunity } from "../commodityOpportunities";
+import { analyzeTelecomServices } from "../telecom";
 import { STATE_PROFILES } from "../seed/nationalData";
 import { resolveCommodityService } from "../commodityService";
 import { deriveBillVerifiedRate } from "../billCalibration";
@@ -1216,6 +1217,27 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // analysis leans on has passed its refresh cadence, figures derived from it
   // widen — named and dated, never silent. Fail-open: freshness telemetry
   // must never fail the analysis.
+  /* TEL1C-4 (owner Jul 23): telecom spend JOINS the site cost picture — the
+     machine-readable summary carries the site's connectivity subscription
+     totals so the dashboard renders one all-services cost view instead of a
+     separate widget. User-entered spend, not modeled; fail-open (telecom is
+     optional and its failure never fails the analysis). */
+  let telecomSpend: { serviceCount: number; monthlyUsd: number; annualUsd: number; findingCount: number; savingsLoUsd: number; savingsHiUsd: number } | null = null;
+  try {
+    const telSummary = await analyzeTelecomServices(userId, site.id);
+    if (telSummary.services.length > 0) {
+      telecomSpend = {
+        serviceCount: telSummary.services.length,
+        monthlyUsd: Math.round(telSummary.monthlyTotalUsd),
+        annualUsd: Math.round(telSummary.annualTotalUsd),
+        findingCount: telSummary.findings.length,
+        savingsLoUsd: telSummary.totalAnnualSavingsLo,
+        savingsHiUsd: telSummary.totalAnnualSavingsHi,
+      };
+    }
+  } catch {
+    /* telecom summary must never fail the analysis */
+  }
   let staleDisclosures: string[] = [];
   try {
     const staleDomains = await Promise.all([staleSeedsForDomain("tariffs"), staleSeedsForDomain("emissions"), staleSeedsForDomain("benchmark")]);
@@ -1244,6 +1266,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       benchmark,
       emissions,
       currentCost,
+      // TEL1C-4: connectivity subscription spend — user-entered dollars that
+      // belong in the same cost picture as metered commodities. Null when no
+      // services are entered (the UI shows the setup invite instead).
+      telecomSpend,
       // NEXT-1/NEXT-2 (Jul 21): machine-readable rate provenance so the UI can
       // render a tier badge and — when the rate is imputed — a "calibrate with
       // a bill" callout. tier ordering: tariff_priced_actual > bill_verified >
@@ -1596,6 +1622,43 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     for (const c of xc) if (!existingKeys.has(c.key)) oppCands.push(c);
   } catch (e) {
     narrate(`Cross-commodity opportunity generation skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  /* TEL1C-4 (owner Jul 23: telecom "shouldn't be a dumb separate widget"):
+     telecom findings join the SAME ranked feed, generated in the SAME run —
+     mirroring the gas/water injection above so an electric re-run never
+     clobbers telecom cards. Only savings-bearing findings become candidates
+     (pure action-window alerts stay on the Telecom page); telecom is
+     contract/subscription spend the OCCUPANT controls, so capexBand is
+     always "none" and candidates survive tenure filtering for renters.
+     Fail-open: telecom is optional — no services → no candidates, and a
+     telecom failure never fails the analysis. */
+  try {
+    const tel = await analyzeTelecomServices(userId, site.id);
+    for (const f of tel.findings) {
+      if (f.estAnnualSavingsLo == null || f.estAnnualSavingsHi == null) continue;
+      oppCands.push({
+        key: `telecom_${f.kind}_${f.serviceId}`,
+        title: f.title,
+        category: "telecom",
+        annualSavingsUsdLo: f.estAnnualSavingsLo,
+        annualSavingsUsdHi: f.estAnnualSavingsHi,
+        capexBand: "none",
+        confidence: f.confidence,
+        rationale: f.body,
+        disclosures: [
+          `Telecom service: ${f.serviceLabel} — from the connectivity services you entered; published benchmark ranges, not negotiated quotes.`,
+          ...f.disclosures,
+        ],
+        commodity: "telecom",
+      } as XcOpportunity);
+    }
+    if (tel.findings.length > 0) {
+      narrate(
+        `Telecom: ${tel.services.length} service${tel.services.length === 1 ? "" : "s"} analyzed — ${tel.findings.filter((f) => f.estAnnualSavingsLo != null).length} savings-bearing finding${tel.findings.filter((f) => f.estAnnualSavingsLo != null).length === 1 ? "" : "s"} joined the ranked feed`,
+      );
+    }
+  } catch (e) {
+    narrate(`Telecom opportunity generation skipped: ${e instanceof Error ? e.message : String(e)}`);
   }
   const tenureFiltered = tenure === "own" ? oppCands : oppCands.filter((c) => !isOwnerCapex(c));
   const landlordBucket = tenure === "own" ? [] : oppCands.filter(isOwnerCapex);

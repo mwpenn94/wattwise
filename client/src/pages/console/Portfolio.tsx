@@ -112,7 +112,13 @@ export default function Portfolio() {
               value={totals?.annualCostUsd != null ? fmtUsd(totals.annualCostUsd) : "—"}
               sub={
                 totals
-                  ? `${totals.analyzedCount}/${totals.siteCount} sites analyzed${totals.demandCostUsd != null ? ` · ${fmtUsd(totals.demandCostUsd)} demand/CP` : ""}`
+                  ? `${totals.analyzedCount}/${totals.siteCount} sites analyzed${totals.demandCostUsd != null ? ` · ${fmtUsd(totals.demandCostUsd)} demand/CP` : ""}${
+                      /* TUX-5: all-services line — modeled utility + entered telecom,
+                         labeled distinctly so the two bases never blend. */
+                      (totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd != null && ((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd ?? 0) > 0
+                        ? ` · +${fmtUsd((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd!)} telecom (entered) = ${fmtUsd((totals as { allServicesAnnualUsd?: number | null }).allServicesAnnualUsd ?? 0)} all services`
+                        : ""
+                    }`
                   : ""
               }
             />
@@ -166,6 +172,7 @@ export default function Portfolio() {
                         <th className="py-1.5 pr-3 font-medium">Owner</th>
                         <th className="py-1.5 pr-3 font-medium">Sites</th>
                         <th className="py-1.5 pr-3 font-medium">Annual cost (modeled)</th>
+                        <th className="py-1.5 pr-3 font-medium">Telecom (entered)</th>
                         <th className="py-1.5 pr-3 font-medium">Annual usage</th>
                         <th className="py-1.5 font-medium">Open opportunity</th>
                       </tr>
@@ -186,6 +193,12 @@ export default function Portfolio() {
                             {e.analyzedCount}/{e.siteCount} analyzed
                           </td>
                           <td className="py-1.5 pr-3 tabular-nums">{e.annualCostUsd > 0 ? fmtUsd(e.annualCostUsd) : "—"}</td>
+                          {/* TUX-5: telecom subtotal at the owner layer — entered dollars */}
+                          <td className="py-1.5 pr-3 tabular-nums">
+                            {(e as { telecomAnnualUsd?: number }).telecomAnnualUsd && (e as { telecomAnnualUsd?: number }).telecomAnnualUsd! > 0
+                              ? fmtUsd((e as { telecomAnnualUsd?: number }).telecomAnnualUsd!)
+                              : "—"}
+                          </td>
                           <td className="py-1.5 pr-3 tabular-nums">{e.annualUsageKwh > 0 ? `${fmtNum(e.annualUsageKwh)} kWh` : "—"}</td>
                           <td className="py-1.5 tabular-nums">{e.openOpportunityUsd > 0 ? fmtUsd(e.openOpportunityUsd) : "—"}</td>
                         </tr>

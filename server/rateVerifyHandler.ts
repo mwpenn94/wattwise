@@ -32,6 +32,19 @@ const findingSchema = z.object({
       }),
     )
     .optional(),
+  /** TEL1C-2: benchmark sources report observed published price bands per tier */
+  observedTiers: z
+    .array(
+      z.object({
+        tierKey: z.string().min(1).max(64),
+        typicalLowUsd: z.number().nonnegative().optional(),
+        medianUsd: z.number().nonnegative().optional(),
+        typicalHighUsd: z.number().nonnegative().optional(),
+        notes: z.string().max(512).optional(),
+      }),
+    )
+    .max(20)
+    .optional(),
   newSourceUrl: z.string().url().max(512).optional(),
   evidence: z.string().min(1).max(1024),
 });
@@ -87,6 +100,7 @@ export async function rateVerifyHandler(req: Request, res: Response) {
         })),
         instructions:
           "VERIFY targets: fetch sourceUrl (PDF or page), find the CURRENT filed rates for each tariffRows entry, compare to the seeded fixedMonthly/energyRates values. POST results: status=confirmed if values match, status=changed with observed values if they differ, status=source_moved with newSourceUrl if the document relocated, status=unreachable if it cannot be fetched. Always include one-line evidence quoting the figure seen. " +
+          "BENCHMARK targets (commodity=telecom, benchmarkTiers present): open sourceUrl in a browser (many carrier/FCC pages block plain fetches), read current published pricing, and compare against each benchmarkTiers entry's typicalLowUsd/medianUsd/typicalHighUsd. POST status=confirmed if bands still bracket published prices, or status=changed with observedTiers=[{tierKey, typicalLowUsd?, medianUsd?, typicalHighUsd?}] when the market has shifted. " +
           "ACQUISITIONS: for each queued utility, locate its OFFICIAL current tariff (utility website or state commission filing), extract the default residential and small-commercial rates (fixed monthly charge + all-in volumetric energy rate including riders/adjustors where published), and POST under acquisitions[] with queueId, status=acquired, rates[], sourceUrl, evidence. Use status=failed with evidence if no official source can be found.",
       });
       return;

@@ -2,7 +2,7 @@
  * TERR + TELX specs — service-territory resolution, tariff partitioning,
  * and the cron-facing telecom expiry sweep.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { partitionByTerritory, resolveTerritory } from "./serviceTerritory";
 import { checkTelecomExpiries } from "./telecom";
 import { getDb } from "./db";
@@ -188,5 +188,16 @@ describe("checkTelecomExpiries (TELX-2)", () => {
   it("horizon is respected: a 5-day window excludes the 10-day promo", async () => {
     const out = await checkTelecomExpiries(NOW, 5);
     expect(out.filter((e) => e.userId === userId)).toHaveLength(0);
+  });
+
+  afterAll(async () => {
+    // Fixture hygiene: this suite previously leaked TestISP/TestCarrier/
+    // TestTV/TestLandline rows into the shared dev DB on every run, which
+    // polluted telecom.test.ts spend totals. Always sweep.
+    const db = await getDb();
+    if (!db) return;
+    await db.delete(telecomServices).where(eq(telecomServices.userId, userId));
+    await db.delete(sites).where(eq(sites.id, siteId));
+    await db.delete(users).where(eq(users.id, userId));
   });
 });

@@ -31,8 +31,17 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "./db";
-import { rateSources, rateVerifications, tariffs, type RateSourceRow } from "../drizzle/schema";
+import { rateSources, rateVerifications, tariffs, telecomBenchmarks, type RateSourceRow } from "../drizzle/schema";
 import { configNumber } from "./seedLifecycle";
+
+/* TEL1C-2: benchmark sources govern telecom_benchmarks tiers instead of
+ * tariff rows. Tier keys share the governsUrdbIds JSON column with a stable
+ * prefix so no second column is needed and every existing consumer that
+ * treats the list as opaque keys keeps working. */
+const TIER_PREFIX = "tier:";
+export const tierIdsOf = (govern: string[]): string[] =>
+  govern.filter((g) => g.startsWith(TIER_PREFIX)).map((g) => g.slice(TIER_PREFIX.length));
+export const urdbIdsOf = (govern: string[]): string[] => govern.filter((g) => !g.startsWith(TIER_PREFIX));
 
 const DAY_MS = 86_400_000;
 
@@ -43,7 +52,7 @@ const DAY_MS = 86_400_000;
 export interface RateSourceSeed {
   sourceKey: string;
   utilityName: string;
-  commodity: "electric" | "gas" | "water";
+  commodity: "electric" | "gas" | "water" | "telecom";
   state: string;
   sourceUrl: string;
   sourceLabel: string;
@@ -53,8 +62,14 @@ export interface RateSourceSeed {
   /** NAT-7: 'tariff' sources govern seeded rate rows; 'docket' sources track
    * pending rate cases at the commission — a fingerprint change means the
    * regulatory docket moved (new filing/order), giving ADVANCE notice of
-   * rate changes before they take effect. Dockets govern no tariff rows. */
-  sourceKind?: "tariff" | "docket";
+   * rate changes before they take effect. Dockets govern no tariff rows.
+   * TEL1C-2: 'benchmark' sources govern telecom_benchmarks tiers (via
+   * governsTierKeys) instead of tariff rows — same sweep, same escalation. */
+  sourceKind?: "tariff" | "docket" | "benchmark";
+  /** TEL1C-2: telecom benchmark tierKeys this source underpins. A fingerprint
+   * change or staleness flips these rows' verifyStatus, which surfaces as a
+   * disclosure on every finding that cites them. */
+  governsTierKeys?: string[];
 }
 
 /** Registry of official sources for every hand-modeled (filed) tariff row.
@@ -191,6 +206,91 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     verifyCadenceDays: 45,
     sourceKind: "docket",
   },
+  /* ---- TEL1C-2 telecom benchmark sources (govern telecom_benchmarks tiers,
+   * not tariff rows). Reachability verified Jul 2026:
+   *  - fcc.gov 000s and most carrier pages 403 server-side fetches — those are
+   *    AGENT-ONLY sources (monthly browser-based verification, like SRP);
+   *  - verizon.com, att.com, visible.com, starlink.com serve 200 to browser-
+   *    header fetches — they join the weekly fingerprint sweep. */
+  {
+    sourceKey: "telecom-fcc-urs",
+    utilityName: "FCC Urban Rate Survey",
+    commodity: "telecom",
+    state: "US",
+    // fcc.gov blocks datacenter fetches (connection reset) — monthly AGENT
+    // verification with a real browser covers this source; weekly sweep
+    // failures are expected and tolerated (consecutiveFailures grows,
+    // agent priority rises).
+    sourceUrl: "https://www.fcc.gov/economics-analytics/industry-analysis-division/urban-rate-survey-data-resources",
+    sourceLabel: "FCC Urban Rate Survey (fixed broadband + voice, annual)",
+    governsUrdbIds: [],
+    governsTierKeys: [
+      "internet_res_under_100",
+      "internet_res_100_300",
+      "internet_res_300_600",
+      "internet_res_600_1000",
+      "internet_res_gigabit_plus",
+      "phone_landline_standard",
+    ],
+    adjustorCycle: "annual",
+    verifyCadenceDays: 180,
+    sourceKind: "benchmark",
+  },
+  {
+    sourceKey: "telecom-verizon-home",
+    utilityName: "Verizon (home internet)",
+    commodity: "telecom",
+    state: "US",
+    sourceUrl: "https://www.verizon.com/home/internet/",
+    sourceLabel: "Verizon home internet published pricing (Fios + 5G Home)",
+    governsUrdbIds: [],
+    governsTierKeys: ["internet_res_100_300", "internet_res_300_600", "internet_res_gigabit_plus"],
+    adjustorCycle: "none",
+    verifyCadenceDays: 90,
+    sourceKind: "benchmark",
+  },
+  {
+    sourceKey: "telecom-att-fiber",
+    utilityName: "AT&T (fiber internet)",
+    commodity: "telecom",
+    state: "US",
+    sourceUrl: "https://www.att.com/internet/fiber/",
+    sourceLabel: "AT&T Fiber published pricing",
+    governsUrdbIds: [],
+    governsTierKeys: ["internet_res_300_600", "internet_res_600_1000", "internet_res_gigabit_plus", "internet_biz_under_500", "internet_biz_500_plus"],
+    adjustorCycle: "none",
+    verifyCadenceDays: 90,
+    sourceKind: "benchmark",
+  },
+  {
+    sourceKey: "telecom-visible-mobile",
+    utilityName: "Visible by Verizon (MVNO)",
+    commodity: "telecom",
+    state: "US",
+    sourceUrl: "https://www.visible.com/plans",
+    sourceLabel: "Visible published MVNO plan pricing",
+    governsUrdbIds: [],
+    governsTierKeys: ["mobile_unlimited_prepaid_mvno"],
+    adjustorCycle: "none",
+    verifyCadenceDays: 90,
+    sourceKind: "benchmark",
+  },
+  {
+    sourceKey: "telecom-carrier-postpaid",
+    utilityName: "Major-carrier postpaid pricing (T-Mobile/Verizon/AT&T)",
+    commodity: "telecom",
+    state: "US",
+    // Carrier plan pages 403 server-side fetches — AGENT-ONLY source, same
+    // treatment as SRP/Tucson Water. The URL is the canonical target the
+    // monthly agent opens in a real browser.
+    sourceUrl: "https://www.t-mobile.com/cell-phone-plans",
+    sourceLabel: "Major-carrier unlimited postpaid published pricing (agent-verified)",
+    governsUrdbIds: [],
+    governsTierKeys: ["mobile_unlimited_postpaid", "mobile_limited_data"],
+    adjustorCycle: "none",
+    verifyCadenceDays: 90,
+    sourceKind: "benchmark",
+  },
   {
     sourceKey: "docket-lge-ky-psc",
     utilityName: "Louisville Gas and Electric (LG&E)",
@@ -214,6 +314,8 @@ export async function registerRateSources(): Promise<{ inserted: number; updated
   let inserted = 0;
   let updated = 0;
   for (const s of RATE_SOURCE_SEEDS) {
+    // TEL1C-2: benchmark tier keys ride in the same governs list, prefixed.
+    const governs = [...s.governsUrdbIds, ...(s.governsTierKeys ?? []).map((k) => `${TIER_PREFIX}${k}`)];
     const existing = await db.select({ id: rateSources.id, sourceUrl: rateSources.sourceUrl }).from(rateSources).where(eq(rateSources.sourceKey, s.sourceKey)).limit(1);
     if (existing.length === 0) {
       await db.insert(rateSources).values({
@@ -223,7 +325,7 @@ export async function registerRateSources(): Promise<{ inserted: number; updated
         state: s.state,
         sourceUrl: s.sourceUrl,
         sourceLabel: s.sourceLabel,
-        governsUrdbIds: s.governsUrdbIds,
+        governsUrdbIds: governs,
         adjustorCycle: s.adjustorCycle,
         verifyCadenceDays: s.verifyCadenceDays,
         sourceKind: s.sourceKind ?? "tariff",
@@ -236,7 +338,7 @@ export async function registerRateSources(): Promise<{ inserted: number; updated
           utilityName: s.utilityName,
           sourceUrl: s.sourceUrl,
           sourceLabel: s.sourceLabel,
-          governsUrdbIds: s.governsUrdbIds,
+          governsUrdbIds: governs,
           adjustorCycle: s.adjustorCycle,
           verifyCadenceDays: s.verifyCadenceDays,
           sourceKind: s.sourceKind ?? "tariff",
@@ -368,11 +470,20 @@ export async function sweepRateSources(now = Date.now(), fetchImpl: typeof fetch
       if (changed) {
         result.changed.push(s.sourceKey);
         const govern = s.governsUrdbIds as string[];
-        if (govern.length > 0) {
+        const urdbIds = urdbIdsOf(govern);
+        const tierKeys = tierIdsOf(govern);
+        if (urdbIds.length > 0) {
           await db
             .update(tariffs)
             .set({ verifyStatus: "change_detected" })
-            .where(inArray(tariffs.urdbId, govern));
+            .where(inArray(tariffs.urdbId, urdbIds));
+        }
+        // TEL1C-2: benchmark sources escalate their governed telecom tiers.
+        if (tierKeys.length > 0) {
+          await db
+            .update(telecomBenchmarks)
+            .set({ verifyStatus: "change_detected" })
+            .where(inArray(telecomBenchmarks.tierKey, tierKeys));
         }
         await db.insert(rateVerifications).values({
           sourceKey: s.sourceKey,
@@ -395,11 +506,21 @@ export async function sweepRateSources(now = Date.now(), fetchImpl: typeof fetch
     if (s.changeDetectedAt == null && now - anchor > cadence * DAY_MS) {
       result.due.push(s.sourceKey);
       const gv = s.governsUrdbIds as string[];
-      if (gv.length > 0) {
+      const gvUrdb = urdbIdsOf(gv);
+      const gvTiers = tierIdsOf(gv);
+      if (gvUrdb.length > 0) {
         await db
           .update(tariffs)
           .set({ verifyStatus: "due" })
-          .where(and(inArray(tariffs.urdbId, gv), eq(tariffs.verifyStatus, "current")));
+          .where(and(inArray(tariffs.urdbId, gvUrdb), eq(tariffs.verifyStatus, "current")));
+      }
+      // TEL1C-2: stale benchmark sources flip their tiers to 'due' so telecom
+      // findings carry a currency disclosure until the agent re-verifies.
+      if (gvTiers.length > 0) {
+        await db
+          .update(telecomBenchmarks)
+          .set({ verifyStatus: "due" })
+          .where(and(inArray(telecomBenchmarks.tierKey, gvTiers), eq(telecomBenchmarks.verifyStatus, "current")));
       }
     }
   }
@@ -426,6 +547,16 @@ export interface VerifyTarget {
     fixedMonthly: number | null;
     energyRates: Array<{ label: string; ratePerUnit: number }>;
   }>;
+  /** TEL1C-2: telecom benchmark tiers this source governs — the agent
+   * verifies the published low/median/high against the live source and
+   * reports observedTiers. Empty for tariff/docket sources. */
+  benchmarkTiers?: Array<{
+    tierKey: string;
+    tierLabel: string;
+    typicalLowUsd: number;
+    medianUsd: number;
+    typicalHighUsd: number;
+  }>;
 }
 
 /** Prioritized verification targets for the monthly agent run.
@@ -449,15 +580,31 @@ export async function getVerifyTargets(now = Date.now()): Promise<VerifyTarget[]
     .slice(0, Math.max(1, Math.floor(cap)));
   const targets: VerifyTarget[] = [];
   for (const { s, priority } of scored) {
-    const rows = await db
-      .select({
-        urdbId: tariffs.urdbId,
-        name: tariffs.name,
-        sector: tariffs.sector,
-        structure: tariffs.structure,
-      })
-      .from(tariffs)
-      .where(inArray(tariffs.urdbId, s.governsUrdbIds as string[]));
+    const gvUrdb = urdbIdsOf(s.governsUrdbIds as string[]);
+    const gvTiers = tierIdsOf(s.governsUrdbIds as string[]);
+    const rows = gvUrdb.length
+      ? await db
+          .select({
+            urdbId: tariffs.urdbId,
+            name: tariffs.name,
+            sector: tariffs.sector,
+            structure: tariffs.structure,
+          })
+          .from(tariffs)
+          .where(inArray(tariffs.urdbId, gvUrdb))
+      : [];
+    const tierRows = gvTiers.length
+      ? await db
+          .select({
+            tierKey: telecomBenchmarks.tierKey,
+            tierLabel: telecomBenchmarks.tierLabel,
+            typicalLowUsd: telecomBenchmarks.typicalLowUsd,
+            medianUsd: telecomBenchmarks.medianUsd,
+            typicalHighUsd: telecomBenchmarks.typicalHighUsd,
+          })
+          .from(telecomBenchmarks)
+          .where(inArray(telecomBenchmarks.tierKey, gvTiers))
+      : [];
     targets.push({
       sourceKey: s.sourceKey,
       utilityName: s.utilityName,
@@ -477,6 +624,7 @@ export async function getVerifyTargets(now = Date.now()): Promise<VerifyTarget[]
           energyRates: (st.energy ?? []).map((e) => ({ label: e.label ?? "", ratePerUnit: e.ratePerUnit ?? 0 })),
         };
       }),
+      ...(tierRows.length > 0 ? { benchmarkTiers: tierRows } : {}),
     });
   }
   return targets;
@@ -491,6 +639,16 @@ export interface AgentFinding {
     fixedMonthly?: number;
     energyRates?: Array<{ label: string; ratePerUnit: number }>;
     effectiveDate?: string;
+    notes?: string;
+  }>;
+  /** TEL1C-2: for benchmark sources with status=changed — observed published
+   * price bands per governed tier. Applied with the same auto-apply band
+   * discipline as tariff adjustor deltas. */
+  observedTiers?: Array<{
+    tierKey: string;
+    typicalLowUsd?: number;
+    medianUsd?: number;
+    typicalHighUsd?: number;
     notes?: string;
   }>;
   newSourceUrl?: string;
@@ -516,17 +674,28 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
   if (!db) throw new Error("db unavailable");
   const src = (await db.select().from(rateSources).where(eq(rateSources.sourceKey, f.sourceKey)).limit(1))[0];
   if (!src) return { sourceKey: f.sourceKey, action: "failure_recorded", detail: "unknown sourceKey" };
-  const govern = src.governsUrdbIds as string[];
+  const governAll = src.governsUrdbIds as string[];
+  const govern = urdbIdsOf(governAll);
+  const governTiers = tierIdsOf(governAll);
 
   if (f.status === "confirmed") {
     await db
       .update(rateSources)
       .set({ lastVerifiedAt: now, changeDetectedAt: null, consecutiveFailures: 0 })
       .where(eq(rateSources.id, src.id));
-    await db
-      .update(tariffs)
-      .set({ verifyStatus: "current", lastVerifiedAt: now })
-      .where(inArray(tariffs.urdbId, govern));
+    if (govern.length > 0) {
+      await db
+        .update(tariffs)
+        .set({ verifyStatus: "current", lastVerifiedAt: now })
+        .where(inArray(tariffs.urdbId, govern));
+    }
+    // TEL1C-2: benchmark confirmation re-stamps governed telecom tiers.
+    if (governTiers.length > 0) {
+      await db
+        .update(telecomBenchmarks)
+        .set({ verifyStatus: "current", lastVerifiedAt: now })
+        .where(inArray(telecomBenchmarks.tierKey, governTiers));
+    }
     await db.insert(rateVerifications).values({
       sourceKey: f.sourceKey,
       checkedAt: now,
@@ -534,7 +703,11 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
       evidence: f.evidence.slice(0, 1024),
       method: "agent_verify",
     });
-    return { sourceKey: f.sourceKey, action: "verified", detail: `${govern.length} tariff row(s) re-verified against ${src.sourceLabel}` };
+    return {
+      sourceKey: f.sourceKey,
+      action: "verified",
+      detail: `${govern.length + governTiers.length} governed row(s) re-verified against ${src.sourceLabel}`,
+    };
   }
 
   if (f.status === "source_moved") {
@@ -543,7 +716,9 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
         .update(rateSources)
         .set({ sourceUrl: f.newSourceUrl, contentFingerprint: null, fingerprintAt: null, consecutiveFailures: 0 })
         .where(eq(rateSources.id, src.id));
-      await db.update(tariffs).set({ sourceUrl: f.newSourceUrl }).where(inArray(tariffs.urdbId, govern));
+      if (govern.length > 0) {
+        await db.update(tariffs).set({ sourceUrl: f.newSourceUrl }).where(inArray(tariffs.urdbId, govern));
+      }
     }
     await db.insert(rateVerifications).values({
       sourceKey: f.sourceKey,
@@ -572,9 +747,89 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
 
   // status === "changed"
   const capPct = await configNumber("rate.auto_apply_max_pct", 15);
+
+  /* TEL1C-2: benchmark-source changes update telecom_benchmarks tiers under
+   * the same auto-apply band. Benchmarks are market context (not filed
+   * rates), so within-band updates apply and re-stamp; out-of-band changes
+   * flag change_detected for owner review, same conservatism as tariffs. */
+  if (governTiers.length > 0 && (f.observedTiers?.length ?? 0) > 0) {
+    const tierRows = await db.select().from(telecomBenchmarks).where(inArray(telecomBenchmarks.tierKey, governTiers));
+    const byTier = new Map(tierRows.map((r) => [r.tierKey, r]));
+    let maxTierDeltaPct = 0;
+    const tierUpdates: Array<{ id: number; tierKey: string; set: Record<string, number>; desc: string }> = [];
+    for (const ot of f.observedTiers ?? []) {
+      const row = byTier.get(ot.tierKey);
+      if (!row) continue;
+      const set: Record<string, number> = {};
+      const descs: string[] = [];
+      const fields: Array<[keyof typeof ot & string, "typicalLowUsd" | "medianUsd" | "typicalHighUsd", number]> = [
+        ["typicalLowUsd", "typicalLowUsd", row.typicalLowUsd],
+        ["medianUsd", "medianUsd", row.medianUsd],
+        ["typicalHighUsd", "typicalHighUsd", row.typicalHighUsd],
+      ];
+      for (const [obsKey, col, cur] of fields) {
+        const obs = ot[obsKey] as number | undefined;
+        if (obs != null && obs > 0 && cur > 0 && obs !== cur) {
+          maxTierDeltaPct = Math.max(maxTierDeltaPct, (Math.abs(obs - cur) / cur) * 100);
+          set[col] = obs;
+          descs.push(`${col} ${cur} → ${obs}`);
+        }
+      }
+      if (descs.length > 0) tierUpdates.push({ id: row.id, tierKey: ot.tierKey, set, desc: descs.join(", ") });
+    }
+    if (tierUpdates.length > 0) {
+      const tierWithinBand = maxTierDeltaPct <= capPct;
+      for (const u of tierUpdates) {
+        if (tierWithinBand) {
+          await db
+            .update(telecomBenchmarks)
+            .set({ ...u.set, verifyStatus: "current", lastVerifiedAt: now })
+            .where(eq(telecomBenchmarks.id, u.id));
+        } else {
+          await db.update(telecomBenchmarks).set({ verifyStatus: "change_detected" }).where(eq(telecomBenchmarks.id, u.id));
+        }
+        await db.insert(rateVerifications).values({
+          sourceKey: f.sourceKey,
+          urdbId: `tier:${u.tierKey}`,
+          checkedAt: now,
+          status: "changed",
+          observed: f.observedTiers?.find((o) => o.tierKey === u.tierKey) ?? null,
+          applied: tierWithinBand,
+          evidence: `${u.desc} — ${f.evidence}`.slice(0, 1024),
+          method: "agent_verify",
+        });
+      }
+      // untouched governed tiers verified-current by the same check
+      if (tierWithinBand) {
+        await db
+          .update(telecomBenchmarks)
+          .set({ verifyStatus: "current", lastVerifiedAt: now })
+          .where(inArray(telecomBenchmarks.tierKey, governTiers));
+        await db
+          .update(rateSources)
+          .set({ lastVerifiedAt: now, changeDetectedAt: null, consecutiveFailures: 0 })
+          .where(eq(rateSources.id, src.id));
+        return {
+          sourceKey: f.sourceKey,
+          action: "auto_applied",
+          detail: `benchmark band update applied (max delta ${maxTierDeltaPct.toFixed(1)}% ≤ ${capPct}% cap): ${tierUpdates.map((u) => `${u.tierKey}: ${u.desc}`).join(" | ")}`,
+        };
+      }
+      await db
+        .update(rateSources)
+        .set({ changeDetectedAt: now, consecutiveFailures: 0 })
+        .where(eq(rateSources.id, src.id));
+      return {
+        sourceKey: f.sourceKey,
+        action: "flagged_for_review",
+        detail: `benchmark change beyond ${capPct}% cap (max delta ${maxTierDeltaPct.toFixed(1)}%) — observed bands recorded, tiers flagged change_detected`,
+      };
+    }
+  }
+
   const observed = f.observed ?? [];
   let maxDeltaPct = 0;
-  const rows = await db.select().from(tariffs).where(inArray(tariffs.urdbId, govern));
+  const rows = govern.length > 0 ? await db.select().from(tariffs).where(inArray(tariffs.urdbId, govern)) : [];
   const byUrdb = new Map(rows.map((r) => [r.urdbId ?? "", r]));
   const pendingUpdates: Array<{ id: number; structure: unknown; urdbId: string; deltaDesc: string }> = [];
   /** IMP-1: signed deltas captured for per-site impact projection */

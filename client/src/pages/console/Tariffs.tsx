@@ -246,6 +246,8 @@ function RateCurrencyPanel() {
           fingerprints each source document to detect republications, and a monthly verification agent re-reads the filed
           values. Imputed state-average rates are checked against live EIA data on the same weekly cycle. Docket-watch
           sources track pending rate cases at the commission, giving advance notice of filed-but-not-yet-effective changes.
+          Telecom benchmark sources (FCC survey + published carrier pricing) ride the same sweep — when published pricing
+          shifts, the affected benchmark tiers are flagged and every finding that cites them says so.
         </p>
         <Table>
           <TableHeader>
@@ -267,7 +269,15 @@ function RateCurrencyPanel() {
                   <p className="text-[10px] text-muted-foreground">{r.utilityName} · {r.commodity} · {r.state}</p>
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
-                  {r.sourceKind === "docket" ? <span className="text-sky-400">docket watch</span> : <>{r.governs} rate{r.governs === 1 ? "" : "s"}</>}
+                  {r.sourceKind === "docket" ? (
+                    <span className="text-sky-400">docket watch</span>
+                  ) : r.commodity === "telecom" ? (
+                    /* TEL1C-2: benchmark sources govern telecom benchmark TIERS,
+                       not filed tariffs — the label says which. */
+                    <span className="text-violet-400">{r.governs} benchmark tier{r.governs === 1 ? "" : "s"}</span>
+                  ) : (
+                    <>{r.governs} rate{r.governs === 1 ? "" : "s"}</>
+                  )}
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
                   {r.lastVerifiedAt ? `${new Date(r.lastVerifiedAt).toLocaleDateString()} (${r.ageDays}d ago)` : `seeded ${r.ageDays}d ago`}

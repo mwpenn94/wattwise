@@ -558,3 +558,15 @@
 - [x] GWD-2: Major gas LDC coverage — gasWaterDepth.ts seeds top-20 US gas LDCs (SoCalGas, PG&E, Nicor, Peoples, Atmos, CenterPoint, Washington Gas, PGW, NW Natural, Spire, Columbia OH/PA, …) into the acquisition queue for agent acquisition from official tariffs (idempotent dedupe by utility×state×commodity); honest EIA imputed rows remain meanwhile
 - [x] NSD-1: Tests — rateImpact.test.ts (usage ladder, impact math, zero-usage fallback, docket coverage diff/idempotency, gas queue idempotency); sweep tests given 30s timeouts
 - [x] NSD-2: Live validation — final sweep 14 sources changed:[] due:[]; latent governs-binding bug found + FIXED (14/24 placeholder governsUrdbIds re-bound to real tariff rows for APS/SRP/TEP/UNSE/SW Gas; tucsonwater source corrected to City of Phoenix Water Services with verified official URL; stable urdbIds stamped on G-5 + Phoenix water rows, SEED_VERSION 2026.07.9); full suite 515 passed | 8 skipped
+
+## Telecom as a first-class utility (owner Jul 23: "shouldn't be a dumb separate widget" — align features, UX, cascading identification with other utilities; update based on location, rates, all applicable items)
+- [x] TUX-1: Audit — telecom surfaced only via findings-gated Dashboard card, Portfolio rollup (service-gated), sidebar tab; zero presence with no services entered; costs never combined; benchmarks static
+- [x] TEL1C-1: Location-driven market resolution — telecom market context resolved by site location, mirroring territory resolution for electric/gas; MULTI-PROVIDER/MULTI-TECHNOLOGY model (owner Jul 23): a geography carries several access technologies at once (fiber/cable/DSL wired, fixed-wireless, satellite), each with its own price band and competitive effect — market context = technology mix available, not one provider per territory
+- [x] TEL1C-2: Benchmark currency — telecom benchmark sources (FCC Urban Rate Survey, published carrier pricing) registered in the rate-currency engine: fingerprint sweep + agent verification + staleness escalation, same as tariff sources
+- [x] TEL1C-3: Cascading identification — site add/wizard suggests telecom setup automatically (like meters/commodities), bill-OCR path already exists; auto-prompt from site data rather than manual-only entry
+- [x] TEL1C-4: Pipeline integration — telecom analysis runs in the same analysis flow; findings persisted/ranked with commodity opportunities; spend joins site cost totals
+- [x] TUX-2: Dashboard — telecom spend inline in the cost picture (all-services total, subscription-spend disclosure) + empty-state invite when no services entered
+- [x] TUX-3: Opportunities — telecom findings ranked inline in the unified Ranked opportunities list (in progress: sibling card merged, needs telecomFindings binding)
+- [x] TUX-4: Site detail — telecom services + spend summary inline on Sites page with manage link
+- [x] TUX-5: Portfolio — telecom in owner/entity subtotals (rollup exists; add empty-state invite + owner subtotal integration)
+- [x] TUX-6: Tests for merged surfaces + benchmark currency (server/telecomFirstClass.test.ts, 7 specs); full suite green (522 passed | 8 skipped, 69 files); checkpoint + deliver

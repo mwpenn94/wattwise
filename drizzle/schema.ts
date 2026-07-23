@@ -435,6 +435,11 @@ export const telecomBenchmarks = mysqlTable(
     /** verbatim disclosure basis */
     basis: varchar("basis", { length: 512 }).notNull(),
     sourceVersion: varchar("sourceVersion", { length: 32 }).notNull(),
+    /** TEL1C-2: benchmark currency — driven by the rate-currency engine's
+     * telecom benchmark sources (same sweep/escalation as filed tariffs).
+     * 'due'/'stale' rows surface a staleness disclosure on findings. */
+    verifyStatus: mysqlEnum("verifyStatus", ["current", "due", "change_detected", "stale"]).default("current").notNull(),
+    lastVerifiedAt: bigint("lastVerifiedAt", { mode: "number" }),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   (t) => [index("telecom_bench_type_idx").on(t.serviceType)],
@@ -1228,7 +1233,10 @@ export const rateSources = mysqlTable("rate_sources", {
   /** stable key, e.g. "lge-ky-electric", "unsg-az-gas" */
   sourceKey: varchar("sourceKey", { length: 96 }).notNull().unique(),
   utilityName: varchar("utilityName", { length: 255 }).notNull(),
-  commodity: mysqlEnum("commodity", ["electric", "gas", "water"]).notNull(),
+  /** TEL1C-2: 'telecom' joins the enum so telecom benchmark sources (FCC URS,
+   * published carrier pricing pages) live in the same registry — same weekly
+   * fingerprint sweep, agent verification, and staleness escalation. */
+  commodity: mysqlEnum("commodity", ["electric", "gas", "water", "telecom"]).notNull(),
   state: varchar("state", { length: 8 }).notNull(),
   /** official tariff document / rates page */
   sourceUrl: varchar("sourceUrl", { length: 512 }).notNull(),
@@ -1237,7 +1245,7 @@ export const rateSources = mysqlTable("rate_sources", {
   /** NAT-7 (Jul 22): "tariff" sources govern seeded rows; "docket" sources are
    * state-commission rate-case pages watched for pending (filed-but-not-yet-
    * effective) changes — they never mutate tariffs, only surface advance notice. */
-  sourceKind: mysqlEnum("sourceKind", ["tariff", "docket"]).default("tariff").notNull(),
+  sourceKind: mysqlEnum("sourceKind", ["tariff", "docket", "benchmark"]).default("tariff").notNull(),
   /** urdbIds of the seeded tariff rows this source governs (JSON string[]) */
   governsUrdbIds: json("governsUrdbIds").notNull(),
   /** none | quarterly_gsc | quarterly_pga | monthly_pga | annual — drives due-horizon scan */

@@ -77,11 +77,13 @@ import { deriveBillVerifiedRate } from "./billCalibration";
 import {
   analyzeTelecomServices,
   listAllTelecomServices,
+  addTelecomSetupInvite,
   listTelecomServices,
   loadBenchmarks,
   removeTelecomService,
   upsertTelecomService,
 } from "./telecom";
+import { resolveTelecomMarket } from "./telecomMarket";
 import { registerGeometryCacheDb } from "./geometryCacheDb";
 import { assessSeedFreshness, recordParseOutcome, recordUnknownTariff, sweepUnverifiedTariffs } from "./seedLifecycle";
 import { incentiveEconomics } from "./incentives";
@@ -522,6 +524,18 @@ export const appRouter = router({
         });
       }
       await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name, hypothetical: input.isHypothetical });
+      // TEL1C-3 cascading identification: telecom setup is SUGGESTED from site
+      // data at creation — same pattern as meters/commodities — instead of
+      // waiting for the user to discover the Telecom tab. Real (non-hypothetical)
+      // sites only; the insight names the plausible technology mix and is
+      // explicit that it is a market prior, not a serviceability check.
+      if (!input.isHypothetical) {
+        await addTelecomSetupInvite(id, {
+          city: input.city ?? createCascade.city.value,
+          state: input.state ?? createCascade.state.value,
+          zip: input.zip ?? createCascade.zip.value,
+        }).catch(() => undefined);
+      }
       return { id };
     }),
     /** Progressive participation (Jul 2026): start with NOTHING but a free-text
@@ -690,7 +704,17 @@ export const appRouter = router({
         // GAP-Q reveal moment: one address → candidate providers for all three
         // commodities. Candidates only — each carries its own honesty note.
         const utilityTriple = deriveUtilityTriple(cascade.state.value, cascade.city.value);
-        return { id, parse, assumptions, utilityTriple };
+        // TEL1C-3 cascading identification: telecom joins the reveal as the
+        // FOURTH utility class — resolved from the same address cascade, but
+        // as a technology MIX (multiple overlapping providers/technologies
+        // per geography), never a single-provider territory.
+        const telecomMarket = resolveTelecomMarket({ city: cascade.city.value, state: cascade.state.value, zip: cascade.zip.value });
+        // …and the setup invite lands as a persistent insight too (the toast is
+        // ephemeral; the insight survives until services are actually entered).
+        if (!input.prospective) {
+          await addTelecomSetupInvite(id, { city: cascade.city.value, state: cascade.state.value, zip: cascade.zip.value }).catch(() => undefined);
+        }
+        return { id, parse, assumptions, utilityTriple, telecomMarket };
       }),
     /** GAP-Q — the three-utilities reveal for an EXISTING site (viewer-scoped):
      * candidate electric/gas/water providers derived from its location. */
@@ -699,6 +723,9 @@ export const appRouter = router({
       return {
         triple: deriveUtilityTriple(site.state, site.city),
         knownElectric: site.utilityName ?? null,
+        // TEL1C-3: telecom market context rides the same reveal — the fourth
+        // utility class, expressed as a technology mix rather than a provider.
+        telecomMarket: resolveTelecomMarket({ city: site.city, state: site.state, zip: site.zip }),
         note: "Candidates derived from the site's location — confirm against actual bills. The electric provider on file (if any) always wins over the candidate.",
       };
     }),
@@ -1489,6 +1516,26 @@ export const appRouter = router({
               savingsHiUsd: telecomAnalysis.totalAnnualSavingsHi,
             }
           : null;
+        /* TUX-5 (owner Jul 23): telecom spend flows into the SAME rollup layers
+           as commodity spend — per-site rows, entity subtotals, and grand totals
+           — instead of living only in a separate card. Per-site annual telecom
+           spend is user-entered subscription dollars (×12 monthly), labeled as
+           its own field so the modeled-vs-actual bases never blend. */
+        const telecomBySite = new Map<number, { monthlyUsd: number; serviceCount: number }>();
+        for (const svc of telecomAnalysis?.services ?? []) {
+          const cur = telecomBySite.get(svc.siteId) ?? { monthlyUsd: 0, serviceCount: 0 };
+          cur.monthlyUsd += svc.monthlyCostUsd ?? 0;
+          cur.serviceCount += 1;
+          telecomBySite.set(svc.siteId, cur);
+        }
+        const siteRollupsWithTelecom = siteRollups.map((r) => {
+          const t = telecomBySite.get(r.siteId);
+          return {
+            ...r,
+            telecomServiceCount: t?.serviceCount ?? 0,
+            telecomAnnualUsd: t ? Math.round(t.monthlyUsd * 12) : null,
+          };
+        });
         // UNIT-1 (Jul 22): entity-level subtotals — the owner/organization layer
         // of the attribution hierarchy (meter → site → entity). Sites without an
         // entity roll up under "Unassigned" honestly; subtotals only appear when
@@ -1496,15 +1543,17 @@ export const appRouter = router({
         const entitySubtotals =
           allEntities.length > 0
             ? (() => {
-                const byEntity = new Map<number | null, { annualCostUsd: number; annualUsageKwh: number; siteCount: number; analyzedCount: number; openOpportunityUsd: number }>();
-                for (const r of siteRollups) {
+                const byEntity = new Map<number | null, { annualCostUsd: number; annualUsageKwh: number; siteCount: number; analyzedCount: number; openOpportunityUsd: number; telecomAnnualUsd: number }>();
+                for (const r of siteRollupsWithTelecom) {
                   const key = r.entityId ?? null;
-                  const cur = byEntity.get(key) ?? { annualCostUsd: 0, annualUsageKwh: 0, siteCount: 0, analyzedCount: 0, openOpportunityUsd: 0 };
+                  const cur = byEntity.get(key) ?? { annualCostUsd: 0, annualUsageKwh: 0, siteCount: 0, analyzedCount: 0, openOpportunityUsd: 0, telecomAnnualUsd: 0 };
                   cur.annualCostUsd += r.annualCostUsd ?? 0;
                   cur.annualUsageKwh += r.annualUsageKwh ?? 0;
                   cur.siteCount += 1;
                   cur.analyzedCount += r.analyzed ? 1 : 0;
                   cur.openOpportunityUsd += r.topOpportunityUsd ?? 0;
+                  // TUX-5: entity layer carries telecom too — user-entered dollars.
+                  cur.telecomAnnualUsd += r.telecomAnnualUsd ?? 0;
                   byEntity.set(key, cur);
                 }
                 return Array.from(byEntity.entries())
@@ -1516,6 +1565,7 @@ export const appRouter = router({
                     annualCostUsd: Math.round(v.annualCostUsd),
                     annualUsageKwh: Math.round(v.annualUsageKwh),
                     openOpportunityUsd: Math.round(v.openOpportunityUsd),
+                    telecomAnnualUsd: Math.round(v.telecomAnnualUsd),
                   }))
                   .sort((a, b) => b.annualCostUsd - a.annualCostUsd);
               })()
@@ -1530,7 +1580,7 @@ export const appRouter = router({
           .sort((a, b) => b.annualCostUsd - a.annualCostUsd);
         return {
           entities: allEntities,
-          sites: siteRollups,
+          sites: siteRollupsWithTelecom,
           utilityExposure,
           rateConfidence,
           telecom,
@@ -1547,7 +1597,15 @@ export const appRouter = router({
             sumOfSitePeaksKw: sum("peakKw"),
             verifiedSavingsUsd,
             portfolioLoadFactor,
-                        openOpportunityUsd: siteRollups.reduce((a, r) => a + (r.topOpportunityUsd ?? 0), 0),
+            openOpportunityUsd: siteRollups.reduce((a, r) => a + (r.topOpportunityUsd ?? 0), 0),
+            // TUX-5: all-services grand total — modeled utility cost + entered
+            // telecom subscription spend, each also available separately so the
+            // UI can label the two bases distinctly.
+            telecomAnnualUsd: telecom ? telecom.annualTotalUsd : null,
+            allServicesAnnualUsd:
+              sum("annualCostUsd") != null || telecom
+                ? (sum("annualCostUsd") ?? 0) + (telecom?.annualTotalUsd ?? 0)
+                : null,
           },
         };
       }),
