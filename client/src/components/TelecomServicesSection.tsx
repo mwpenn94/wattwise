@@ -37,9 +37,6 @@ import {
   Plus,
   Pencil,
   Trash2,
-  TrendingDown,
-  CalendarClock,
-  Gauge,
   Loader2,
   ScanLine,
 } from "lucide-react";
@@ -51,20 +48,6 @@ const TYPE_META: Record<ServiceType, { label: string; icon: typeof Wifi }> = {
   mobile: { label: "Mobile", icon: Smartphone },
   tv_bundle: { label: "TV bundle", icon: Tv },
   phone_landline: { label: "Landline", icon: Phone },
-};
-
-const KIND_META: Record<string, { label: string; icon: typeof TrendingDown }> = {
-  promo_expiry: { label: "Promo expiring", icon: CalendarClock },
-  market_delta: { label: "Above market", icon: TrendingDown },
-  right_size_speed: { label: "Right-size speed", icon: Gauge },
-  right_size_data: { label: "Right-size data", icon: Gauge },
-  contract_window: { label: "Contract window", icon: CalendarClock },
-};
-
-const CONF_CLASS: Record<string, string> = {
-  high: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
-  medium: "border-sky-500/40 bg-sky-500/10 text-sky-300",
-  low: "border-amber-500/40 bg-amber-500/10 text-amber-300",
 };
 
 interface FormState {
@@ -113,13 +96,10 @@ const dateMs = (s: string): number | null => {
 };
 const msToDate = (ms: number | null | undefined): string => (ms ? new Date(ms).toISOString().slice(0, 10) : "");
 
-export default function TelecomServicesSection({
-  siteId,
-  showFindings = true,
-}: {
-  siteId: number;
-  showFindings?: boolean;
-}) {
+/* HOL-3 (owner Jul 29): this section manages the service registry ONLY —
+   connectivity findings flow exclusively through the same Ranked
+   opportunities feed as electric/gas/water. No separate findings widget. */
+export default function TelecomServicesSection({ siteId }: { siteId: number }) {
   const services = trpc.telecom.list.useQuery({ siteId });
   const analysis = trpc.telecom.analyze.useQuery({ siteId });
   const utils = trpc.useUtils();
@@ -251,7 +231,6 @@ export default function TelecomServicesSection({
   };
 
   const a = analysis.data;
-  const findings = a?.findings ?? [];
   const savingsLabel = useMemo(() => {
     if (!a || a.totalAnnualSavingsHi <= 0) return null;
     return a.totalAnnualSavingsLo > 0 && a.totalAnnualSavingsLo !== a.totalAnnualSavingsHi
@@ -341,41 +320,6 @@ export default function TelecomServicesSection({
               <Plus className="mr-1 h-3 w-3" /> Add another service
             </Button>
           </div>
-        </div>
-      )}
-
-      {/* findings (compact) */}
-      {showFindings && findings.length > 0 && (
-        <div className="mt-2 space-y-1.5">
-          {findings.map((f, i) => {
-            const km = KIND_META[f.kind] ?? KIND_META.market_delta;
-            const KIcon = km.icon;
-            return (
-              <div key={`${f.serviceId}-${f.kind}-${i}`} className="rounded-md border border-border/60 px-3 py-2">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <KIcon className="h-3.5 w-3.5 text-emerald-400" />
-                  <span className="text-xs font-medium">{f.title}</span>
-                  <Badge variant="outline" className={`px-1.5 py-0 text-[10px] ${CONF_CLASS[f.confidence] ?? ""}`}>
-                    {f.confidence}
-                  </Badge>
-                  <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-muted-foreground">
-                    {km.label}
-                  </Badge>
-                  {f.estAnnualSavingsHi != null && f.estAnnualSavingsHi > 0 && (
-                    <span className="ml-auto text-xs font-semibold text-emerald-400">
-                      {f.estAnnualSavingsLo != null && f.estAnnualSavingsLo !== f.estAnnualSavingsHi
-                        ? `$${f.estAnnualSavingsLo.toLocaleString()}–$${f.estAnnualSavingsHi.toLocaleString()}/yr`
-                        : `~$${f.estAnnualSavingsHi.toLocaleString()}/yr`}
-                    </span>
-                  )}
-                </div>
-                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{f.body}</p>
-                {f.disclosures.length > 0 && (
-                  <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground/80">† {f.disclosures.join(" † ")}</p>
-                )}
-              </div>
-            );
-          })}
         </div>
       )}
 

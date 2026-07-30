@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { AlertTriangle, BadgeCheck, Building2, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Wifi, Zap } from "lucide-react";
+import { AlertTriangle, BadgeCheck, Building2, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -39,7 +39,6 @@ export default function Portfolio() {
   const rows = activeGroup ? allRows.filter((r) => activeGroup.siteIds.includes(r.siteId)) : allRows;
   const totals = portfolio.data?.totals;
   const rateConfidence = portfolio.data?.rateConfidence;
-  const telecom = portfolio.data?.telecom;
   const entitySubtotals = portfolio.data?.entitySubtotals ?? null;
 
   // §3i-2 exception-first ranking: dollar opportunity + anomaly severity.
@@ -116,7 +115,7 @@ export default function Portfolio() {
                       /* TUX-5: all-services line — modeled utility + entered telecom,
                          labeled distinctly so the two bases never blend. */
                       (totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd != null && ((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd ?? 0) > 0
-                        ? ` · +${fmtUsd((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd!)} telecom (entered) = ${fmtUsd((totals as { allServicesAnnualUsd?: number | null }).allServicesAnnualUsd ?? 0)} all services`
+                        ? ` · +${fmtUsd((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd!)} connectivity (entered) = ${fmtUsd((totals as { allServicesAnnualUsd?: number | null }).allServicesAnnualUsd ?? 0)} all services`
                         : ""
                     }`
                   : ""
@@ -147,10 +146,6 @@ export default function Portfolio() {
               with one-click calibrate links for each imputed site. */}
           <RateConfidenceCard rows={rows} rateConfidence={rateConfidence} />
 
-          {/* TELECOM — recurring connectivity spend rollup with findings link.
-              Renders only when the user has entered telecom services. */}
-          <TelecomRollupCard telecom={telecom} />
-
           {/* UNIT-1 (Jul 22): owner/entity subtotals — the organization layer of
               the attribution hierarchy (meter → site → entity). Renders only
               when the user actually uses entities. */}
@@ -172,7 +167,7 @@ export default function Portfolio() {
                         <th className="py-1.5 pr-3 font-medium">Owner</th>
                         <th className="py-1.5 pr-3 font-medium">Sites</th>
                         <th className="py-1.5 pr-3 font-medium">Annual cost (modeled)</th>
-                        <th className="py-1.5 pr-3 font-medium">Telecom (entered)</th>
+                        <th className="py-1.5 pr-3 font-medium">Connectivity (entered)</th>
                         <th className="py-1.5 pr-3 font-medium">Annual usage</th>
                         <th className="py-1.5 font-medium">Open opportunity</th>
                       </tr>
@@ -271,6 +266,7 @@ export default function Portfolio() {
                       <TableHead>Owner group</TableHead>
                       <TableHead className="text-right">Meters</TableHead>
                       <TableHead className="text-right">Annual cost</TableHead>
+                      <TableHead className="text-right">Connectivity</TableHead>
                       <TableHead className="text-right">Demand/CP $</TableHead>
                       <TableHead className="text-right">Peak kW</TableHead>
                       <TableHead className="text-right">Load factor</TableHead>
@@ -294,24 +290,36 @@ export default function Portfolio() {
                           <TableCell className="text-xs text-muted-foreground">{owner ? owner.name : "—"}</TableCell>
                           <TableCell className="text-right">{r.meterCount}</TableCell>
                           {r.analyzed ? (
+                            <TableCell className="text-right">
+                              <span className="inline-flex items-center gap-1.5">
+                                {r.rateTier != null && <ProvenanceBadge tier={r.rateTier as never} basis={r.rateBasis} />}
+                                {r.annualCostUsd != null ? fmtUsd(r.annualCostUsd) : "—"}
+                              </span>
+                            </TableCell>
+                          ) : (
+                            <TableCell className="text-right">
+                              <Badge variant="secondary" className="text-[10px]">
+                                not analyzed yet
+                              </Badge>
+                            </TableCell>
+                          )}
+                          {/* HOL-4: connectivity is a first-class column — entered
+                              subscription dollars, shown whether or not the site's
+                              metered analysis has run (it is bill-based, not modeled). */}
+                          <TableCell className="text-right">
+                            {(r as { telecomAnnualUsd?: number | null }).telecomAnnualUsd != null
+                              ? fmtUsd((r as { telecomAnnualUsd?: number | null }).telecomAnnualUsd!)
+                              : "—"}
+                          </TableCell>
+                          {r.analyzed ? (
                             <>
-                              <TableCell className="text-right">
-                                <span className="inline-flex items-center gap-1.5">
-                                  {r.rateTier != null && <ProvenanceBadge tier={r.rateTier as never} basis={r.rateBasis} />}
-                                  {r.annualCostUsd != null ? fmtUsd(r.annualCostUsd) : "—"}
-                                </span>
-                              </TableCell>
                               <TableCell className="text-right">{r.demandCostUsd != null ? fmtUsd(r.demandCostUsd) : "—"}</TableCell>
                               <TableCell className="text-right">{r.peakKw != null ? fmtNum(r.peakKw) : "—"}</TableCell>
                               <TableCell className="text-right">{r.loadFactor != null ? `${(r.loadFactor * 100).toFixed(0)}%` : "—"}</TableCell>
                               <TableCell className="text-right">{r.annualUsageKwh != null ? fmtNum(r.annualUsageKwh) : "—"}</TableCell>
                             </>
                           ) : (
-                            <TableCell colSpan={5} className="text-right">
-                              <Badge variant="secondary" className="text-[10px]">
-                                not analyzed yet
-                              </Badge>
-                            </TableCell>
+                            <TableCell colSpan={4} />
                           )}
                         </TableRow>
                       );
@@ -327,69 +335,6 @@ export default function Portfolio() {
         </>
       )}
     </div>
-  );
-}
-
-/** CONF-1 (Jul 21) — rate-confidence rollup card. Counts analyzed sites by
- * pricing tier and lists each imputed-rate site with a one-click calibrate
- * link (→ /app/upload?site=<id>, which preselects the site). Hides entirely
- * when nothing is analyzed yet — an empty confidence card would be noise. */
-function TelecomRollupCard({
-  telecom,
-}: {
-  telecom?: {
-    serviceCount: number;
-    monthlyTotalUsd: number;
-    annualTotalUsd: number;
-    findingCount: number;
-    savingsLoUsd: number;
-    savingsHiUsd: number;
-  } | null;
-}) {
-  const [, setLocation] = useLocation();
-  if (!telecom || telecom.serviceCount === 0) return null;
-  const savings =
-    telecom.savingsHiUsd > 0
-      ? telecom.savingsLoUsd > 0 && telecom.savingsLoUsd !== telecom.savingsHiUsd
-        ? `$${telecom.savingsLoUsd.toLocaleString()}–$${telecom.savingsHiUsd.toLocaleString()}/yr`
-        : `up to $${telecom.savingsHiUsd.toLocaleString()}/yr`
-      : null;
-  return (
-    <Card className="mt-4 border-border/70">
-      <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2 font-display text-base">
-          <Wifi className="h-4 w-4 text-primary" /> Telecom &amp; connectivity
-        </CardTitle>
-        <p className="text-xs text-muted-foreground">
-          Internet, mobile, TV, and landline across your portfolio — recurring subscription spend entered from bills,
-          checked against published national pricing.
-        </p>
-      </CardHeader>
-      <CardContent className="flex flex-wrap items-center gap-x-6 gap-y-2">
-        <div>
-          <p className="text-xs text-muted-foreground">Services</p>
-          <p className="font-display text-lg font-bold">{telecom.serviceCount}</p>
-        </div>
-        <div>
-          <p className="text-xs text-muted-foreground">Monthly spend</p>
-          <p className="font-display text-lg font-bold">${telecom.monthlyTotalUsd.toLocaleString()}</p>
-        </div>
-        <div>
-          <p className="text-xs text-muted-foreground">Annualized</p>
-          <p className="font-display text-lg font-bold">${telecom.annualTotalUsd.toLocaleString()}</p>
-        </div>
-        <div>
-          <p className="text-xs text-muted-foreground">Savings findings</p>
-          <p className="font-display text-lg font-bold">
-            {telecom.findingCount}
-            {savings ? <span className="ml-2 text-sm font-semibold text-emerald-400">{savings}</span> : null}
-          </p>
-        </div>
-        <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation("/app/explore")}>
-          Review telecom →
-        </Button>
-      </CardContent>
-    </Card>
   );
 }
 

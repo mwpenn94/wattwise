@@ -31,6 +31,10 @@ export interface InsightsPrintData {
   benchmark: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
   emissions: { annualCo2eLb?: number; subregion?: string; factorYear?: number; mapped?: boolean } | null;
   currentCost: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
+  /* HOL-6 (owner Jul 29): connectivity joins the report's cost picture like the
+     other utilities — entered subscription dollars with their own provenance
+     chip so modeled vs entered bases never blend. */
+  telecom?: { serviceCount: number; monthlyUsd: number; annualUsd: number } | null;
   baseline: { method?: string; rSquared?: number | null; cvrmse?: number | null; confidenceLabel?: string } | null;
   tariffComparisons: Array<{
     tariffName: string;
@@ -221,6 +225,16 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
       sub: cost ? `energy ${usd(cost.energy)} · demand ${usd(cost.demand)} · fixed ${usd(cost.fixed)}` : undefined,
       chip: data.baseline?.confidenceLabel ?? "Est.",
     },
+    ...(data.telecom && data.telecom.serviceCount > 0
+      ? [
+          {
+            label: "Connectivity",
+            value: `${usd(data.telecom.annualUsd)}/yr`,
+            sub: `${data.telecom.serviceCount} service${data.telecom.serviceCount !== 1 ? "s" : ""} · ${usd(data.telecom.monthlyUsd)}/mo${cost ? ` · all services ${usd(cost.total + data.telecom.annualUsd)}` : ""}`,
+            chip: "Entered",
+          },
+        ]
+      : []),
     {
       label: "Benchmark",
       value: data.benchmark?.percentileBand ? String(data.benchmark.percentileBand).split("(")[0].trim() : "—",
@@ -250,7 +264,7 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
 
       {/* KPI band */}
       <section className="break-inside-avoid mb-4">
-        <div className="grid grid-cols-5 gap-2">
+        <div className={`grid gap-2 ${kpis.length > 5 ? "grid-cols-6" : "grid-cols-5"}`}>
           {kpis.map((k) => (
             <div key={k.label} className="border border-neutral-300 rounded p-2">
               <div className="text-[9px] uppercase tracking-wide text-neutral-500">{k.label}</div>

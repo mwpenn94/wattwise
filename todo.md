@@ -577,3 +577,12 @@
 - [x] UNI-2: Inline telecom service management on Explore (add/edit/remove without leaving the page)
 - [x] UNI-3: Remove dedicated Telecom sidebar entry; keep /app/telecom as deep-link redirect
 - [x] UNI-4: Verify visually + full suite green (522 passed | 8 skipped, 68 files) + checkpoint
+
+## Holistic utility parity (owner Jul 29, follow-up 2)
+- [x] HOL-1: Connectivity row provenance parity — basis labels ("entered from bills" / "default assumption") and analyzed/not-analyzed badge semantics match electric/gas/water
+- [x] HOL-2: Connectivity row anatomy parity — same flat row layout and right-aligned control cluster as the other three rows (services expand inline beneath, like meter detail)
+- [x] HOL-3: Findings pathway parity — removed separate findings block from TelecomServicesSection; findings flow only through the Ranked opportunities feed (persisted + live fallback)
+- [x] HOL-4: Portfolio parity — TelecomRollupCard removed; Connectivity column added to Sites-in-view table; KPI sub-line + owner subtotals renamed to Connectivity
+- [x] HOL-5: Sites card parity — per-service connectivity chips identical to meter chips (Wifi lucide icon, same border/mono styling, no emoji)
+- [x] HOL-6: Reports/print parity — Connectivity KPI (Entered chip + all-services total) in printed Site Insights Report; telecom opportunities already flow via the shared opportunities list
+- [x] HOL-7: Verify visually (Explore/Sites/Portfolio full-page screenshots) + full suite green (522 passed | 8 skipped) + checkpoint

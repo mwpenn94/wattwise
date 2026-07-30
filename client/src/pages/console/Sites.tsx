@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Building2, Clock, FolderKanban, MoreVertical, Pencil, Plus, Trash2, Users, Zap } from "lucide-react";
+import { Building2, Clock, FolderKanban, MoreVertical, Pencil, Plus, Trash2, Users, Wifi, Zap } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -737,25 +737,30 @@ function MeterManager({ siteId }: { siteId: number }) {
   );
 }
 
-/** TUX-4 (owner Jul 23): telecom services line on each site card — connectivity
- * is part of the site's utility picture, same visual weight as meters. Shows
- * entered services + monthly subscription spend; quiet (renders nothing) when
- * no services exist so the card stays clean — the setup invite lives in the
- * insights feed, not here. */
+/** HOL-5 (owner Jul 29): connectivity services render as chips with the SAME
+ * anatomy as meter chips — same border/background/typography, lucide icon (no
+ * emoji), one chip per service, matching the meter registry line exactly.
+ * Quiet (renders nothing) when no services exist so the card stays clean —
+ * the setup invite lives in the insights feed, not here. */
 function SiteTelecom({ siteId }: { siteId: number }) {
   const services = trpc.telecom.list.useQuery({ siteId });
   if (!services.data || services.data.length === 0) return null;
   const monthly = services.data.reduce((s, x) => s + (x.monthlyCostUsd ?? 0), 0);
-  const kinds = Array.from(new Set(services.data.map((x) => x.serviceType.replace(/_/g, " "))));
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-      <span className="inline-flex items-center gap-1 rounded border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-        📶 {services.data.length} telecom · ${Math.round(monthly)}/mo
-      </span>
-      <span className="font-mono text-[10px] text-muted-foreground">{kinds.join(" · ")}</span>
-      <Link href="/app/explore" className="font-mono text-[10px] text-primary hover:underline">
-        manage →
-      </Link>
+    <div className="mt-2" onClick={(e) => e.stopPropagation()}>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {services.data.map((s) => (
+          <span key={s.id} className="inline-flex items-center gap-1 rounded border border-border bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+            <Wifi className="h-3 w-3 text-primary" /> {s.provider} · {s.serviceType.replace(/_/g, " ")} · ${Math.round(s.monthlyCostUsd ?? 0)}/mo
+          </span>
+        ))}
+        <Link href="/app/explore" className="font-mono text-[10px] text-primary hover:underline">
+          manage →
+        </Link>
+      </div>
+      <p className="mt-1 text-[10px] text-muted-foreground">
+        Connectivity: {services.data.length} service{services.data.length !== 1 ? "s" : ""} · ${Math.round(monthly)}/mo entered — bill-based, no meter.
+      </p>
     </div>
   );
 }

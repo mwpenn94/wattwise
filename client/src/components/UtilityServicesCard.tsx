@@ -12,7 +12,7 @@ import { trpc } from "@/lib/trpc";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { toast } from "sonner";
-import { ChevronDown, ChevronRight, Droplets, Flame, Wifi, Zap } from "lucide-react";
+import { Droplets, Flame, Wifi, Zap } from "lucide-react";
 import TelecomServicesSection from "@/components/TelecomServicesSection";
 
 const COMMODITIES = [
@@ -26,6 +26,7 @@ const BASIS_LABEL: Record<string, string> = {
   meter_evidence: "meter on site",
   equipment_evidence: "confirmed equipment",
   territory_imputed: "service-territory imputed",
+  services_entered: "entered from bills",
   default: "default assumption",
 };
 
@@ -37,7 +38,7 @@ export default function UtilityServicesCard({ siteId, readOnly }: { siteId: numb
   const telecom = trpc.telecom.analyze.useQuery({ siteId });
   const telecomCount = telecom.data?.services.length ?? 0;
   const [telecomOpen, setTelecomOpen] = useState(false);
-  const telecomExpanded = telecomOpen || telecomCount === 0;
+  const telecomExpanded = telecomOpen;
   const setServices = trpc.sites.setServices.useMutation({
     onSuccess: () => {
       utils.sites.services.invalidate({ siteId });
@@ -103,35 +104,61 @@ export default function UtilityServicesCard({ siteId, readOnly }: { siteId: numb
           );
         })}
 
-        {/* UNI: Connectivity — fourth utility row. Bill-entered subscription spend
-            (no meter); analyzed against published pricing, promo dates, and usage,
-            with findings ranked alongside the other utilities' opportunities. */}
+        {/* HOL (owner Jul 29): Connectivity — fourth utility row with the SAME
+            anatomy as electric/gas/water: icon + label + analyzed badge + basis
+            label + right-aligned control cluster. Its resolution ladder mirrors
+            the others': services entered → analyzed; none → default (not
+            analyzed, with the reason line below, same as a gas row without
+            evidence). The only anatomical difference is inherent to the
+            commodity — services are bill-entered rows rather than a meter, so
+            Manage expands the service registry inline where the other rows'
+            evidence lives in the meter registry. */}
         <div className="rounded-md border border-border/60 px-3 py-2">
-          <button
-            type="button"
-            className="flex w-full flex-wrap items-center gap-2 text-left"
-            onClick={() => setTelecomOpen((v) => !v)}
-            aria-expanded={telecomExpanded}
-          >
+          <div className="flex flex-wrap items-center gap-2">
             <Wifi className="h-4 w-4 text-muted-foreground" />
             <span className="text-sm font-medium">Connectivity</span>
-            {telecomCount > 0 ? (
-              <Badge variant="default" className="text-[10px]">analyzed</Badge>
-            ) : (
-              <Badge variant="secondary" className="text-[10px]">not tracked</Badge>
+            {telecom.data != null && (
+              <Badge variant={telecomCount > 0 ? "default" : "secondary"} className="text-[10px]">
+                {telecomCount > 0 ? "analyzed" : "not analyzed"}
+              </Badge>
             )}
-            <span className="text-[10px] text-muted-foreground">
-              {telecomCount > 0
-                ? `${telecomCount} service${telecomCount !== 1 ? "s" : ""} · $${Math.round(telecom.data?.monthlyTotalUsd ?? 0).toLocaleString()}/mo entered`
-                : "internet · mobile · TV · landline (bill-entered, no meter)"}
-            </span>
-            <span className="ml-auto text-muted-foreground">
-              {telecomExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-            </span>
-          </button>
+            {telecom.data != null && (
+              <span
+                className="text-[10px] text-muted-foreground"
+                title={
+                  telecomCount > 0
+                    ? `${telecomCount} service${telecomCount !== 1 ? "s" : ""} entered from bills — $${Math.round(telecom.data?.monthlyTotalUsd ?? 0).toLocaleString()}/mo, compared against published market pricing`
+                    : "No connectivity services entered — this commodity is bill-entered (no meter)"
+                }
+              >
+                {telecomCount > 0 ? BASIS_LABEL.services_entered : BASIS_LABEL.default}
+              </span>
+            )}
+            {!readOnly && (
+              <div className="ml-auto flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => setTelecomOpen((v) => !v)}
+                  aria-expanded={telecomExpanded}
+                  className={`rounded-full border px-2 py-0.5 text-[10px] transition-colors ${
+                    telecomExpanded
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                  }`}
+                >
+                  {telecomCount > 0 ? `Manage (${telecomCount})` : "Add service"}
+                </button>
+              </div>
+            )}
+          </div>
+          {telecom.data != null && telecomCount === 0 && (
+            <p className="w-full text-[10px] text-muted-foreground/80">
+              No connectivity services entered — internet, mobile, TV, or landline are bill-entered (no meter); add one to include it in analysis.
+            </p>
+          )}
           {telecomExpanded && (
             <div className="mt-2">
-              <TelecomServicesSection siteId={siteId} showFindings={false} />
+              <TelecomServicesSection siteId={siteId} />
             </div>
           )}
         </div>

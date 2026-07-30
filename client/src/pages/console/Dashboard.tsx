@@ -260,6 +260,14 @@ export default function Dashboard() {
           benchmark: benchmarkInsight,
           emissions: emissionsInsight,
           currentCost: costInsight,
+          /* HOL-6: connectivity joins the printed cost picture — persisted
+             summary totals win; live query covers pre-TEL1C-4 analyses. */
+          telecom: (() => {
+            const ts = summary?.telecomSpend ?? telecomSpendLive;
+            return ts != null && ts.serviceCount > 0
+              ? { serviceCount: ts.serviceCount, monthlyUsd: ts.monthlyUsd, annualUsd: ts.annualUsd }
+              : null;
+          })(),
           baseline: summary?.baseline ?? null,
           tariffComparisons: tariffInsight,
           chart: chartData,
