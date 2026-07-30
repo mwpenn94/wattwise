@@ -7,11 +7,13 @@
  * off-grid building turns electric off. "Auto" clears the override and
  * returns the commodity to evidence-based resolution.
  */
+import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { toast } from "sonner";
-import { Droplets, Flame, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, Droplets, Flame, Wifi, Zap } from "lucide-react";
+import TelecomServicesSection from "@/components/TelecomServicesSection";
 
 const COMMODITIES = [
   { key: "electric" as const, label: "Electric", icon: Zap },
@@ -30,6 +32,12 @@ const BASIS_LABEL: Record<string, string> = {
 export default function UtilityServicesCard({ siteId, readOnly }: { siteId: number; readOnly?: boolean }) {
   const utils = trpc.useUtils();
   const services = trpc.sites.services.useQuery({ siteId });
+  /* UNI (owner Jul 29): connectivity is the fourth utility on this card —
+     same surface, same weight as electric/gas/water, managed inline. */
+  const telecom = trpc.telecom.analyze.useQuery({ siteId });
+  const telecomCount = telecom.data?.services.length ?? 0;
+  const [telecomOpen, setTelecomOpen] = useState(false);
+  const telecomExpanded = telecomOpen || telecomCount === 0;
   const setServices = trpc.sites.setServices.useMutation({
     onSuccess: () => {
       utils.sites.services.invalidate({ siteId });
@@ -94,6 +102,39 @@ export default function UtilityServicesCard({ siteId, readOnly }: { siteId: numb
             </div>
           );
         })}
+
+        {/* UNI: Connectivity — fourth utility row. Bill-entered subscription spend
+            (no meter); analyzed against published pricing, promo dates, and usage,
+            with findings ranked alongside the other utilities' opportunities. */}
+        <div className="rounded-md border border-border/60 px-3 py-2">
+          <button
+            type="button"
+            className="flex w-full flex-wrap items-center gap-2 text-left"
+            onClick={() => setTelecomOpen((v) => !v)}
+            aria-expanded={telecomExpanded}
+          >
+            <Wifi className="h-4 w-4 text-muted-foreground" />
+            <span className="text-sm font-medium">Connectivity</span>
+            {telecomCount > 0 ? (
+              <Badge variant="default" className="text-[10px]">analyzed</Badge>
+            ) : (
+              <Badge variant="secondary" className="text-[10px]">not tracked</Badge>
+            )}
+            <span className="text-[10px] text-muted-foreground">
+              {telecomCount > 0
+                ? `${telecomCount} service${telecomCount !== 1 ? "s" : ""} · $${Math.round(telecom.data?.monthlyTotalUsd ?? 0).toLocaleString()}/mo entered`
+                : "internet · mobile · TV · landline (bill-entered, no meter)"}
+            </span>
+            <span className="ml-auto text-muted-foreground">
+              {telecomExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            </span>
+          </button>
+          {telecomExpanded && (
+            <div className="mt-2">
+              <TelecomServicesSection siteId={siteId} showFindings={false} />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

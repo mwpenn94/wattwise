@@ -884,7 +884,7 @@ export default function Dashboard() {
                           <span className="text-foreground sm:col-span-2">
                             all services {fmtUsd(costInsight.breakdown.total + ts.annualUsd)}/yr
                           </span>
-                          <Link href="/app/telecom" className="text-primary hover:underline">
+                          <Link href="/app/explore" className="text-primary hover:underline">
                             manage →
                           </Link>
                         </div>
@@ -898,7 +898,7 @@ export default function Dashboard() {
                   <div className="mt-2 border-t border-dashed border-border pt-2">
                     <p className="text-[11px] leading-relaxed text-muted-foreground">
                       Connectivity is a utility too —{" "}
-                      <Link href="/app/telecom" className="text-primary hover:underline">
+                      <Link href="/app/explore" className="text-primary hover:underline">
                         add internet/mobile services
                       </Link>{" "}
                       to include subscription spend in this cost picture and get plan-vs-market findings.
@@ -1140,7 +1140,7 @@ export default function Dashboard() {
                       ? {
                           label: "Review service",
                           onClick: () => {
-                            window.location.href = `/app/telecom`;
+                            window.location.href = `/app/explore`;
                           },
                         }
                       : {
@@ -1188,7 +1188,7 @@ export default function Dashboard() {
                   action={{
                     label: "Review service",
                     onClick: () => {
-                      window.location.href = `/app/telecom`;
+                      window.location.href = `/app/explore`;
                     },
                   }}
                   provenance={[

@@ -570,3 +570,10 @@
 - [x] TUX-4: Site detail — telecom services + spend summary inline on Sites page with manage link
 - [x] TUX-5: Portfolio — telecom in owner/entity subtotals (rollup exists; add empty-state invite + owner subtotal integration)
 - [x] TUX-6: Tests for merged surfaces + benchmark currency (server/telecomFirstClass.test.ts, 7 specs); full suite green (522 passed | 8 skipped, 69 files); checkpoint + deliver
+
+## Print + telecom unification (owner Jul 29)
+- [x] PRT-1: Suppress browser print header/footer (Meterly title + URL) via @page/@media print CSS
+- [x] UNI-1: Telecom as 4th utility row in "Utility services on this site" on Explore (same visual weight as Electric/Gas/Water)
+- [x] UNI-2: Inline telecom service management on Explore (add/edit/remove without leaving the page)
+- [x] UNI-3: Remove dedicated Telecom sidebar entry; keep /app/telecom as deep-link redirect
+- [x] UNI-4: Verify visually + full suite green (522 passed | 8 skipped, 68 files) + checkpoint

@@ -753,7 +753,7 @@ function SiteTelecom({ siteId }: { siteId: number }) {
         📶 {services.data.length} telecom · ${Math.round(monthly)}/mo
       </span>
       <span className="font-mono text-[10px] text-muted-foreground">{kinds.join(" · ")}</span>
-      <Link href="/app/telecom" className="font-mono text-[10px] text-primary hover:underline">
+      <Link href="/app/explore" className="font-mono text-[10px] text-primary hover:underline">
         manage →
       </Link>
     </div>

@@ -189,13 +189,18 @@
  * render as clean paginated documents.
  * ------------------------------------------------------------------------- */
 @media print {
+  /* Zero page margin removes the browser's built-in header (title) and
+     footer (URL/date) from the printed output. Body padding restores
+     readable content inset without the chrome. */
   @page {
-    margin: 14mm 12mm;
+    margin: 0;
   }
   html,
   body {
     background: #fff !important;
     color: #000 !important;
+    margin: 0 !important;
+    padding: 14mm 12mm !important;
   }
   .print-report,
   .print-report * {

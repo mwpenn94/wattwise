@@ -385,7 +385,7 @@ function TelecomRollupCard({
             {savings ? <span className="ml-2 text-sm font-semibold text-emerald-400">{savings}</span> : null}
           </p>
         </div>
-        <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation("/app/telecom")}>
+        <Button variant="outline" size="sm" className="ml-auto" onClick={() => setLocation("/app/explore")}>
           Review telecom →
         </Button>
       </CardContent>
