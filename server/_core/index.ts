@@ -10,6 +10,7 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { digestHandler, refreshReferenceHandler } from "../scheduledHandlers";
 import { rateVerifyHandler } from "../rateVerifyHandler";
+import { stripeWebhookHandler } from "../stripeBilling";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -33,6 +34,9 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 async function startServer() {
   const app = express();
   const server = createServer(app);
+  // Stripe signatures cover the exact raw bytes; this route must precede the
+  // global JSON parser and stays setup-blocked until test-mode secrets exist.
+  app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));

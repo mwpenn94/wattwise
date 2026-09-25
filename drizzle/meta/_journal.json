@@ -155,6 +155,20 @@
       "when": 1784756085868,
       "tag": "0021_sweet_bloodstorm",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "5",
+      "when": 1790342420423,
+      "tag": "0022_military_white_tiger",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "5",
+      "when": 1790342782363,
+      "tag": "0023_unknown_risque",
+      "breakpoints": true
     }
   ]
 }

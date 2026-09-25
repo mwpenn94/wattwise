@@ -413,6 +413,26 @@ export const telecomServices = mysqlTable(
 export type TelecomService = typeof telecomServices.$inferSelect;
 export type InsertTelecomService = typeof telecomServices.$inferInsert;
 
+/** Historical telecom bill observations. Current service cost remains the
+ * latest entered value; this table preserves periods for honest trend checks. */
+export const telecomPriceHistory = mysqlTable(
+  "telecom_price_history",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    serviceId: int("serviceId").notNull(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    periodStart: bigint("periodStart", { mode: "number" }).notNull(),
+    periodEnd: bigint("periodEnd", { mode: "number" }).notNull(),
+    billedUsd: double("billedUsd").notNull(),
+    normalizedMonthlyUsd: double("normalizedMonthlyUsd").notNull(),
+    source: mysqlEnum("source", ["entered_bill", "ocr_confirmed", "manual"]).default("manual").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("telecom_price_period_unique").on(t.serviceId, t.periodStart, t.periodEnd), index("telecom_price_user_idx").on(t.userId, t.serviceId)],
+);
+export type TelecomPriceHistory = typeof telecomPriceHistory.$inferSelect;
+
 /** 6c. telecom_benchmarks — seeded national published-rate catalog (FCC Urban
  * Rate Survey + published carrier/ISP pricing). Code-reviewed seed like
  * STATE_PROFILES; refreshed deliberately, never silently mutated. */
@@ -1317,3 +1337,58 @@ export const rateAcquisitionQueue = mysqlTable(
   (t) => [index("raq_utility_idx").on(t.utilityName, t.state, t.commodity)],
 );
 export type RateAcquisitionRow = typeof rateAcquisitionQueue.$inferSelect;
+
+/** Billing mirror for account-level subscriptions. Stripe IDs are nullable so
+ * Founding/Free accounts work without a provider account or payment method. */
+export const billingAccounts = mysqlTable(
+  "billing_accounts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull().unique(),
+    plan: varchar("plan", { length: 32 }).default("free").notNull(),
+    entitlementTier: mysqlEnum("entitlementTier", ["free", "plus", "pro"]).default("free").notNull(),
+    status: varchar("status", { length: 32 }).default("active").notNull(),
+    stripeCustomerId: varchar("stripeCustomerId", { length: 128 }),
+    stripeSubscriptionId: varchar("stripeSubscriptionId", { length: 128 }),
+    stripePriceId: varchar("stripePriceId", { length: 128 }),
+    currentPeriodEnd: bigint("currentPeriodEnd", { mode: "number" }),
+    cancelAtPeriodEnd: boolean("cancelAtPeriodEnd").default(false).notNull(),
+    graceEndsAt: bigint("graceEndsAt", { mode: "number" }),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [index("billing_accounts_status_idx").on(t.status)],
+);
+export type BillingAccount = typeof billingAccounts.$inferSelect;
+
+/** Stripe event IDs are persisted before processing to make webhook retries
+ * harmless and tenant state transitions exactly-once at the app boundary. */
+export const billingWebhookEvents = mysqlTable(
+  "billing_webhook_events",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    eventId: varchar("eventId", { length: 128 }).notNull().unique(),
+    eventType: varchar("eventType", { length: 128 }).notNull(),
+    processedAt: bigint("processedAt", { mode: "number" }).notNull(),
+    status: varchar("status", { length: 32 }).default("processed").notNull(),
+    error: text("error"),
+  },
+  (t) => [index("billing_webhook_events_type_idx").on(t.eventType, t.processedAt)],
+);
+export type BillingWebhookEvent = typeof billingWebhookEvents.$inferSelect;
+
+export const billingAudit = mysqlTable(
+  "billing_audit",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    action: varchar("action", { length: 64 }).notNull(),
+    fromPlan: varchar("fromPlan", { length: 32 }),
+    toPlan: varchar("toPlan", { length: 32 }),
+    source: varchar("source", { length: 32 }).default("system").notNull(),
+    details: json("details"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [index("billing_audit_user_idx").on(t.userId, t.createdAt)],
+);
+export type BillingAuditRow = typeof billingAudit.$inferSelect;

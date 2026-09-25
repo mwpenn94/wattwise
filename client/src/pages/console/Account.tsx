@@ -25,17 +25,7 @@ const TIERS: Array<{ id: "free" | "plus" | "pro"; name: string; blurb: string }>
 export default function Account() {
   const { user } = useAuth();
   const usage = trpc.account.usage.useQuery();
-  const utils = trpc.useUtils();
-  // Gap-6: self-serve tier switching during beta — the pricing page used to
-  // say "Coming soon" while requireTier gates were already live server-side,
-  // leaving Plus/Pro features unreachable by anyone.
-  const setTier = trpc.account.setTier.useMutation({
-    onSuccess: async (r) => {
-      toast.success(`Plan changed to ${r.tier} (beta — no billing)`);
-      await utils.account.usage.invalidate();
-    },
-    onError: (e) => toast.error(e.message),
-  });
+  const billing = trpc.account.billing.useQuery();
   const exportData = trpc.account.exportData.useMutation({
     onSuccess: (data) => {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -63,14 +53,14 @@ export default function Account() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {usage.isLoading ? (
+            {billing.isLoading ? (
               <Skeleton className="h-8 w-24" />
             ) : (
               <>
-                <Badge className="font-mono uppercase">{usage.data?.tier ?? "free"}</Badge>
+                <Badge className="font-mono uppercase">{billing.data?.plan ?? usage.data?.tier ?? "free"}</Badge>
                 <div className="mt-3 space-y-2">
                   {TIERS.map((t) => {
-                    const current = (usage.data?.tier ?? "free") === t.id;
+                    const current = (billing.data?.entitlementTier ?? usage.data?.tier ?? "free") === t.id;
                     return (
                       <div
                         key={t.id}
@@ -83,23 +73,44 @@ export default function Account() {
                         <Button
                           size="sm"
                           variant={current ? "secondary" : "outline"}
-                          disabled={current || setTier.isPending}
-                          onClick={() => setTier.mutate({ tier: t.id })}
+                          disabled
                         >
-                          {current ? "Current" : "Switch"}
+                          {current ? "Current" : "Price to be set"}
                         </Button>
                       </div>
                     );
                   })}
                 </div>
                 <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
-                  Beta period: switching plans is free and collects no payment. Tier limits are enforced immediately and
-                  every change is recorded in your audit trail. Pricing applies when billing launches, with notice.
+                  {billing.data?.plan === "founding"
+                    ? "Founding access is no-charge and preserves your current full access until commercial pricing is decided."
+                    : billing.data?.setupMessage ?? "Plan limits are enforced server-side."}
                 </p>
               </>
             )}
             <p className="mt-3 text-xs text-muted-foreground">
               Signed in as <span className="font-mono">{user?.name ?? "—"}</span>
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border/70">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 font-display text-base">
+              <ShieldCheck className="h-4 w-4 text-primary" /> Billing
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm font-medium">
+              {billing.data?.stripeReady ? "Test billing is connected" : "Test billing setup required"}
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              {billing.data?.stripeReady
+                ? "Hosted Checkout and Customer Portal are available when plan prices are configured."
+                : "No live account is used. A Stripe test-mode account, webhook secret, and plan price IDs are required before checkout can be enabled."}
+            </p>
+            <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground">
+              Your data is never deleted when a plan changes. Downgrades preserve existing data and restrict only new work beyond plan limits.
             </p>
           </CardContent>
         </Card>

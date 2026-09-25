@@ -10,10 +10,13 @@
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { toast } from "sonner";
 import { Droplets, Flame, Wifi, Zap } from "lucide-react";
 import TelecomServicesSection from "@/components/TelecomServicesSection";
+import { useLocation } from "wouter";
 
 const COMMODITIES = [
   { key: "electric" as const, label: "Electric", icon: Zap },
@@ -38,6 +41,8 @@ export default function UtilityServicesCard({ siteId, readOnly }: { siteId: numb
   const telecom = trpc.telecom.analyze.useQuery({ siteId });
   const telecomCount = telecom.data?.services.length ?? 0;
   const [telecomOpen, setTelecomOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [, navigate] = useLocation();
   const telecomExpanded = telecomOpen;
   const setServices = trpc.sites.setServices.useMutation({
     onSuccess: () => {
@@ -49,8 +54,9 @@ export default function UtilityServicesCard({ siteId, readOnly }: { siteId: numb
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
-      <div className="mb-1 flex items-center justify-between">
+      <div className="mb-1 flex items-center justify-between gap-2">
         <p className="text-sm font-semibold">Utility services on this site</p>
+        {!readOnly && <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => setAddOpen(true)}>Add utility</Button>}
         {services.isLoading && <Spinner className="h-3.5 w-3.5" />}
       </div>
       <p className="mb-3 text-xs text-muted-foreground">
@@ -163,6 +169,28 @@ export default function UtilityServicesCard({ siteId, readOnly }: { siteId: numb
           )}
         </div>
       </div>
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader><DialogTitle>Add a utility</DialogTitle></DialogHeader>
+          <p className="text-xs text-muted-foreground">Choose the shared entry point. Metered utilities open bill or interval upload; Connectivity opens bill-entered service setup.</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {[
+              ["electric", "Electric"],
+              ["gas", "Natural gas"],
+              ["water", "Water"],
+              ["connectivity", "Connectivity"],
+            ].map(([key, label]) => (
+              <Button key={key} variant="outline" className="justify-start" onClick={() => {
+                setAddOpen(false);
+                if (key === "connectivity") setTelecomOpen(true);
+                else navigate(`/app/upload?site=${siteId}&commodity=${key}`);
+              }}>
+                {label}
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

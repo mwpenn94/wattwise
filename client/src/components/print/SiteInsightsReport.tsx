@@ -248,11 +248,25 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
   ];
   return (
     <div className="print-report max-w-[700px] mx-auto text-black text-[12px] leading-normal">
-      {/* header */}
+      {/* branded header — browser title/URL chrome is suppressed globally */}
       <header className="border-b-2 border-black pb-3 mb-4">
-        <div className="flex items-baseline justify-between">
-          <div className="text-[10px] uppercase tracking-[0.2em] text-neutral-500">Meterly · Site Insights Report</div>
-          <div className="text-[10px] text-neutral-500">{printed}</div>
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-amber-500 text-white" aria-hidden="true">
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2.4">
+                <path d="M4 17V7l4-2 4 2 4-2 4 2v10l-4 2-4-2-4 2-4-2Z" />
+                <path d="M8 9v6m4-4v6m4-8v6" />
+              </svg>
+            </span>
+            <div>
+              <div className="text-[12px] font-bold tracking-[0.12em]">METERLY</div>
+              <div className="text-[9px] uppercase tracking-[0.18em] text-neutral-500">Utility data intelligence</div>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.16em]">Site insights report</div>
+            <div className="text-[10px] text-neutral-500">Prepared {printed}</div>
+          </div>
         </div>
         <h1 className="text-[22px] font-bold mt-1">{data.site.name}</h1>
         <p className="text-[11px] text-neutral-600">

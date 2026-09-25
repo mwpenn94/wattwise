@@ -710,6 +710,7 @@ type PortfolioRow = {
   annualCostUsd: number | null;
   euiKwhPerSqft: number | null;
   euiBasis: string | null;
+  connectivityUsdPerSqft?: number | null;
   topOpportunityTitle: string | null;
   topOpportunityUsd: number | null;
   hasAnomaly: boolean;
@@ -812,6 +813,7 @@ function LeagueTable({ rows }: { rows: PortfolioRow[] }) {
                 <TableHead className="w-10">#</TableHead>
                 <TableHead>Site</TableHead>
                 <TableHead className="text-right">kWh/sqft/yr</TableHead>
+                <TableHead className="text-right">Connectivity $/sqft/yr</TableHead>
                 <TableHead className="text-right">vs best</TableHead>
                 <TableHead>Basis</TableHead>
               </TableRow>
@@ -830,6 +832,9 @@ function LeagueTable({ rows }: { rows: PortfolioRow[] }) {
                     </span>
                   </TableCell>
                   <TableCell className="text-right font-medium">{(r.euiKwhPerSqft ?? 0).toFixed(1)}</TableCell>
+                  <TableCell className="text-right font-medium">
+                    {r.connectivityUsdPerSqft != null ? `$${r.connectivityUsdPerSqft.toFixed(2)}` : "—"}
+                  </TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
                     {best != null && best > 0 ? `${((r.euiKwhPerSqft ?? 0) / best).toFixed(1)}×` : "—"}
                   </TableCell>

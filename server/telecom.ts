@@ -22,6 +22,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { getDb } from "./db";
 import { sites, telecomBenchmarks, telecomServices, type TelecomBenchmark, type TelecomService } from "../drizzle/schema";
 import { assertSiteOwner } from "./dbHelpers";
+import { detectPriceCreep, listTelecomPriceHistory, recordTelecomPriceObservation } from "./telecomPriceHistory";
 import {
   alternateTechnologies,
   marketPriceFactor,
@@ -67,6 +68,11 @@ export interface TelecomServiceInput {
   actualDataUsedGb?: number | null;
   actualDownloadNeedMbps?: number | null;
   notes?: string | null;
+  /** Optional bill period captured by the unified Add Utility flow. */
+  billPeriodStart?: number | null;
+  billPeriodEnd?: number | null;
+  billedUsd?: number | null;
+  billSource?: "entered_bill" | "ocr_confirmed" | "manual";
 }
 
 export async function upsertTelecomService(userId: number, input: TelecomServiceInput): Promise<number> {
@@ -102,10 +108,17 @@ export async function upsertTelecomService(userId: number, input: TelecomService
       .limit(1);
     if (existing.length === 0) throw new Error("Service not found");
     await db.update(telecomServices).set(row).where(eq(telecomServices.id, input.id));
+    if (input.billPeriodStart != null && input.billPeriodEnd != null && input.billedUsd != null) {
+      await recordTelecomPriceObservation(userId, { serviceId: input.id, periodStart: input.billPeriodStart, periodEnd: input.billPeriodEnd, billedUsd: input.billedUsd, source: input.billSource });
+    }
     return input.id;
   }
   const res = await db.insert(telecomServices).values(row);
-  return Number((res as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
+  const id = Number((res as unknown as [{ insertId: number }])[0]?.insertId ?? 0);
+  if (id > 0 && input.billPeriodStart != null && input.billPeriodEnd != null && input.billedUsd != null) {
+    await recordTelecomPriceObservation(userId, { serviceId: id, periodStart: input.billPeriodStart, periodEnd: input.billPeriodEnd, billedUsd: input.billedUsd, source: input.billSource });
+  }
+  return id;
 }
 
 export async function removeTelecomService(id: number, userId: number): Promise<void> {
@@ -234,7 +247,7 @@ function mvnoTier(catalog: TelecomBenchmark[]): TelecomBenchmark | null {
 export interface TelecomFinding {
   serviceId: number;
   serviceLabel: string;
-  kind: "promo_expiry" | "market_delta" | "right_size_speed" | "right_size_data" | "contract_window";
+  kind: "promo_expiry" | "market_delta" | "right_size_speed" | "right_size_data" | "contract_window" | "price_creep";
   title: string;
   body: string;
   /** annual $ savings range; null for pure action-window alerts */
@@ -281,6 +294,8 @@ export async function analyzeTelecomServices(
   const services = siteId != null ? await listTelecomServices(siteId, userId) : await listAllTelecomServices(userId);
   const catalog = await loadBenchmarks();
   const findings: TelecomFinding[] = [];
+  const priceHistories = new Map<number, Awaited<ReturnType<typeof listTelecomPriceHistory>>>();
+  for (const svc of services) priceHistories.set(svc.id, await listTelecomPriceHistory(svc.id, userId));
 
   /* TEL1C-1 (owner Jul 23): resolve the multi-technology market context from
    * each service's site location — same cascade discipline as electric/gas
@@ -309,6 +324,26 @@ export async function analyzeTelecomServices(
     const label = svcLabel(svc);
     const lines = svc.serviceType === "mobile" ? Math.max(1, svc.lines ?? 1) : 1;
     const perLineCost = svc.monthlyCostUsd / lines;
+
+    /* Month-over-month creep is based only on the user's own bill history.
+     * If the observed jump is the explicitly entered promo expiry, that
+     * existing finding owns the same dollars and we do not double-count it. */
+    const creep = detectPriceCreep(priceHistories.get(svc.id) ?? [], svc.id);
+    const latestObserved = (priceHistories.get(svc.id) ?? []).at(-1);
+    const overlapsPromo = svc.postPromoCostUsd != null && latestObserved != null && Math.abs(latestObserved.normalizedMonthlyUsd - svc.postPromoCostUsd) <= 1 && svc.promoEndsAt != null && latestObserved.periodEnd >= svc.promoEndsAt;
+    if (creep && !overlapsPromo) {
+      findings.push({
+        serviceId: svc.id,
+        serviceLabel: label,
+        kind: "price_creep",
+        title: `Month-over-month price creep on ${svc.provider}`,
+        body: `Your normalized monthly cost rose from $${creep.previousMonthlyUsd.toFixed(0)} to $${creep.latestMonthlyUsd.toFixed(0)} — an increase of $${creep.deltaMonthlyUsd.toFixed(0)}/mo (${Math.round(creep.deltaPct * 100)}%).${creep.sustained ? " The rise continued across three captured periods." : " Capture another bill to confirm whether the change persists."}`,
+        estAnnualSavingsLo: Math.round(creep.deltaMonthlyUsd * 12 * 0.5),
+        estAnnualSavingsHi: Math.round(creep.deltaMonthlyUsd * 12),
+        confidence: creep.sustained ? "high" : "medium",
+        disclosures: [creep.basis, "Based only on bills you entered or confirmed; it is not a carrier quote.", "This finding is suppressed when the same increase matches the explicitly entered promo-expiry price."]
+      });
+    }
 
     /* 1. Promo expiry — the user's own bill data, high confidence. */
     if (svc.promoEndsAt != null && svc.postPromoCostUsd != null && svc.postPromoCostUsd > svc.monthlyCostUsd) {

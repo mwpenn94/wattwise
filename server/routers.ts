@@ -74,6 +74,8 @@ import { placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
 import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { reconcileBill } from "./billReconciliation";
 import { deriveBillVerifiedRate } from "./billCalibration";
+import { checkoutSetupMessage, effectiveEntitlement, ensureBillingAccount, loadBillingAccount, stripeConfigured } from "./billing";
+import { createCustomerPortalSession, createHostedCheckoutSession } from "./stripeBilling";
 import {
   analyzeTelecomServices,
   listAllTelecomServices,
@@ -1534,6 +1536,7 @@ export const appRouter = router({
             ...r,
             telecomServiceCount: t?.serviceCount ?? 0,
             telecomAnnualUsd: t ? Math.round(t.monthlyUsd * 12) : null,
+            connectivityUsdPerSqft: t && r.sqft && r.sqft > 0 ? Math.round((t.monthlyUsd * 12 / r.sqft) * 100) / 100 : null,
           };
         });
         // UNIT-1 (Jul 22): entity-level subtotals — the owner/organization layer
@@ -3014,6 +3017,10 @@ export const appRouter = router({
           actualDataUsedGb: z.number().min(0).max(100000).nullish(),
           actualDownloadNeedMbps: z.number().positive().max(100000).nullish(),
           notes: z.string().max(512).nullish(),
+          billPeriodStart: z.number().int().positive().nullish(),
+          billPeriodEnd: z.number().int().positive().nullish(),
+          billedUsd: z.number().positive().max(100000).nullish(),
+          billSource: z.enum(["entered_bill", "ocr_confirmed", "manual"]).optional(),
         }),
       )
       .mutation(({ ctx, input }) => upsertTelecomService(ctx.user.id, input)),
@@ -3148,6 +3155,32 @@ export const appRouter = router({
     usage: protectedProcedure.query(async ({ ctx }) => {
       const llmSpend = await monthToDateLlmSpend(ctx.user.id);
       return { tier: tierOf(ctx.user), monthToDateLlmUsd: llmSpend };
+    }),
+    billing: protectedProcedure.query(async ({ ctx }) => {
+      const account = (await loadBillingAccount(ctx.user.id)) ?? (await ensureBillingAccount(ctx.user.id));
+      const entitlements = effectiveEntitlement(account);
+      return {
+        plan: account?.plan ?? "free",
+        status: account?.status ?? "active",
+        entitlementTier: entitlements.tier,
+        entitlements,
+        stripeReady: stripeConfigured(),
+        setupMessage: stripeConfigured() ? null : checkoutSetupMessage(),
+        currentPeriodEnd: account?.currentPeriodEnd ?? null,
+        cancelAtPeriodEnd: account?.cancelAtPeriodEnd ?? false,
+        graceEndsAt: account?.graceEndsAt ?? null,
+      };
+    }),
+    billingCheckout: protectedProcedure
+      .input(z.object({ plan: z.enum(["plus", "pro"]) }))
+      .mutation(async ({ ctx, input }) => {
+        if (!stripeConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: checkoutSetupMessage() });
+        return createHostedCheckoutSession({ userId: ctx.user.id, email: ctx.user.email, plan: input.plan });
+      }),
+    billingPortal: protectedProcedure.mutation(async ({ ctx }) => {
+      const account = await loadBillingAccount(ctx.user.id);
+      if (!account?.stripeCustomerId) throw new TRPCError({ code: "PRECONDITION_FAILED", message: checkoutSetupMessage() });
+      return createCustomerPortalSession(account.stripeCustomerId);
     }),
     /** Gap-6 (Jul 2026): self-serve tier switching during the beta — the
      *  pricing page previously showed dead "Coming soon" buttons for tiers
