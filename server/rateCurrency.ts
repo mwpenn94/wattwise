@@ -572,14 +572,21 @@ export async function getVerifyTargets(now = Date.now()): Promise<VerifyTarget[]
     .map((s) => {
       const ageDays = (now - (s.lastVerifiedAt ?? s.createdAt.getTime())) / DAY_MS;
       const cadence = effectiveCadenceDays(s);
-      let priority = ageDays / Math.max(cadence, 1); // 1.0 = exactly due
-      if (s.changeDetectedAt != null) priority += 10; // change trumps everything
-      return { s, priority };
+      const normalizedAge = ageDays / Math.max(cadence, 1); // 1.0 = exactly due
+      // Keep the documented ordering categorical. A finite numeric bonus can
+      // be overtaken by a sufficiently old source once the registry grows.
+      const priorityClass = s.changeDetectedAt != null ? 2 : normalizedAge >= 1 ? 1 : 0;
+      return { s, normalizedAge, priorityClass };
     })
-    .sort((a, b) => b.priority - a.priority)
+    .sort(
+      (a, b) =>
+        b.priorityClass - a.priorityClass ||
+        (b.s.changeDetectedAt ?? 0) - (a.s.changeDetectedAt ?? 0) ||
+        b.normalizedAge - a.normalizedAge,
+    )
     .slice(0, Math.max(1, Math.floor(cap)));
   const targets: VerifyTarget[] = [];
-  for (const { s, priority } of scored) {
+  for (const { s, normalizedAge, priorityClass } of scored) {
     const gvUrdb = urdbIdsOf(s.governsUrdbIds as string[]);
     const gvTiers = tierIdsOf(s.governsUrdbIds as string[]);
     const rows = gvUrdb.length
@@ -612,7 +619,7 @@ export async function getVerifyTargets(now = Date.now()): Promise<VerifyTarget[]
       state: s.state,
       sourceUrl: s.sourceUrl,
       sourceLabel: s.sourceLabel,
-      priority: Math.round(priority * 100) / 100,
+      priority: Math.round((priorityClass * 100 + normalizedAge) * 100) / 100,
       lastVerifiedAt: s.lastVerifiedAt,
       tariffRows: rows.map((r) => {
         const st = r.structure as { fixedMonthly?: number; energy?: Array<{ label?: string; ratePerUnit?: number }> };

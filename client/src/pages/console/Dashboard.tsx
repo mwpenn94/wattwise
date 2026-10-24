@@ -26,7 +26,7 @@ import { MarkImplementedDialog, ProveItSection } from "@/components/ProveIt";
 import RefineChips from "@/components/RefineChips";
 import SiteGeometryPanel from "@/components/SiteGeometryPanel";
 import UtilityServicesCard from "@/components/UtilityServicesCard";
-import { Link, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { Printer } from "lucide-react";
 import SiteInsightsReport, { type InsightsPrintData } from "@/components/print/SiteInsightsReport";
 import { ProvenanceBadge, classifyBasis } from "@/components/ProvenanceBadge";
@@ -50,10 +50,11 @@ const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export default function Dashboard() {
   const search = useSearch();
+  const [, navigate] = useLocation();
   const urlSite = new URLSearchParams(search).get("site");
   const sites = trpc.sites.list.useQuery();
-  const [siteSel, setSiteSel] = useState<string>("");
-  const activeSiteId = siteSel ? Number(siteSel) : urlSite ? Number(urlSite) : (sites.data?.[0]?.id ?? null);
+  const requestedSiteId = urlSite ? Number(urlSite) : null;
+  const activeSiteId = (requestedSiteId != null && sites.data?.some((s) => s.id === requestedSiteId) ? requestedSiteId : null) ?? (sites.data?.[0]?.id ?? null);
 
   const meters = trpc.sites.meters.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   // Commodity-aware meter selection: defaults to electric but every commodity
@@ -311,7 +312,13 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={setSiteSel}>
+          <Select
+            value={activeSiteId != null ? String(activeSiteId) : ""}
+            onValueChange={(value) => {
+              setMeterSel(null);
+              navigate(`/app/explore?site=${encodeURIComponent(value)}`);
+            }}
+          >
             <SelectTrigger className="w-52">
               <SelectValue placeholder="Site…" />
             </SelectTrigger>

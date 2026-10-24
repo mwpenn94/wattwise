@@ -25,14 +25,16 @@ import EnergyWrapped from "@/components/EnergyWrapped";
 import { MarkImplementedDialog, ProveItStatusChip } from "@/components/ProveIt";
 import QuickStart from "@/components/QuickStart";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Link, useLocation } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 
 export default function HomeFeed() {
   const { user } = useAuth();
   const [, navigate] = useLocation();
+  const search = useSearch();
   const sites = trpc.sites.list.useQuery();
-  const [siteSel, setSiteSel] = useState<string>("");
-  const activeSiteId = siteSel ? Number(siteSel) : (sites.data?.[0]?.id ?? null);
+  const requestedSiteId = new URLSearchParams(search).get("site");
+  const requestedId = requestedSiteId ? Number(requestedSiteId) : null;
+  const activeSiteId = (requestedId != null && sites.data?.some((s) => s.id === requestedId) ? requestedId : null) ?? (sites.data?.[0]?.id ?? null);
 
   const verified = trpc.proveIt.verifiedTotal.useQuery(undefined, { enabled: (sites.data ?? []).length > 0 });
   const impls = trpc.proveIt.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
@@ -146,7 +148,7 @@ export default function HomeFeed() {
         </div>
         <div className="flex items-center gap-2">
           {(sites.data ?? []).length > 1 && (
-            <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={setSiteSel}>
+            <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={(value) => navigate(`/app?site=${encodeURIComponent(value)}`)}>
               <SelectTrigger className="w-44">
                 <SelectValue placeholder="Site…" />
               </SelectTrigger>
