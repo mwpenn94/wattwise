@@ -19,9 +19,9 @@ import { ProvenanceBadge } from "@/components/ProvenanceBadge";
 export type InsightConfidence = "estimated" | "good" | "measured";
 
 const CHIP_STYLES: Record<InsightConfidence, string> = {
-  estimated: "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30",
-  good: "bg-sky-500/15 text-sky-600 dark:text-sky-400 border-sky-500/30",
-  measured: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30",
+  estimated: "bg-amber-500/15 text-amber-800 dark:text-amber-300 border-amber-500/30",
+  good: "bg-sky-500/15 text-sky-800 dark:text-sky-300 border-sky-500/30",
+  measured: "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300 border-emerald-500/30",
 };
 
 const CHIP_LABELS: Record<InsightConfidence, string> = {

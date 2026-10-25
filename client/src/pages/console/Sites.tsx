@@ -501,7 +501,9 @@ function SiteActions({ site }: { site: { id: number; name: string; address?: str
         });
       } else if (result.locationChanged) {
         toast.success("Site location updated", {
-          description: "Location-dependent figures will update on the next analysis. Re-resolve the footprint if this is a different building.",
+          description: result.reanalysisQueued
+            ? "Re-analyzing for the new address now — figures refresh on Explore in about a minute."
+            : "Location-dependent figures will update on the next analysis. Re-resolve the footprint if this is a different building.",
         });
       } else {
         toast.success("Site updated");
@@ -510,7 +512,7 @@ function SiteActions({ site }: { site: { id: number; name: string; address?: str
       await Promise.all([
         utils.sites.list.invalidate(),
         utils.sites.get.invalidate({ siteId: site.id }),
-        utils.sites.propertyRecords.invalidate({ siteId: site.id }),
+        utils.sites.propertyFacts.invalidate({ siteId: site.id }),
         utils.analysis.latest.invalidate({ siteId: site.id }),
         utils.insights.list.invalidate({ siteId: site.id }),
         utils.insights.opportunities.invalidate({ siteId: site.id }),

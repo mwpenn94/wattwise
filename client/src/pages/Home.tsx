@@ -1,4 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { formatSavingsRangeUsd } from "@shared/savingsRange";
 import { trpc } from "@/lib/trpc";
 import { startLogin } from "@/const";
@@ -110,7 +111,7 @@ export default function Home() {
   })();
 
   return (
-    <div className="min-h-screen bg-background text-foreground dark">
+    <div className="min-h-screen bg-background text-foreground">
       <div className="min-h-screen bg-background grid-texture">
         {/* nav */}
         <header className="border-b border-border/60">
@@ -148,6 +149,7 @@ export default function Home() {
                 {lang === "en" ? "ES" : "EN"}
                 <span className="hidden sm:inline">{lang === "en" ? " · Español" : " · English"}</span>
               </button>
+              <ThemeToggle />
               {isAuthenticated ? (
                 <Link href="/app">
                   <Button size="sm">

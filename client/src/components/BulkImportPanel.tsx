@@ -208,6 +208,7 @@ export function BulkImportPanel() {
     const phaseLabel: Record<string, string> = {
       importing: "Importing interval data",
       totals: "Building campus totals for multi-meter sites",
+      enriching: "Looking up public property records (floor area, parcel)",
       analyzing: "Running analysis on each site",
       done: "Done",
     };
@@ -241,8 +242,15 @@ export function BulkImportPanel() {
               <Stat label="Filed rates matched" value={`${sum.tariffsAssigned}`} hint={`${sum.campusTotals} campus totals · ${sum.analysesRun} analyses`} />
             </div>
           )}
+          {sum?.floorAreaEstimated != null && (
+            <p className="text-xs text-muted-foreground" data-testid="bulk-floor-area-note">
+              {sum.floorAreaEstimated > 0
+                ? `Floor area was filled in automatically for ${sum.floorAreaEstimated} of ${sum.siteIds.length} sites from public building records. It's always labeled as an estimate, and you can review or replace it on each site's Explore page.`
+                : "Public property records were checked for every site, but none gave a floor area safe to fill in automatically. Each site's Explore page shows what was found."}
+            </p>
+          )}
           {failed.length > 0 && (
-            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
               <p className="font-medium">Sheets whose interval transaction did not commit:</p>
               <ul className="mt-1 list-disc pl-4">
                 {failed.map((s) => (

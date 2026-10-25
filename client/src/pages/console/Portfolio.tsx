@@ -5,7 +5,7 @@
  * (null KPIs), not fabricated zeros; the peak column is explicitly labeled as
  * a NON-coincident sum of individual site peaks.
  */
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -49,26 +49,41 @@ export default function Portfolio() {
   const totals = portfolio.data?.totals;
   const rateConfidence = portfolio.data?.rateConfidence;
   const entitySubtotals = portfolio.data?.entitySubtotals ?? null;
+  // "All sites" follows the page's owner/group filter, so a district view
+  // prioritizes only that district's campuses.
+  const pageFiltered = filter !== "all" || activeGroup != null;
+  const inViewKey = rows.map((r) => r.siteId).join(",");
+  const inViewSiteIds = useMemo(() => (inViewKey ? inViewKey.split(",").map(Number) : []), [inViewKey]);
   const priorityQueryEnabled =
-    priorityScope === "all" ||
+    (priorityScope === "all" && (!pageFiltered || portfolio.data != null)) ||
     (priorityScope === "group" && priorityGroupId !== "") ||
     (priorityScope === "custom" && prioritySiteSelection.size > 0);
   const priorities = trpc.recommendations.portfolioPriorities.useQuery(
     {
       groupId: priorityScope === "group" && priorityGroupId !== "" ? Number(priorityGroupId) : null,
-      siteIds: priorityScope === "custom" && prioritySiteSelection.size > 0 ? Array.from(prioritySiteSelection) : null,
+      siteIds:
+        priorityScope === "custom" && prioritySiteSelection.size > 0
+          ? Array.from(prioritySiteSelection)
+          : priorityScope === "all" && pageFiltered
+            ? inViewSiteIds
+            : null,
     },
     { enabled: priorityQueryEnabled },
   );
   const priorityUtils = trpc.useUtils();
+  const refreshPriorities = () => Promise.all([
+    priorityUtils.recommendations.portfolioPriorities.invalidate(),
+    priorityUtils.recommendations.queue.invalidate(),
+    priorityUtils.entities.portfolio.invalidate(),
+  ]);
+  const undoPriority = trpc.recommendations.undo.useMutation({
+    onSuccess: async (r) => { await refreshPriorities(); toast.success(r.results.length === 1 ? "Change undone" : `${r.results.length} changes undone`); },
+    onError: (error) => toast.error(error.message),
+  });
   const changePriority = trpc.recommendations.setState.useMutation({
-    onSuccess: async () => {
-      await Promise.all([
-        priorityUtils.recommendations.portfolioPriorities.invalidate(),
-        priorityUtils.recommendations.queue.invalidate(),
-        priorityUtils.entities.portfolio.invalidate(),
-      ]);
-      toast.success("Recommendation updated");
+    onSuccess: async (_result, input) => {
+      await refreshPriorities();
+      toast.success("Recommendation updated", { duration: 10000, action: { label: "Undo", onClick: () => undoPriority.mutate({ items: [{ siteId: input.siteId, measure: input.measure }] }) } });
     },
     onError: (error) => toast.error(error.message),
   });
@@ -80,7 +95,7 @@ export default function Portfolio() {
         priorityUtils.recommendations.queue.invalidate(),
         priorityUtils.entities.portfolio.invalidate(),
       ]);
-      toast.success(`${input.items.length} recommendation${input.items.length === 1 ? "" : "s"} added to plan`);
+      toast.success(`${input.items.length} recommendation${input.items.length === 1 ? "" : "s"} added to plan`, { duration: 10000, action: { label: "Undo", onClick: () => undoPriority.mutate({ items: input.items.map((i) => ({ siteId: i.siteId, measure: i.measure })) }) } });
     },
     onError: (error) => toast.error(error.message),
   });
@@ -205,13 +220,16 @@ export default function Portfolio() {
                   </CardTitle>
                   <CardDescription>
                     Standalone before-change screening estimates. Prioritize actions across sites; combined savings are not modeled.
+                    {priorityScope === "all" && pageFiltered && (
+                      <> Scoped to the {inViewSiteIds.length} site{inViewSiteIds.length === 1 ? "" : "s"} shown by the filter above.</>
+                    )}
                   </CardDescription>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Select value={priorityScope} onValueChange={(value) => setPriorityScope(value as "all" | "group" | "custom")}>
                     <SelectTrigger className="w-36" aria-label="Priority scope"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="all">All sites</SelectItem>
+                      <SelectItem value="all">{pageFiltered ? "All sites in view" : "All sites"}</SelectItem>
                       <SelectItem value="group">Saved group</SelectItem>
                       <SelectItem value="custom">Custom sites</SelectItem>
                     </SelectContent>
@@ -230,7 +248,7 @@ export default function Portfolio() {
             <CardContent className="space-y-3">
               {priorityScope === "custom" && (
                 <div className="flex flex-wrap gap-x-4 gap-y-2 rounded-md border border-border/60 p-3 text-xs">
-                  {allRows.map((site) => (
+                  {rows.map((site) => (
                     <label key={site.siteId} className="flex cursor-pointer items-center gap-1.5">
                       <Checkbox
                         checked={prioritySiteSelection.has(site.siteId)}
@@ -254,7 +272,7 @@ export default function Portfolio() {
                   <div className="grid gap-2 rounded-md border border-border/60 bg-muted/30 p-3 text-xs sm:grid-cols-4">
                     <div><span className="font-medium">Progress</span><br />{priorities.data.progress.completed}/{priorities.data.progress.totalIdentified} complete ({priorities.data.progress.completionPct}%)</div>
                     <div><span className="text-muted-foreground">In plan</span><br />{priorities.data.progress.planned + priorities.data.progress.inProgress} actions</div>
-                    <div><span className="text-muted-foreground">Combined savings</span><br />Withheld — interactions unmodeled</div>
+                    <div><span className="text-muted-foreground">Combined savings</span><br /><span title="Measures overlap (for example, LED lighting lowers the savings from HVAC scheduling), so adding their ranges would overstate the total.">Not summed — measures overlap; see each range</span></div>
                     <div><span className="text-muted-foreground">Savings attribution</span><br />Inconclusive</div>
                   </div>
                   <p className="text-xs text-muted-foreground">{priorities.data.progress.savingsBasis}</p>
@@ -298,8 +316,8 @@ export default function Portfolio() {
                             return (
                               <TableRow key={key}>
                                 <TableCell><Checkbox checked={priorityItemSelection.has(key)} onCheckedChange={(checked) => setPriorityItemSelection((current) => { const next = new Set(current); if (checked === true) next.add(key); else next.delete(key); return next; })} /></TableCell>
-                                <TableCell><Link href={`/app/explore?site=${item.siteId}`} className="font-medium text-primary hover:underline">{item.siteName}</Link></TableCell>
-                                <TableCell><span>{item.title}</span><details className="mt-0.5 text-[10px] text-muted-foreground"><summary className="cursor-pointer">Basis and all disclosures</summary><p>{item.basis}</p></details></TableCell>
+                                <TableCell className="min-w-[10rem] max-w-[16rem] whitespace-normal"><Link href={`/app/explore?site=${item.siteId}`} className="font-medium text-primary hover:underline">{item.siteName}</Link></TableCell>
+                                <TableCell className="min-w-[14rem] max-w-[22rem] whitespace-normal"><span>{item.title}</span><details className="mt-0.5 text-[10px] text-muted-foreground"><summary className="cursor-pointer">Basis and all disclosures</summary><p>{item.basis}</p></details></TableCell>
                                 <TableCell className="text-right font-medium" title={item.basis}>{formatSavingsRangeUsd(item.savingsRangeUsd)}</TableCell>
                                 <TableCell className="text-xs">{item.paybackBandYears ?? "—"}</TableCell>
                                 <TableCell className="capitalize text-xs">{item.confidence}</TableCell>
@@ -891,10 +909,13 @@ type PortfolioRow = {
   climateZone: string | null;
   utilityName?: string | null;
   sqft: number | null;
+  /** Oct 24 property facts: public_record_estimate | as_entered | none */
+  sqftBasis?: string | null;
   analyzed: boolean;
   annualCostUsd: number | null;
   euiKwhPerSqft: number | null;
   euiBasis: string | null;
+  euiPlausibilityNote?: string | null;
   connectivityUsdPerSqft?: number | null;
   topOpportunityTitle: string | null;
   topOpportunityUsd: number | null;
@@ -1016,7 +1037,7 @@ function LeagueTable({ rows }: { rows: PortfolioRow[] }) {
                     </Link>
                     <span className="ml-2 text-xs text-muted-foreground">
                       {r.climateZone ? `zone ${r.climateZone}` : (r.state ?? "")}
-                      {r.sqft ? ` · ${fmtNum(r.sqft)} sqft` : ""}
+                      {r.sqft ? ` · ${r.sqftBasis === "public_record_estimate" ? "≈" : ""}${fmtNum(r.sqft)} sqft` : ""}
                     </span>
                   </TableCell>
                   <TableCell className="text-right font-medium">{(r.euiKwhPerSqft ?? 0).toFixed(1)}</TableCell>
@@ -1027,19 +1048,42 @@ function LeagueTable({ rows }: { rows: PortfolioRow[] }) {
                     {best != null && best > 0 ? `${((r.euiKwhPerSqft ?? 0) / best).toFixed(1)}×` : "—"}
                   </TableCell>
                   <TableCell>
-                    <Badge variant="outline" className="text-[10px]">
-                      {r.euiBasis ? `normalized — ${r.euiBasis}` : "raw annualized — no baseline"}
-                    </Badge>
+                    <div className="flex flex-wrap gap-1">
+                      <Badge variant="outline" className="text-[10px]">
+                        {r.euiBasis ? `normalized — ${r.euiBasis}` : "raw annualized — no baseline"}
+                      </Badge>
+                      {r.sqftBasis === "public_record_estimate" && (
+                        <Badge variant="outline" className="text-[10px]" title="Floor area estimated from public building footprints; replace it on the site's Explore page if you know the actual figure.">
+                          floor area: public-record estimate
+                        </Badge>
+                      )}
+                      {r.sqftBasis === "placeholder" && (
+                        <Badge variant="outline" className="text-[10px]" title="A typical-size placeholder from quick start, not this building's floor area. Set it on the site's Explore page.">
+                          floor area: placeholder
+                        </Badge>
+                      )}
+                      {r.euiPlausibilityNote && (
+                        <Badge variant="outline" className="border-amber-500/50 text-[10px] text-amber-800 dark:text-amber-300" title={r.euiPlausibilityNote} data-testid="league-eui-check">
+                          unusually low — check inputs
+                        </Badge>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         )}
+        {rankable.some((r) => r.sqftBasis === "public_record_estimate") && (
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            ≈ marks floor area estimated automatically from public building footprints (one story assumed where heights are unpublished), so those
+            rankings are screening-grade. Open a site to see how its estimate was calculated or to enter the actual figure.
+          </p>
+        )}
         {unrankable.length > 0 && (
           <p className="mt-2 text-[11px] text-muted-foreground">
             Not rankable ({unrankable.map((r) => r.name).join(", ")}) — missing square footage or an annualizable usage figure; shown nowhere rather
-            than ranked on fabricated numbers.
+            than ranked on fabricated numbers. Each site's Explore page shows what public records found and lets you add the floor area in one step.
           </p>
         )}
       </CardContent>

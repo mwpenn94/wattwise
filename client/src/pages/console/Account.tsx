@@ -11,10 +11,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Download, Gauge, ShieldCheck, BellRing, Database, Trash2 } from "lucide-react";
+import { Download, Gauge, ShieldCheck, BellRing, Database, Trash2, Monitor, Moon, Sun } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useLocation } from "wouter";
+import { useTheme, type ThemePreference } from "@/contexts/ThemeContext";
 
 const TIERS: Array<{ id: "free" | "plus" | "pro"; name: string; blurb: string }> = [
   { id: "free", name: "Free", blurb: "2 sites · 12 uploads/mo · 3 scenario runs/mo · template-first bill parsing" },
@@ -43,9 +44,12 @@ export default function Account() {
   return (
     <div className="container max-w-3xl py-8">
       <h1 className="font-display text-2xl font-bold tracking-tight">Account & usage</h1>
-      <p className="mt-1 text-sm text-muted-foreground">Tier, metered spend, and your data.</p>
+      <p className="mt-1 text-sm text-muted-foreground">Tier, metered spend, appearance, and your data.</p>
 
-      <div className="mt-6 grid gap-4 sm:grid-cols-2">
+      <div className="mt-6">
+        <AppearanceCard />
+      </div>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <Card className="border-border/70">
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 font-display text-base">
@@ -324,6 +328,50 @@ function DigestCard() {
           and this card will say so when that changes. Event alerts beyond the digest (bill anomaly, rate opportunity)
           follow the same rule: a dollar figure or silence.
         </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Oct 24 accessibility: the same Light / Dark / Match-device choice as the
+ * header icon, but as a visible, labeled radio group. */
+function AppearanceCard() {
+  const { preference, setPreference, theme } = useTheme();
+  const options: Array<{ value: ThemePreference; label: string; hint: string; Icon: typeof Sun }> = [
+    { value: "light", label: "Light", hint: "Dark text on a light background", Icon: Sun },
+    { value: "dark", label: "Dark", hint: "Light text on a dark background", Icon: Moon },
+    { value: "system", label: "Match my device", hint: `Follows your device setting (now ${theme})`, Icon: Monitor },
+  ];
+  return (
+    <Card className="border-border/70" data-testid="appearance-card">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 font-display text-base">
+          <Sun className="h-4 w-4 text-primary" aria-hidden="true" /> Appearance
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">Choose what's easiest to read. Saved on this device. Printed reports are always light.</p>
+      </CardHeader>
+      <CardContent>
+        <div role="radiogroup" aria-label="Appearance" className="grid gap-2 sm:grid-cols-3">
+          {options.map(({ value, label, hint, Icon }) => {
+            const on = preference === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={on}
+                onClick={() => setPreference(value)}
+                className={`flex items-start gap-2 rounded-md border px-3 py-2 text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${on ? "border-primary bg-primary/10" : "border-border hover:bg-accent"}`}
+              >
+                <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>
+                  <span className="block text-sm font-medium">{label}</span>
+                  <span className="block text-xs text-muted-foreground">{hint}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </CardContent>
     </Card>
   );

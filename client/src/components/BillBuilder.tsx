@@ -193,7 +193,7 @@ export default function BillBuilder({ siteId }: { siteId: number }) {
                     <p className="font-display text-2xl font-bold">
                       <span className="text-muted-foreground line-through decoration-2">${Math.round(r.baselineAnnualCost).toLocaleString()}</span>{" "}
                       → <CountUpUsd value={r.composedAnnualCost} />
-                      <span className="ml-2 text-base text-emerald-500">
+                      <span className="ml-2 text-base text-emerald-700 dark:text-emerald-500">
                         <TrendingDown className="mr-0.5 inline h-4 w-4" />
                         save <CountUpUsd value={r.composedSavings} />/yr
                       </span>

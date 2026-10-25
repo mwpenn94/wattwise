@@ -62,7 +62,11 @@ describe("tariff blocks and riders", () => {
   it("limits school-only tariffs to school building types", () => {
     const tariff = { sector: "commercial", commodity: "electric", peakKwMin: null, peakKwMax: null, schoolOnly: true };
     expect(tariffEligible(tariff, { sectorClass: "commercial", buildingType: "office" }, null)).toMatchObject({ eligible: false });
-    expect(tariffEligible(tariff, { sectorClass: "commercial", buildingType: "school" }, null)).toMatchObject({ eligible: false });
+    // Oct 24: an unconfirmed school is shown the school rate with a plain
+    // "confirm K–12 qualification" condition — never hidden as ineligible.
+    const unconfirmed = tariffEligible(tariff, { sectorClass: "commercial", buildingType: "school" }, null);
+    expect(unconfirmed.eligible).toBe(true);
+    expect(unconfirmed.conditions?.[0]).toMatch(/K–12/);
     expect(tariffEligible(tariff, { sectorClass: "commercial", buildingType: "school", k12Confirmed: true }, null)).toEqual({ eligible: true });
   });
 

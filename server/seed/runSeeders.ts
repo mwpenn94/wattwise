@@ -11,6 +11,7 @@ import {
   emissionsFactors,
   seederRuns,
   tariffs,
+  rateVerifications,
   weatherNormals,
   zipSubregions,
   convergenceLog,
@@ -98,8 +99,13 @@ export async function seedEgrid(db: Db) {
 }
 
 export async function seedBenchmarks(db: Db) {
-  if (await alreadySeeded(db, "benchmarks")) return 0;
+  // Oct 24: benchmarks are insert-if-missing, so newly added official rows
+  // (e.g. CBECS C22 electric K–12) reach existing databases without a global
+  // SEED_VERSION bump that would re-run unrelated seeders. Existing rows are
+  // never modified.
+  const seededThisVersion = await alreadySeeded(db, "benchmarks");
   let n = 0;
+  let inserted = 0;
   for (const b of EUI_BENCHMARKS) {
     // idempotency: unique on (buildingType, sectorClass, commodity) — emulate upsert
     const existing = await db
@@ -115,9 +121,11 @@ export async function seedBenchmarks(db: Db) {
       .limit(1);
     if (existing.length === 0) {
       await db.insert(benchmarks).values({ ...b, sourceVersion: SEED_VERSION });
+      inserted++;
     }
     n++;
   }
+  if (seededThisVersion) return inserted;
   await recordRun(db, "benchmarks", n, "Public domain (EIA/EPA)", "https://www.eia.gov/consumption/", "CBECS 2018 / RECS 2020 / MECS median & quartile EUIs by building type");
   return n;
 }
@@ -146,10 +154,48 @@ export async function seedWeather(db: Db) {
   return n;
 }
 
+/**
+ * Oct 24 (self-inflicted regression): a seed-version bump re-wrote every
+ * seeded tariff's structure, silently reverting rate updates the verification
+ * agent had applied from the official source (UNS Gas Sep 2026 PGA change).
+ * Before writing a seeded structure, replay the latest APPLIED verification
+ * whose effective date is not older than the seed's own effective date, so a
+ * verified newer value is never clobbered by an older snapshot.
+ */
+async function latestAppliedVerifications(db: Db): Promise<Map<string, { effectiveDate?: string; fixedMonthly?: number; energyRates?: Array<{ label: string; ratePerUnit: number }> }>> {
+  const out = new Map<string, { effectiveDate?: string; fixedMonthly?: number; energyRates?: Array<{ label: string; ratePerUnit: number }> }>();
+  const rows = await db
+    .select({ urdbId: rateVerifications.urdbId, observed: rateVerifications.observed, id: rateVerifications.id })
+    .from(rateVerifications)
+    .where(eq(rateVerifications.applied, true));
+  for (const r of rows.sort((a, b) => a.id - b.id)) {
+    if (!r.urdbId || !r.observed || typeof r.observed !== "object") continue;
+    out.set(r.urdbId, r.observed as { effectiveDate?: string; fixedMonthly?: number; energyRates?: Array<{ label: string; ratePerUnit: number }> });
+  }
+  return out;
+}
+export function replayVerifiedValues<S extends { fixedMonthly?: number; energy?: Array<{ label?: string; ratePerUnit?: number }> }>(
+  structure: S,
+  seedEffectiveDate: string,
+  verified: { effectiveDate?: string; fixedMonthly?: number; energyRates?: Array<{ label: string; ratePerUnit: number }> } | undefined,
+): S {
+  if (!verified?.effectiveDate || verified.effectiveDate < seedEffectiveDate) return structure;
+  const st = structuredClone(structure);
+  if (verified.fixedMonthly != null && verified.fixedMonthly > 0 && st.fixedMonthly != null) st.fixedMonthly = verified.fixedMonthly;
+  for (const or of verified.energyRates ?? []) {
+    const m = st.energy?.find((e) => (e.label ?? "").toLowerCase().startsWith(or.label.toLowerCase().slice(0, 12)));
+    if (m && or.ratePerUnit > 0) m.ratePerUnit = or.ratePerUnit;
+  }
+  return st;
+}
 export async function seedTariffs(db: Db) {
   if (await alreadySeeded(db, "tariffs")) return 0;
   let n = 0;
-  for (const t of SEED_TARIFFS) {
+  const verifiedByUrdb = await latestAppliedVerifications(db).catch(() => new Map());
+  for (const seedRow of SEED_TARIFFS) {
+    const t = seedRow.urdbId
+      ? { ...seedRow, structure: replayVerifiedValues(seedRow.structure, seedRow.effectiveDate, verifiedByUrdb.get(seedRow.urdbId)) }
+      : seedRow;
     // Prefer the externally stable URDB ID. Schedule names are labels and can
     // change with a correction without creating a new rate/meter assignment.
     const byUrdbId = t.urdbId
@@ -206,7 +252,7 @@ export async function seedTariffs(db: Db) {
     }
     n++;
   }
-  await recordRun(db, "tariffs", n, "Public tariff schedules (modeled; verify against bill)", "https://apps.openei.org/USURDB/", "APS/SRP/TEP/UNS electric + LG&E KY electric/gas (filed, eff. 2026) + UNS Gas AZ (Statement of Rates eff. 6/1/2026) + SW Gas + Phoenix water; ratchets, TOU, CP, export rates included; freshness=urdb_stale");
+  await recordRun(db, "tariffs", n, "Public tariff schedules (modeled; verify against bill)", "https://apps.openei.org/USURDB/", "APS/SRP/TEP/UNS electric + LG&E KY electric/gas (filed, eff. 2026) + UNS Gas AZ (Statement of Rates eff. 10/1/2026) + SW Gas + Phoenix water; ratchets, TOU, CP, export rates included; freshness=urdb_stale");
   return n;
 }
 
@@ -472,11 +518,39 @@ export async function reassertNationalRates(sourceVersion: string): Promise<{ in
 
 /** Telecom published-rate benchmark catalog (server/seed/telecomData.ts).
  * Version-keyed on TELECOM_SEED_VERSION so a vintage bump re-runs the upsert. */
+/** End of the published-pricing vintage month in TELECOM_SEED_VERSION ("published_YYYY_MM"). */
+export function telecomVintageEndMs(version: string): number | null {
+  const m = /(\d{4})_(\d{2})$/.exec(version);
+  if (!m) return null;
+  return Date.UTC(Number(m[1]), Number(m[2]), 1); // first instant of the next month
+}
 export async function seedTelecomBenchmarks(db: Db) {
   const seederKey = `telecom_benchmarks_${TELECOM_SEED_VERSION}`;
   if (await alreadySeeded(db, seederKey)) return 0;
   let n = 0;
-  for (const b of TELECOM_BENCHMARKS) {
+  // Oct 24: same clobber guard as seedTariffs — a verified, applied published
+  // price that is newer than this snapshot's vintage wins over the snapshot.
+  const vintageEnd = telecomVintageEndMs(TELECOM_SEED_VERSION);
+  const verifiedTier = new Map<string, { typicalLowUsd?: number; medianUsd?: number; typicalHighUsd?: number }>();
+  try {
+    const rows = await db
+      .select({ urdbId: rateVerifications.urdbId, observed: rateVerifications.observed, checkedAt: rateVerifications.checkedAt, id: rateVerifications.id })
+      .from(rateVerifications)
+      .where(eq(rateVerifications.applied, true));
+    for (const r of rows.sort((a, b) => a.id - b.id)) {
+      if (!r.urdbId?.startsWith("tier:") || !r.observed || typeof r.observed !== "object") continue;
+      if (vintageEnd == null || Number(r.checkedAt) < vintageEnd) continue;
+      verifiedTier.set(r.urdbId.slice(5), r.observed as { typicalLowUsd?: number; medianUsd?: number; typicalHighUsd?: number });
+    }
+  } catch {
+    /* replay is a guard; seeding continues with the snapshot */
+  }
+  for (const seedRow of TELECOM_BENCHMARKS) {
+    const v = verifiedTier.get(seedRow.tierKey);
+    const pos = (x: number | undefined, fallback: number) => (x != null && x > 0 ? x : fallback);
+    const b = v
+      ? { ...seedRow, typicalLowUsd: pos(v.typicalLowUsd, seedRow.typicalLowUsd), medianUsd: pos(v.medianUsd, seedRow.medianUsd), typicalHighUsd: pos(v.typicalHighUsd, seedRow.typicalHighUsd) }
+      : seedRow;
     await db
       .insert(telecomBenchmarks)
       .values({ ...b, sourceVersion: TELECOM_SEED_VERSION })

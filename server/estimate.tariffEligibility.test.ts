@@ -11,11 +11,17 @@ beforeEach(() => {
 });
 
 describe("anonymous estimates preserve filed tariff gates", () => {
-  it.each(["office", "school", "daycare"])("never chooses unconfirmed K12-only or SGS plans for %s", async (buildingType) => {
+  it.each(["office", "daycare"])("never chooses the K12-only plan or a migration-barred SGS plan for a non-school %s", async (buildingType) => {
     mocks.listTariffs.mockResolvedValue(SEED_TARIFFS.filter((t) => ["uns-egmgsst", "uns-egsgs"].includes(t.urdbId)).map((t, id) => ({ ...t, id })));
     const r = await computeAddressEstimate({ ...input, buildingType });
     expect(r.grounding.tariff.name).toBeNull();
     expect(r.grounding.tariff.note).toContain("state-average");
+    expect(r.estimatedAnnualCostUsd).toBeGreaterThan(0);
+  });
+  it("prices a school on the K12 filed schedule (a stated condition, not a blocker) and never on the migration-barred SGS plan", async () => {
+    mocks.listTariffs.mockResolvedValue(SEED_TARIFFS.filter((t) => ["uns-egmgsst", "uns-egsgs"].includes(t.urdbId)).map((t, id) => ({ ...t, id })));
+    const r = await computeAddressEstimate({ ...input, buildingType: "school" });
+    expect(r.grounding.tariff.name).toContain("EGMGSST");
     expect(r.estimatedAnnualCostUsd).toBeGreaterThan(0);
   });
 });

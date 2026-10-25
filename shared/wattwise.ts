@@ -239,6 +239,8 @@ export interface TariffStructure {
   primaryVoltageDemandCreditPct?: number;
   /** Minimum monthly billing-demand determinant, if the filed tariff states one. */
   demandMinKw?: number;
+  /** Filed "may be moved by the utility" size threshold — a condition to confirm, not an exclusion. */
+  reclassifyAtKw?: { kw: number; to: string };
   ratchet?: RatchetClause;
   cp?: CpCharge;
   exportRate?: ExportRateStructure;
@@ -304,6 +306,11 @@ export interface TariffComparison {
   savingsVsCurrent: number | null;
   /** Cycle 6: discloses which eligibility predicates were checked vs unverifiable */
   eligibilityNote?: string;
+  /** Oct 24: savings rest on an inferred schedule or a modeled subtotal —
+   * shown as a wider range with a "confirm first" note, never hidden. */
+  indicative?: boolean;
+  /** Oct 24: confirmations to make with the utility before switching. */
+  conditions?: string[];
 }
 
 export interface ScenarioResultPerCommodity {

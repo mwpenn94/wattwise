@@ -139,7 +139,7 @@ export default function MvPanel({ siteId }: { siteId: number }) {
               {r.model.meetsAshraeGate ? (
                 <Badge className="bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/15">meets ASHRAE G14 gate</Badge>
               ) : (
-                <Badge variant="outline" className="gap-1 border-amber-500/50 text-amber-600">
+                <Badge variant="outline" className="gap-1 border-amber-500/50 text-amber-800 dark:text-amber-300">
                   <ShieldAlert className="h-3 w-3" /> below program gate
                 </Badge>
               )}

@@ -335,9 +335,9 @@ export default function Upload() {
                     <TableCell className="text-xs">
                       {u.status === "parsed" ? (
                         (u.parseConfidence ?? 0) >= 1 ? (
-                          <span className="flex items-center gap-1 text-emerald-500"><CheckCircle2 className="h-3.5 w-3.5" /> footer totals matched</span>
+                          <span className="flex items-center gap-1 text-emerald-700 dark:text-emerald-500"><CheckCircle2 className="h-3.5 w-3.5" /> footer totals matched</span>
                         ) : (
-                          <span className="text-amber-500">partial validation</span>
+                          <span className="text-amber-700 dark:text-amber-500">partial validation</span>
                         )
                       ) : (
                         "—"
@@ -345,7 +345,7 @@ export default function Upload() {
                     </TableCell>
                     <TableCell className="text-xs">
                       {u.status === "parsed" ? (
-                        <span className="text-emerald-500">parsed</span>
+                        <span className="text-emerald-700 dark:text-emerald-500">parsed</span>
                       ) : u.status === "failed" ? (
                         <span className="flex items-center gap-1 text-destructive"><XCircle className="h-3.5 w-3.5" /> {u.error?.slice(0, 60)}</span>
                       ) : (

@@ -818,7 +818,8 @@ export function monthlyImportedKwh(points: IntervalPoint[], tz = DEFAULT_TZ): Ar
 export function tariffEligibilityTerms(structure: TariffStructure) {
   return { schoolOnly: structure.schoolOnly,
     migrationAtConsecutiveMonthlyKwh: structure.migrationAtConsecutiveMonthlyKwh,
-    switchRequiresConfirmation: structure.switchRequiresConfirmation };
+    switchRequiresConfirmation: structure.switchRequiresConfirmation,
+    reclassifyAtKw: structure.reclassifyAtKw };
 }
 
 export function tariffEligible(
@@ -833,11 +834,17 @@ export function tariffEligible(
     schoolOnly?: boolean;
     migrationAtConsecutiveMonthlyKwh?: { kwh: number; months: number };
     switchRequiresConfirmation?: boolean;
+    reclassifyAtKw?: { kw: number; to: string };
   },
   site: { sectorClass: string; hasSolar?: boolean; buildingType?: string | null; isCurrentBasis?: boolean;
     k12Confirmed?: boolean; switchTermsConfirmed?: boolean; monthlyImportedKwh?: Array<{ month: string; kwh: number }> },
   peakKw: number | null,
-): { eligible: boolean; reason?: string } {
+): { eligible: boolean; reason?: string; conditions?: string[] } {
+  // Oct 24 (owner: "0 or N/A is woefully inaccurate"): confirmations the user
+  // can make with the utility are CONDITIONS on an indicative comparison, not
+  // reasons to hide the numbers. Hard rules (sector, size, closed, technology,
+  // filed migration rules, non-school on a school rate) still exclude.
+  const conditions: string[] = [];
   // v1.18 §5 stage 7: applicability conditions beyond sector/size.
   // (a) Closed/grandfathered plans may be the customer's CURRENT basis (they
   //     are already on it) but must never appear as a switch target.
@@ -854,8 +861,9 @@ export function tariffEligible(
   if (tech === "non_solar_only" && site.hasSolar) {
     return { eligible: false, reason: "Not open to solar customers — solar sites are restricted to solar price plans" };
   }
-  if (t.schoolOnly && !site.isCurrentBasis && (site.buildingType !== "school" || site.k12Confirmed !== true)) {
-    return { eligible: false, reason: "K–12 school-only tariff — public/private K–12 status must be confirmed; building type alone is insufficient" };
+  if (t.schoolOnly && !site.isCurrentBasis) {
+    if (site.buildingType !== "school") return { eligible: false, reason: "K–12 school-only tariff; this site is not a school" };
+    if (site.k12Confirmed !== true) conditions.push("K–12 school rate: confirm the site qualifies as a public or private K–12 school");
   }
   const migration = t.migrationAtConsecutiveMonthlyKwh;
   if (migration && !site.isCurrentBasis) {
@@ -871,7 +879,13 @@ export function tariffEligible(
     }
   }
   if (t.switchRequiresConfirmation && !site.isCurrentBasis && !site.switchTermsConfirmed) {
-    return { eligible: false, reason: "Candidate alternative — eligibility confirmation required: utility approval, appropriate TOU meter where applicable, and once-per-rolling-12-month switch restriction have not been confirmed" };
+    conditions.push("Confirm with the utility before switching: approval is required, switches are limited to once per 12 months, and time-of-use rates need a compatible meter");
+  }
+  // Oct 24: filed size threshold at which the utility MAY move the account to
+  // another class (UNS MGS at 750 kW → LGS). A condition to confirm, never a
+  // silent exclusion and never a silent pass.
+  if (t.reclassifyAtKw && !site.isCurrentBasis && peakKw != null && peakKw >= t.reclassifyAtKw.kw) {
+    conditions.push(`At ${Math.round(peakKw).toLocaleString()} kW this account is above the filed ${t.reclassifyAtKw.kw.toLocaleString()} kW threshold, so the utility may move it to ${t.reclassifyAtKw.to}`);
   }
   // Cycle 3, pass 62: industrial sites must match industrial AND commercial
   // tariffs (industrial rates are a subset of C&I offerings).
@@ -886,5 +900,5 @@ export function tariffEligible(
     if (t.peakKwMin != null && peakKw < t.peakKwMin) return { eligible: false, reason: `Peak ${peakKw.toFixed(0)} kW below tariff minimum ${t.peakKwMin} kW` };
     if (t.peakKwMax != null && peakKw > t.peakKwMax) return { eligible: false, reason: `Peak ${peakKw.toFixed(0)} kW above tariff maximum ${t.peakKwMax} kW` };
   }
-  return { eligible: true };
+  return conditions.length ? { eligible: true, conditions } : { eligible: true };
 }

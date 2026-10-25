@@ -75,6 +75,8 @@ export interface ComposedResult {
     utilityName: string;
     eligible: boolean;
     ineligibleReason?: string;
+    /** Oct 24: priced on a modeled-subtotal filed schedule — shown, labeled. */
+    indicative?: boolean;
     annualCostOnComposed: number;
     savingsVsCurrentOnComposed: number;
     isCurrentBasis: boolean;
@@ -225,7 +227,8 @@ export function composeMeasures(
   const baseCost = costOnTariff(basePoints, structure, { hasSolar: siteHasSolar });
   const composedCost = costOnTariff(composedPoints, structure, { hasSolar: siteHasSolar || totalSolarKw > 0 });
   disclosures.push(...baseCost.disclosures, ...composedCost.disclosures);
-  if (baseCost.switchRecommendationAllowed === false || composedCost.switchRecommendationAllowed === false) throw new Error("Plan savings withheld: incomplete tariff/account terms. Confirm riders, billing basis and renewable REST treatment before modeling financial savings.");
+  // Oct 24 (owner): label, don't withhold.
+  if (baseCost.switchRecommendationAllowed === false || composedCost.switchRecommendationAllowed === false) disclosures.push("Indicative: priced on the filed base schedule, which excludes some riders/taxes; confirm account terms before committing.");
   const baselineAnnualCost = cap(baseCost.breakdown.total);
   const composedAnnualCost = cap(composedCost.breakdown.total);
   const composedSavings = cap(baselineAnnualCost - composedAnnualCost);
@@ -298,7 +301,8 @@ export function composeMeasures(
       tariffId: t.id,
       tariffName: t.name,
       utilityName: t.utilityName,
-      eligible: elig.eligible && cost.switchRecommendationAllowed !== false,
+      eligible: elig.eligible,
+      indicative: cost.switchRecommendationAllowed === false,
       ineligibleReason: elig.reason,
       annualCostOnComposed: cap(cost.breakdown.total),
       savingsVsCurrentOnComposed: cap(composedAnnualCost - cost.breakdown.total),

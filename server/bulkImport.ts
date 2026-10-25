@@ -458,13 +458,15 @@ export interface CommitOptions {
   clockConfirmed?: boolean;
 }
 interface CommitSummary {
-  phase: "importing" | "totals" | "analyzing" | "done";
+  phase: "importing" | "totals" | "enriching" | "analyzing" | "done";
   sheetsTotal: number; sheetsDone: number; sheetsImported: number; sheetsFailed: number; sheetsDuplicate: number; pointsWritten: number;
   sitesCreated: number; sitesReused: number; metersCreated: number; metersReused: number; tariffsAssigned: number;
   campusTotals: number; analysesRun: number; analysesFailed: number;
   currentSheet: string | null; currentSite: string | null; siteIds: number[]; entityId: number | null;
   options: CommitOptions; startedAt: number; notes: string[];
-  postProcessing: Record<string, { totals?: "done" | "failed"; analysis?: "done" | "failed"; detail?: string }>;
+  postProcessing: Record<string, { totals?: "done" | "failed"; analysis?: "done" | "failed"; detail?: string; propertyFacts?: "done" | "skipped" | "unavailable"; floorAreaApplied?: boolean }>;
+  /** Oct 24 property facts: sites whose floor area came from public records */
+  floorAreaEstimated?: number;
 }
 function emptySummary(options: CommitOptions): CommitSummary {
   return { phase:"importing",sheetsTotal:0,sheetsDone:0,sheetsImported:0,sheetsFailed:0,sheetsDuplicate:0,pointsWritten:0,sitesCreated:0,sitesReused:0,metersCreated:0,metersReused:0,tariffsAssigned:0,campusTotals:0,analysesRun:0,analysesFailed:0,currentSheet:null,currentSite:null,siteIds:[],entityId:null,options,startedAt:Date.now(),notes:[],postProcessing:{} };
@@ -678,6 +680,32 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
         if (post.analysis!=="failed") delete post.detail;
       } catch(e) { blockedSites.add(siteId); post.totals="failed"; post.detail=`Campus total incomplete: ${message(e).slice(0,300)}`; }
       await save();
+    }
+    // Property facts (Oct 24): look up official/public records for each new
+    // site BEFORE analysis so floor area (and therefore EUI / benchmark /
+    // league ranking) is filled automatically with its basis disclosed.
+    // Network I/O stays outside the fenced transaction; enrichment is
+    // best-effort and never fails or blocks the import.
+    const pf=await import("./propertyFacts");
+    if (pf.propertyFactsNetworkAvailable()) {
+      summary.phase="enriching"; await save();
+      let estimated=0;
+      for (const siteId of summary.siteIds) {
+        const post=summary.postProcessing[siteId]??{}; summary.postProcessing[siteId]=post;
+        if (post.propertyFacts==="done") { if (post.floorAreaApplied) estimated++; continue; }
+        try {
+          const site=await h.getSite(siteId,userId); if (!site) continue;
+          summary.currentSite=site.name; await save();
+          const before=site.sqft;
+          const row=await pf.refreshPropertyFacts(siteId,{allowAutoApply:true});
+          const after=(await h.getSite(siteId,userId))?.sqft??null;
+          post.propertyFacts=row ? (row.status==="unavailable" ? "unavailable" : "done") : "skipped";
+          post.floorAreaApplied=before==null && after!=null && row?.appliedSqft!=null && Math.abs(after-row.appliedSqft)<0.5;
+          if (post.floorAreaApplied) estimated++;
+        } catch { post.propertyFacts="unavailable"; }
+        await save();
+      }
+      summary.floorAreaEstimated=estimated; summary.currentSite=null; await save();
     }
     if (summary.options.runAnalysis!==false) {
       summary.phase="analyzing"; await save();

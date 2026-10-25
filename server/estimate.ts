@@ -159,7 +159,9 @@ export async function computeAddressEstimate(input: {
   for (const t of eligible) {
     try {
       const c = costOnTariff(points, t.structure as TariffStructure, { hasSolar: false });
-      if (c.switchRecommendationAllowed === false) continue;
+      // Oct 24: a modeled-subtotal filed rate is still the best local price
+      // basis — use it (its own disclosures say what is excluded) rather than
+      // dropping to a state average.
       if (annualCost == null || c.breakdown.total < annualCost) {
         annualCost = c.breakdown.total;
         tariffName = t.name;

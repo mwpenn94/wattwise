@@ -71,12 +71,15 @@ describe("UNS official tariff corrections (R2)", () => {
     expect(tariffEligible(t, { ...site, monthlyImportedKwh: [{ month: "2026-04", kwh: 12000 }, { month: "2026-07", kwh: 12000 }] }, 20).eligible).toBe(true);
     expect(monthlyImportedKwh([p("2026-06-01T12:00Z", 10), p("2026-06-01T13:00Z", -5)], "UTC")).toEqual([{ month: "2026-06", kwh: 10 }]);
   });
-  it("requires confirmed K12 and switching terms, not school/daycare labels", () => {
+  it("treats unconfirmed K12 status and switching terms as stated conditions, and still excludes non-schools", () => {
     const s = seed("uns-egmgsst"); const t = { ...s, ...tariffEligibilityTerms(s.structure) };
     const site = { sectorClass: "commercial", buildingType: "school" };
-    expect(tariffEligible(t, site, 50).eligible).toBe(false);
-    expect(tariffEligible(t, { ...site, k12Confirmed: true }, 50).eligible).toBe(false);
-    expect(tariffEligible(t, { ...site, k12Confirmed: true, switchTermsConfirmed: true }, 50).eligible).toBe(true);
+    const unconfirmed = tariffEligible(t, site, 50);
+    expect(unconfirmed.eligible).toBe(true);
+    expect(unconfirmed.conditions?.join(" ")).toMatch(/K–12/);
+    expect(unconfirmed.conditions?.join(" ")).toMatch(/Confirm with the utility/);
+    expect(tariffEligible(t, { ...site, k12Confirmed: true }, 50).conditions?.join(" ")).not.toMatch(/K–12/);
+    expect(tariffEligible(t, { ...site, k12Confirmed: true, switchTermsConfirmed: true }, 50)).toEqual({ eligible: true });
     expect(tariffEligible(t, { ...site, buildingType: "daycare", k12Confirmed: true, switchTermsConfirmed: true }, 50).eligible).toBe(false);
   });
   it("uses renewable REST flat charges independently of net imports and discloses unknown treatment", () => {

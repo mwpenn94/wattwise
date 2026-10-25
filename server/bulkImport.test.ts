@@ -358,3 +358,42 @@ describe("bulk hardening",()=>{
     await start(fx);await waitForCommit(fx.caller,fx.staged.batchId);
   },30_000);
 });
+
+/* Oct 24 property facts: the bulk commit fills floor area from public records
+ * BEFORE analysis, and a public-source outage never blocks or fails an import. */
+import * as propertyFacts from "./propertyFacts";
+import { sitePropertyFacts, sites as sitesTable } from "../drizzle/schema";
+describe("bulk import property facts", () => {
+  it("auto-fills an address-matched floor area and labels it; an outage leaves the import complete", async () => {
+    const structures = (addr: string) => ({ features: [{ attributes: { BUILD_ID: 77, SQFEET: 41_234, PROP_ADDR: addr, OCC_CLS: "Education", PRIM_OCC: "Pre-K - 12 Schools", HEIGHT: null, LATITUDE: 35.1894, LONGITUDE: -114.053 } }] });
+    try {
+      propertyFacts.setPropertyFactsFetcher(async (url) => {
+        if (url.includes("mcgis.mohave.gov")) return { features: [] };
+        return structures("300 PFOK AVENUE");
+      });
+      const ok = await prepared([sample("PfOk")]);
+      await ok.caller.bulkImport.commit({ batchId: ok.staged.batchId, planVersion: ok.preview.planVersion, clockConfirmed: true, buildingType: "school", runAnalysis: false });
+      const done = await waitForCommit(ok.caller, ok.staged.batchId);
+      expect(done.batch.status).toBe("complete");
+      expect(done.batch.summary).toMatchObject({ floorAreaEstimated: 1 });
+      const siteId = done.batch.summary!.siteIds[0];
+      const db = (await getDb())!;
+      const [site] = await db.select().from(sitesTable).where(eq(sitesTable.id, siteId));
+      expect(site.sqft).toBe(41_200);
+      const [row] = await db.select().from(sitePropertyFacts).where(eq(sitePropertyFacts.siteId, siteId));
+      expect(row.appliedBy).toBe("auto");
+      expect(propertyFacts.floorAreaBasisOf(site, row).basis).toBe("public_record_estimate");
+
+      propertyFacts.setPropertyFactsFetcher(async () => { throw new Error("public sources down"); });
+      const down = await prepared([sample("PfDown")]);
+      await down.caller.bulkImport.commit({ batchId: down.staged.batchId, planVersion: down.preview.planVersion, clockConfirmed: true, buildingType: "school", runAnalysis: false });
+      const finished = await waitForCommit(down.caller, down.staged.batchId);
+      expect(finished.batch.status).toBe("complete");
+      expect(finished.batch.summary).toMatchObject({ floorAreaEstimated: 0 });
+      const [downSite] = await db.select().from(sitesTable).where(eq(sitesTable.id, finished.batch.summary!.siteIds[0]));
+      expect(downSite.sqft).toBeNull();
+    } finally {
+      propertyFacts.setPropertyFactsFetcher(null);
+    }
+  }, 70_000);
+});

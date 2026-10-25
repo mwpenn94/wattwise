@@ -70,14 +70,14 @@ export default function Tariffs() {
         ))}
       </div>
       {eligibilityNote && (
-        <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-relaxed text-amber-200/90">
+        <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:text-amber-200/90">
           {eligibilityNote}
         </p>
       )}
       {territoryActive && (
         <div
           className={`mt-3 rounded-md border px-3 py-2 text-xs leading-relaxed ${
-            territory.overlap ? "border-amber-500/30 bg-amber-500/5 text-amber-200/90" : "border-primary/25 bg-primary/5 text-muted-foreground"
+            territory.overlap ? "border-amber-500/30 bg-amber-500/5 text-amber-800 dark:text-amber-200/90" : "border-primary/25 bg-primary/5 text-muted-foreground"
           }`}
         >
           <span className="font-medium text-foreground">
@@ -231,12 +231,12 @@ function RateCurrencyPanel() {
         <CardTitle className="flex items-center gap-2 font-display text-base">
           <ShieldCheck className="h-4 w-4 text-primary" /> Filed-rate currency
           {attention.length === 0 ? (
-            <Badge variant="outline" className="ml-1 border-emerald-500/40 text-[10px] text-emerald-400">all current</Badge>
+            <Badge variant="outline" className="ml-1 border-emerald-500/40 text-[10px] text-emerald-700 dark:text-emerald-400">all current</Badge>
           ) : (
-            <Badge variant="outline" className="ml-1 border-amber-500/40 text-[10px] text-amber-400">{attention.length} need attention</Badge>
+            <Badge variant="outline" className="ml-1 border-amber-500/40 text-[10px] text-amber-800 dark:text-amber-400">{attention.length} need attention</Badge>
           )}
           {pendingCases.length > 0 && (
-            <Badge variant="outline" className="ml-1 border-sky-500/40 text-[10px] text-sky-400">{pendingCases.length} pending case update{pendingCases.length === 1 ? "" : "s"}</Badge>
+            <Badge variant="outline" className="ml-1 border-sky-500/40 text-[10px] text-sky-700 dark:text-sky-400">{pendingCases.length} pending case update{pendingCases.length === 1 ? "" : "s"}</Badge>
           )}
         </CardTitle>
       </CardHeader>
@@ -270,11 +270,11 @@ function RateCurrencyPanel() {
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
                   {r.sourceKind === "docket" ? (
-                    <span className="text-sky-400">docket watch</span>
+                    <span className="text-sky-700 dark:text-sky-400">docket watch</span>
                   ) : r.commodity === "telecom" ? (
                     /* TEL1C-2: benchmark sources govern telecom benchmark TIERS,
                        not filed tariffs — the label says which. */
-                    <span className="text-violet-400">{r.governs} benchmark tier{r.governs === 1 ? "" : "s"}</span>
+                    <span className="text-violet-700 dark:text-violet-400">{r.governs} benchmark tier{r.governs === 1 ? "" : "s"}</span>
                   ) : (
                     <>{r.governs} rate{r.governs === 1 ? "" : "s"}</>
                   )}
@@ -285,18 +285,18 @@ function RateCurrencyPanel() {
                 <TableCell className="text-xs text-muted-foreground">{r.cadenceDays}d</TableCell>
                 <TableCell>
                   {r.status === "current" ? (
-                    <Badge variant="outline" className="border-emerald-500/40 text-[10px] text-emerald-400">current</Badge>
+                    <Badge variant="outline" className="border-emerald-500/40 text-[10px] text-emerald-700 dark:text-emerald-400">current</Badge>
                   ) : r.status === "change_detected" ? (
                     r.sourceKind === "docket" ? (
-                      <Badge variant="outline" className="border-sky-500/40 text-[10px] text-sky-400">docket activity</Badge>
+                      <Badge variant="outline" className="border-sky-500/40 text-[10px] text-sky-700 dark:text-sky-400">docket activity</Badge>
                     ) : (
-                      <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-400">change detected</Badge>
+                      <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-800 dark:text-amber-400">change detected</Badge>
                     )
                   ) : (
-                    <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-400">verification due</Badge>
+                    <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-800 dark:text-amber-400">verification due</Badge>
                   )}
                   {r.consecutiveFailures >= 3 && (
-                    <p className="mt-0.5 text-[10px] text-red-400">source unreachable ×{r.consecutiveFailures}</p>
+                    <p className="mt-0.5 text-[10px] text-red-700 dark:text-red-400">source unreachable ×{r.consecutiveFailures}</p>
                   )}
                 </TableCell>
               </TableRow>
@@ -317,7 +317,7 @@ function RateCurrencyPanel() {
             {(history.data ?? []).map((v) => (
               <p key={v.id} className="text-[11px] leading-relaxed text-muted-foreground">
                 <span className="font-mono">{new Date(v.checkedAt).toLocaleDateString()}</span> · {v.sourceKey} ·{" "}
-                <span className={v.status === "confirmed" ? "text-emerald-400" : "text-amber-400"}>{v.status}{v.applied ? " (auto-applied)" : ""}</span>
+                <span className={v.status === "confirmed" ? "text-emerald-700 dark:text-emerald-400" : "text-amber-800 dark:text-amber-400"}>{v.status}{v.applied ? " (auto-applied)" : ""}</span>
                 {v.evidence ? ` — ${v.evidence}` : ""}
               </p>
             ))}

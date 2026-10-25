@@ -53,7 +53,7 @@ export async function teardown() {
         }
         for (const table of [
           "baselines", "analyses", "insights", "opportunities", "scenarios",
-          "measure_implementations", "alerts", "site_geometry", "site_members",
+          "measure_implementations", "alerts", "site_geometry", "site_property_facts", "site_members",
           "bill_reconciliations", "production_series", "equipment_inventory",
           "report_artifacts", "site_group_members",
         ]) {

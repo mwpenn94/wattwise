@@ -42,14 +42,14 @@ export default function AnalysisProgress({ siteId, active }: { siteId: number; a
   return (
     <div className="mt-4 rounded-lg border border-primary/30 bg-primary/5 p-4">
       <div className="flex items-center gap-2">
-        {running ? <Loader2 className="h-4 w-4 animate-spin text-primary" /> : <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
+        {running ? <Loader2 className="h-4 w-4 animate-spin text-primary" /> : <CheckCircle2 className="h-4 w-4 text-emerald-700 dark:text-emerald-500" />}
         <p className="font-display text-sm font-semibold">{running ? "Analyzing — here's the actual work" : "Analysis complete"}</p>
       </div>
       <ul className="mt-2 space-y-1">
         {lines.length === 0 && running && <li className="font-mono text-[11px] text-muted-foreground">Starting pipeline…</li>}
         {lines.map((l, i) => (
           <li key={i} className="flex items-start gap-1.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
-            <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500/80" />
+            <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-700/80 dark:text-emerald-500/80" />
             <span>{l}</span>
           </li>
         ))}

@@ -1536,3 +1536,33 @@ export const importSiteGroups = mysqlTable("import_site_groups", {
   siteId: int("siteId").notNull(),
   batchId: int("batchId").notNull(),
 }, t => [uniqueIndex("import_site_groups_identity_uq").on(t.userId, t.groupingMode, t.groupHash)]);
+/** Oct 24 Property facts (replaces the rejected outbound-link "property records"
+ * card): automatic per-address enrichment from official/public sources (county
+ * assessor GIS adapters + FEMA USA Structures). One row per site; the row is
+ * only "current" while locationRevision matches the site's. appliedSqft is the
+ * value WE wrote to sites.sqft (auto or user-accepted) so every surface can
+ * label floor area as a public-record estimate, and so a later address change
+ * can retire it. A user-typed floor area clears appliedSqft (never overwritten). */
+export const sitePropertyFacts = mysqlTable(
+  "site_property_facts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    siteId: int("siteId").notNull(),
+    userId: int("userId").notNull(),
+    locationRevision: int("locationRevision").default(0).notNull(),
+    /** ok | partial | no_location | unavailable */
+    status: varchar("status", { length: 32 }).notNull(),
+    facts: json("facts"),
+    estimateSqft: double("estimateSqft"),
+    estimateBasis: varchar("estimateBasis", { length: 48 }),
+    appliedSqft: double("appliedSqft"),
+    /** auto | user */
+    appliedBy: varchar("appliedBy", { length: 16 }),
+    appliedAt: bigint("appliedAt", { mode: "number" }),
+    fetchedAt: bigint("fetchedAt", { mode: "number" }).notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex("site_property_facts_site_uq").on(t.siteId), index("site_property_facts_user_idx").on(t.userId)],
+);
+export type SitePropertyFacts = typeof sitePropertyFacts.$inferSelect;

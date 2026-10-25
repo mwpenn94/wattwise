@@ -18,8 +18,10 @@
   --card-foreground: oklch(0.21 0.015 260);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.21 0.015 260);
-  --primary: oklch(0.72 0.15 65);
-  --primary-foreground: oklch(0.16 0.02 260);
+  /* Oct 24 a11y: light-theme primary darkened so primary TEXT on white meets
+     WCAG AA (5.1:1); buttons use white text on it (5.1:1). Dark theme unchanged. */
+  --primary: oklch(0.55 0.15 60);
+  --primary-foreground: oklch(0.99 0 0);
   --secondary: oklch(0.95 0.008 80);
   --secondary-foreground: oklch(0.28 0.02 260);
   --muted: oklch(0.955 0.005 90);
@@ -30,20 +32,22 @@
   --destructive-foreground: oklch(0.98 0 0);
   --border: oklch(0.9 0.008 90);
   --input: oklch(0.9 0.008 90);
-  --ring: oklch(0.72 0.15 65);
+  --ring: oklch(0.55 0.15 60);
   --chart-1: oklch(0.72 0.15 65);
   --chart-2: oklch(0.62 0.12 220);
   --chart-3: oklch(0.65 0.14 145);
   --chart-4: oklch(0.6 0.16 300);
   --chart-5: oklch(0.66 0.18 27);
-  --sidebar: oklch(0.19 0.015 260);
-  --sidebar-foreground: oklch(0.87 0.01 90);
-  --sidebar-primary: oklch(0.78 0.15 70);
-  --sidebar-primary-foreground: oklch(0.16 0.02 260);
-  --sidebar-accent: oklch(0.25 0.018 260);
-  --sidebar-accent-foreground: oklch(0.92 0.01 90);
-  --sidebar-border: oklch(0.28 0.018 260);
-  --sidebar-ring: oklch(0.78 0.15 70);
+  /* Oct 24 a11y: Light means light everywhere — the console sidebar follows
+     the chosen theme (text 14.7:1, secondary text 5.7:1+). Dark is unchanged. */
+  --sidebar: oklch(0.97 0.004 90);
+  --sidebar-foreground: oklch(0.25 0.015 260);
+  --sidebar-primary: oklch(0.55 0.15 60);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.92 0.012 80);
+  --sidebar-accent-foreground: oklch(0.2 0.015 260);
+  --sidebar-border: oklch(0.9 0.008 90);
+  --sidebar-ring: oklch(0.55 0.15 60);
   --radius: 0.5rem;
 }
 
@@ -189,6 +193,27 @@
  * render as clean paginated documents.
  * ------------------------------------------------------------------------- */
 @media print {
+  /* Paper is always light: the dark theme's tokens are re-declared with the
+     light values so a user in dark mode still prints a readable report. */
+  .dark {
+    color-scheme: light;
+    --background: oklch(0.985 0.002 90);
+    --foreground: oklch(0.21 0.015 260);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.21 0.015 260);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.21 0.015 260);
+    --primary: oklch(0.55 0.15 60);
+    --primary-foreground: oklch(0.99 0 0);
+    --secondary: oklch(0.95 0.008 80);
+    --secondary-foreground: oklch(0.28 0.02 260);
+    --muted: oklch(0.955 0.005 90);
+    --muted-foreground: oklch(0.42 0.015 260);
+    --accent: oklch(0.94 0.02 75);
+    --accent-foreground: oklch(0.25 0.02 260);
+    --border: oklch(0.9 0.008 90);
+    --input: oklch(0.9 0.008 90);
+  }
   /* Zero page margin removes the browser's built-in header (title) and
      footer (URL/date) from the printed output. Body padding restores
      readable content inset without the chrome. */

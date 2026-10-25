@@ -150,9 +150,9 @@ export function ProveItSection({ siteId }: { siteId: number }) {
     onError: (e) => toast.error(e.message),
   });
   const remove = trpc.proveIt.remove.useMutation({
-    onSuccess: async () => {
-      await utils.proveIt.list.invalidate();
-      toast.success("Removed");
+    onSuccess: async (r) => {
+      await Promise.all([utils.proveIt.list.invalidate(), utils.proveIt.verifiedTotal.invalidate(), utils.recommendations.queue.invalidate(), utils.recommendations.portfolioPriorities.invalidate(), utils.entities.portfolio.invalidate()]);
+      toast.success(r.withdrawnCompletion ? "Removed — the linked completion was withdrawn and the recommendation is back in your queue" : "Removed");
     },
     onError: (e) => toast.error(e.message),
   });
@@ -176,7 +176,7 @@ export function ProveItSection({ siteId }: { siteId: number }) {
           )}
         </CardTitle>
         <p className="text-xs text-muted-foreground">
-          Implementation progress is retained. Savings attribution is inconclusive until an immutable pre-change baseline and unique site/commodity/month allocation are available. Historical amounts are withheld, not summed.
+          Implementation progress is retained. Savings attribution is inconclusive until an immutable pre-change baseline and unique site/commodity/month allocation are available. Until then no verified dollar amount is shown, and past amounts are never added together.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">

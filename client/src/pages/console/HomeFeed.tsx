@@ -123,7 +123,7 @@ export default function HomeFeed() {
           <p className="text-sm text-muted-foreground">Hi {firstName} —</p>
           {greetingKind ? (
             <p className="mt-1 font-display text-3xl font-bold tracking-tight">
-              <span className={greetingKind === "verified" ? "text-emerald-500" : "text-primary"}>
+              <span className={greetingKind === "verified" ? "text-emerald-700 dark:text-emerald-500" : "text-primary"}>
                 {greetingKind === "verified" ? `$${Math.round(verifiedTotal).toLocaleString()}` : formatSavingsRangeUsd(projectedRange)}
               </span>{" "}
               <span className="text-lg font-semibold text-muted-foreground">
@@ -132,7 +132,7 @@ export default function HomeFeed() {
               <span
                 className={`ml-2 inline-block rounded-full border px-2 py-0.5 align-middle font-mono text-[10px] uppercase tracking-wider ${
                   greetingKind === "verified"
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-500"
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-500"
                     : "border-primary/40 bg-primary/10 text-primary"
                 }`}
               >
@@ -197,7 +197,7 @@ export default function HomeFeed() {
               <p className="text-sm font-semibold">{awayAlert.title}</p>
               <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{awayAlert.body}</p>
               {awayAlert.dollarImpactUsd > 0 && (
-                <p className="mt-2 font-display text-lg font-bold text-amber-500">
+                <p className="mt-2 font-display text-lg font-bold text-amber-700 dark:text-amber-500">
                   ~${Math.round(awayAlert.dollarImpactUsd).toLocaleString()} of excess so far
                 </p>
               )}
@@ -251,7 +251,7 @@ export default function HomeFeed() {
                 <div className="flex items-center gap-2">
                   <ProveItStatusChip status={latestImpl.status} />
                   {(latestImpl.verifiedSavingsUsd ?? 0) > 0 && (
-                    <span className="font-display text-lg font-bold text-emerald-500">
+                    <span className="font-display text-lg font-bold text-emerald-700 dark:text-emerald-500">
                       ${Math.round(latestImpl.verifiedSavingsUsd!).toLocaleString()}
                     </span>
                   )}

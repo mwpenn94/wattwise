@@ -413,7 +413,7 @@ export default function SiteGeometryPanel({ siteId, canEdit = true }: { siteId: 
               {geom!.orientationDeg != null && <CompassChip deg={geom!.orientationDeg} />}
               {geom!.exposureScore != null && (
                 <div className="flex items-center gap-1.5 text-xs">
-                  <Sun className="h-3.5 w-3.5 text-amber-500" />
+                  <Sun className="h-3.5 w-3.5 text-amber-700 dark:text-amber-500" />
                   Exposure score {Math.round(geom!.exposureScore)}/100{" "}
                   <span className="text-muted-foreground">(heuristic)</span>
                 </div>
@@ -571,7 +571,7 @@ export default function SiteGeometryPanel({ siteId, canEdit = true }: { siteId: 
                 <div className="space-y-1.5">
                   <CompassChip deg={active.orientationDeg} />
                   <div className="flex items-center gap-1.5 text-xs">
-                    <Sun className="h-3.5 w-3.5 text-amber-500" /> Exposure score {active.exposureScore}/100{" "}
+                    <Sun className="h-3.5 w-3.5 text-amber-700 dark:text-amber-500" /> Exposure score {active.exposureScore}/100{" "}
                     <span className="text-muted-foreground">(heuristic)</span>
                   </div>
                   {wallAreas && (

@@ -73,9 +73,10 @@ describe("review safety regressions",()=>{
     expect(r.combined.breakdown.total).toBeCloseTo(accounts.reduce((s,c)=>s+costOnTariff(c.points,c.structure,{tz:c.timezone}).breakdown.total,0),8);
     expect(r.perMeter[0]?.observedCost).not.toBe(r.perMeter[1]?.observedCost);
   });
-  it("withholds alternative savings on inferred or incomplete billing bases and retains every disclosure",()=>{
+  it("shows an indicative (wider) range on inferred billing bases and retains every disclosure",()=>{
     const r=perMeterRateReview([{...account,rateCodeResolution:{match:"family_inferred",disclosure:"EGMGSQ inferred, unconfirmed"},disclosures:["Provider conflict","Rider caveat"]}],[{id:2,name:"Cheap",utilityName:"UNS Electric",structure:flat(0.1),freshness:"verified",eligibleFor:()=>true}]);
-    expect(r.totalSavingsRangeUsd).toBeNull();expect(r.perMeter[0]?.bestAlternative).toBeNull();
+    expect(r.totalSavingsRangeUsd).toEqual({low:40,high:100});expect(r.perMeter[0]?.bestAlternative?.indicative).toBe(true);
+    expect(r.disclosures.join(" ")+r.perMeter[0]!.disclosures.join(" ")).toContain("Indicative");
     expect(r.disclosures.join(" ")).toContain("Rider caveat");expect(r.disclosures.join(" ")).toContain("EGMGSQ inferred");
   });
   it("rejects empty, missing, mixed-duration or overlapping component coverage",()=>{

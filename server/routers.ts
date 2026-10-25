@@ -1,4 +1,5 @@
 import { TRPCError } from "@trpc/server";
+import { tariffMatchesSiteUtility } from "./utilityMatch";
 import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { addSavingsRanges, savingsRangeFromEstimate, type SavingsRangeUsd } from "@shared/savingsRange";
@@ -74,7 +75,7 @@ import { storagePut } from "./storage";
 import { deriveFromAddress, cascadeProvenance, deriveUtilityTriple } from "./cascade";
 import { geocodeAddress, placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
 import { makeRequest, type GeocodingResult } from "./_core/map";
-import { propertyRecordsForCounty } from "./propertyRecords";
+import * as propertyFacts from "./propertyFacts";
 import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { reconcileBill } from "./billReconciliation";
 import { deriveBillVerifiedRate } from "./billCalibration";
@@ -560,6 +561,7 @@ export const appRouter = router({
           state: input.state ?? createCascade.state.value,
           zip: input.zip ?? createCascade.zip.value,
         }).catch(() => undefined);
+        propertyFacts.enrichSiteInBackground(id);
       }
       return { id };
     }),
@@ -738,6 +740,7 @@ export const appRouter = router({
         // ephemeral; the insight survives until services are actually entered).
         if (!input.prospective) {
           await addTelecomSetupInvite(id, { city: cascade.city.value, state: cascade.state.value, zip: cascade.zip.value }).catch(() => undefined);
+          propertyFacts.enrichSiteInBackground(id);
         }
         return { id, parse, assumptions, utilityTriple, telecomMarket };
       }),
@@ -890,6 +893,9 @@ export const appRouter = router({
             });
           }
         }
+        // A typed floor area owns the field from now on (never overwritten by
+        // a public-record estimate; the estimate stays visible for comparison).
+        if ("sqft" in provided) await propertyFacts.releaseAppliedEstimate(siteId).catch(() => undefined);
         await h.audit(ctx.user.id, "site_refined", "site", String(siteId), { fields: Object.keys(provided) });
         // v1.17 §5.0(c) recompute disclosure: a confirmation/correction states
         // WHICH dependent insights it recomputes — "pool confirmed → summer
@@ -997,27 +1003,66 @@ export const appRouter = router({
           }
         }
         if (locationChanged && !nextAddress) Object.assign(clean, { climateZone: null, egridSubregion: null });
+        // Property facts: a floor area WE filled from public records belongs to
+        // the old address; retire it with the location (a typed value stays).
+        if (locationChanged) {
+          const pfRow = await propertyFacts.getPropertyFactsRow(siteId).catch(() => null);
+          if (pfRow && propertyFacts.floorAreaBasisOf(site, pfRow).basis === "public_record_estimate") {
+            Object.assign(clean, { sqft: null });
+            await propertyFacts.releaseAppliedEstimate(siteId);
+          }
+        }
         const { saveLocationEdit } = await import("./geometryCacheDb");
         await saveLocationEdit(site, clean, locationChanged);
         await h.audit(ctx.user.id, "site_update", "site", String(siteId), { fields: Object.keys(clean) });
-        return { ok: true as const, locationChanged, geocodeFailed, derived };
-      }),
-    /** Outbound-only public property-record links. CountyOffice is never fetched,
-     * cached, or embedded; it is only returned as a user-initiated deep link. */
-    propertyRecords: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
-      const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
-      let county: string | null = null;
-      let state = site.state;
-      if (site.address?.trim()) {
-        try {
-          const geocoded = geocodeComponents(await makeRequest<GeocodingResult>("/maps/api/geocode/json", { address: site.address }));
-          county = geocoded.county;
-          state = geocoded.state ?? state;
-        } catch (error) {
-          console.warn(`[property_records] county geocoding failed for site ${input.siteId}:`, error);
+        // RC3 (Oct 24): a location edit retires the live analysis — re-run it
+        // automatically (after refreshing property facts for the new address)
+        // whenever the site has meters, so no one is left with an empty site.
+        let reanalysisQueued = false;
+        if (locationChanged) {
+          const hasMeters = (await h.listMeters(siteId, ctx.user.id).catch(() => [])).length > 0;
+          if (hasMeters && !geocodeFailed) {
+            const { queueSiteReanalysis } = await import("./siteReanalysis");
+            reanalysisQueued = queueSiteReanalysis(siteId, ctx.user.id, tierOf(ctx.user));
+          }
+          if (!reanalysisQueued) propertyFacts.enrichSiteInBackground(siteId);
         }
+        return { ok: true as const, locationChanged, geocodeFailed, derived, reanalysisQueued };
+      }),
+    /** Oct 24 property facts (replaces the rejected outbound-link card).
+     * Read-only for every viewer: returns cached facts for the CURRENT
+     * location revision, fetching official/public sources on first view.
+     * Never writes the site's floor area — that happens only in lifecycle
+     * hooks or when an actor explicitly accepts the estimate. */
+    propertyFacts: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
+      let row = await propertyFacts.getPropertyFactsRow(site.id);
+      const current = row && row.locationRevision === site.locationRevision &&
+        (row.facts as propertyFacts.PropertyFactsResult | null)?.inputKey === propertyFacts.factsInputKey(site);
+      if (!current && propertyFacts.propertyFactsNetworkAvailable()) {
+        row = await propertyFacts.refreshPropertyFacts(site.id).catch(() => row);
       }
-      return propertyRecordsForCounty(county, state);
+      const latest = (await h.getSiteAsViewer(input.siteId, ctx.user.id)).site;
+      return propertyFacts.presentPropertyFacts(latest, row && row.locationRevision === latest.locationRevision ? row : null);
+    }),
+    /** One-click "use this floor-area estimate" — an ACT (owner/facility manager). */
+    applyPropertyEstimate: protectedProcedure
+      .input(z.object({ siteId: z.number(), locationRevision: z.number().int() }))
+      .mutation(async ({ ctx, input }) => {
+        await h.assertSiteActor(input.siteId, ctx.user.id);
+        const before = (await h.getSiteAsViewer(input.siteId, ctx.user.id)).site;
+        const ok = await propertyFacts.applyPropertyEstimate(input.siteId, "user", input.locationRevision);
+        if (!ok) throw new TRPCError({ code: "CONFLICT", message: "The property facts changed since you looked. Reload and try again." });
+        const after = (await h.getSiteAsViewer(input.siteId, ctx.user.id)).site;
+        await h.audit(ctx.user.id, "property_estimate_applied", "site", String(input.siteId), { previousSqft: before.sqft ?? null, sqft: after.sqft ?? null });
+        return { ok: true as const, previousSqft: before.sqft ?? null, sqft: after.sqft ?? null };
+      }),
+    /** Re-check public records now (e.g. after a source outage). */
+    refreshPropertyFacts: protectedProcedure.input(z.object({ siteId: z.number() })).mutation(async ({ ctx, input }) => {
+      await h.assertSiteActor(input.siteId, ctx.user.id);
+      if (!propertyFacts.propertyFactsNetworkAvailable()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Public records lookup is unavailable in this environment." });
+      const row = await propertyFacts.refreshPropertyFacts(input.siteId, { force: true });
+      return { ok: true as const, status: row?.status ?? "unavailable" };
     }),
     /** v2.11 identity-confirm moment — one-tap "yes, that's it": the derived
      * profile was a QUESTION; answering yes upgrades attrSource so the
@@ -1569,6 +1614,9 @@ export const appRouter = router({
         const [allSites, allEntities] = await Promise.all([h.listSites(ctx.user.id), h.listEntities(ctx.user.id)]);
         const filterEntity = input?.entityId;
         const rows = filterEntity === undefined ? allSites : allSites.filter((s) => (s.entityId ?? null) === filterEntity);
+        // Oct 24 property facts: label each floor area by basis so a
+        // public-record estimate is never read as a measured value.
+        const sqftBasis = await propertyFacts.floorAreaBasisForSites(rows).catch(() => new Map<number, propertyFacts.FloorAreaBasisInfo>());
         const siteRollups = await Promise.all(
           rows.map(async (s) => {
             const ins = await h.listInsights(s.id, ctx.user.id);
@@ -1579,6 +1627,7 @@ export const appRouter = router({
               emissions?: { annualCo2eLb?: number } | null;
               baseline?: { normalizedAnnualUsage?: number | null; confidenceLabel?: string } | null;
               ratePricing?: { tier?: string; basis?: string; isFallback?: boolean } | null;
+              benchmark?: { plausibility?: { note?: string } | null } | null;
             } | null;
             const meterRows = await h.listMeters(s.id, ctx.user.id);
             // §3i-2 exception-first inputs: biggest open $ opportunity (not yet
@@ -1628,6 +1677,7 @@ export const appRouter = router({
               // §3i-2 utility-exposure rollup input: which provider serves this site
               utilityName: s.utilityName ?? null,
               sqft: s.sqft ?? null,
+              sqftBasis: sqftBasis.get(s.id)?.basis ?? (s.sqft ? "as_entered" : "none"),
               meterCount: meterRows.filter((meter) => meter.meterRole !== "virtual_total").length,
               analyzed: m != null,
               annualCostUsd: m?.currentCost?.breakdown?.total ?? null,
@@ -1641,6 +1691,9 @@ export const appRouter = router({
               // by the baseline where a fit exists; chip carries the basis.
               euiKwhPerSqft: annualUsageKwh != null && s.sqft ? annualUsageKwh / s.sqft : null,
               euiBasis: m?.baseline?.confidenceLabel ?? null,
+              // Oct 24: pipeline plausibility guard (EUI < ½ peer p25) travels
+              // to the league so an input problem is not ranked as "best".
+              euiPlausibilityNote: m?.benchmark?.plausibility?.note ?? null,
               topOpportunityTitle: topOpp?.title ?? null,
               topOpportunityUsd: topOpp?.savings ?? null,
               topOpportunityRange: topOpp?.range ?? null,
@@ -2036,6 +2089,20 @@ export const appRouter = router({
           for (const s of series) s.validation.notes.push(...memberNotes);
         }
 
+        // Oct 24 (RC2, Joel demo regression): single-file uploads now read the
+        // workbook's header block (Account / Service Agreement / Rate) exactly
+        // like bulk import, so the bill's rate code (e.g. EGMGSQ) reconciles to
+        // the official filed schedule instead of a reference-only fallback.
+        const headerBySheet = new Map<string, { rateScheduleCode: string | null; accountNumber: string | null }>();
+        if (verifiedFormat === "xlsx") {
+          try {
+            const { readWorkbookHeaders } = await import("./bulkImportCore");
+            for (const hm of readWorkbookHeaders(buf, 12)) headerBySheet.set(hm.sheetName, { rateScheduleCode: hm.rateScheduleCode, accountNumber: hm.accountNumber });
+          } catch {
+            /* header metadata is enrichment only — never fail an upload on it */
+          }
+        }
+        const headerFor = (sourceKey: string) => headerBySheet.get(sourceKey) ?? (headerBySheet.size === 1 ? Array.from(headerBySheet.values())[0] : undefined);
         // one meter per parsed series (sheet/UsagePoint)
         const existing = await h.listMeters(input.siteId, ctx.user.id);
         const out: Array<{ meterId: number; label: string; points: number; validationPass: boolean }> = [];
@@ -2085,6 +2152,23 @@ export const appRouter = router({
               }
             }
             const db = (await getDb())!;
+            // RC2: record the bill's rate code and assign the matching official
+            // tariff — never over an assignment the user (or a prior import) made.
+            const hdr = headerFor(s.sourceKey);
+            const code = hdr?.rateScheduleCode?.trim().slice(0, 32) || null;
+            if (code && !meter.rateScheduleCode) {
+              try {
+                const { meters: metersTable } = await import("../drizzle/schema");
+                await db.update(metersTable).set({ rateScheduleCode: code }).where(eq(metersTable.id, meter.id));
+                if (!meter.currentTariffId) {
+                  const { assignTariffForMeter } = await import("./rateCodes");
+                  const a = await assignTariffForMeter(meter.id, ctx.user.id, code, site.utilityName ?? null);
+                  if (a.assigned) s.validation.notes.push(a.disclosure);
+                }
+              } catch {
+                /* fail-open: the analysis falls back to the disclosed basis ladder */
+              }
+            }
             const w = await writeIntervals(db, meter.id, s, uploadId, 2);
             totalIn += s.rowsIngested;
             totalSkip += s.rowsSkipped;
@@ -2545,8 +2629,16 @@ export const appRouter = router({
         const result = await recommendations.reopenRecommendation({ ...input, userId: ctx.user.id });
         return result;
       }),
+    /** Reverse the most recent status change for one or more recommendations. */
+    undo: protectedProcedure
+      .input(z.object({ items: z.array(z.object({ siteId: z.number(), measure: z.string().min(1).max(128) })).min(1).max(100) }))
+      .mutation(async ({ ctx, input }) => ({ ok: true as const, results: await recommendations.undoRecommendationChanges({ userId: ctx.user.id, items: input.items }) })),
+    /** Return a recommendation to untouched/open, removing unverified completion records. */
+    reset: protectedProcedure
+      .input(z.object({ siteId: z.number(), measure: z.string().min(1).max(128) }))
+      .mutation(async ({ ctx, input }) => recommendations.resetRecommendation({ ...input, userId: ctx.user.id })),
     portfolioPriorities: protectedProcedure
-      .input(z.object({ siteIds: z.array(z.number()).max(100).nullable().optional(), groupId: z.number().nullable().optional() }).optional())
+      .input(z.object({ siteIds: z.array(z.number()).max(1000).nullable().optional(), groupId: z.number().nullable().optional() }).optional())
       .query(async ({ ctx, input }) => recommendations.portfolioPriorities({ userId: ctx.user.id, siteIds: input?.siteIds, groupId: input?.groupId })),
     bulkSetState: protectedProcedure
       .input(
@@ -2624,8 +2716,8 @@ export const appRouter = router({
     })),
 
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      await h.deleteMeasureImplementation(input.id, ctx.user.id);
-      return { ok: true };
+      const r = await recommendations.removeImplementationAndReconcile({ userId: ctx.user.id, id: input.id });
+      return { ok: true, withdrawnCompletion: r.withdrawnCompletion };
     }),
 
     /** Re-evaluate one implementation against post-date actuals vs counterfactual baseline. */
@@ -3950,7 +4042,7 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   const assigned = meter?.currentTariffId ? await h.getTariff(meter.currentTariffId) : undefined;
   const current = assigned && assigned.commodity === "electric" ? assigned : undefined;
   const currentStateMismatch = current ? !tariffRows.some((t) => t.id === current.id) : false;
-  const utilityMatch = tariffRows.find((t) => site.utilityName && t.utilityName.toLowerCase().includes(site.utilityName.toLowerCase().split(" ")[0]));
+  const utilityMatch = site.utilityName ? tariffRows.find((t) => tariffMatchesSiteUtility(t.utilityName, site.utilityName)) : undefined;
   const chosen = current ?? utilityMatch ?? tariffRows[0];
   if (!chosen) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No tariff data available for scenario costing" });
   // Cycle 3, pass 56: disclose when the cost basis was not the user's actual

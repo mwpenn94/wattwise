@@ -31,6 +31,7 @@ import {
   siteGroups,
   siteGroupMembers,
   siteGeometry,
+  sitePropertyFacts,
   measureImplementations,
   reportArtifacts,
   planBaskets,
@@ -211,6 +212,7 @@ export async function deleteSite(siteId: number, userId: number) {
     await db.delete(bills).where(eq(bills.meterId, m.id));
   }
   await db.delete(siteGeometry).where(eq(siteGeometry.siteId, siteId));
+  await db.delete(sitePropertyFacts).where(eq(sitePropertyFacts.siteId, siteId));
   await db.delete(siteGroupMembers).where(eq(siteGroupMembers.siteId, siteId));
   await db.delete(recommendationStates).where(eq(recommendationStates.siteId, siteId));
   await db.delete(measureImplementations).where(eq(measureImplementations.siteId, siteId));

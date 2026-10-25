@@ -46,10 +46,10 @@ function Chip({ chip }: { chip: string }) {
   // dark theme; the print view is white, where 500-tint text washes out).
   const cls =
     chip === "Measured"
-      ? "bg-emerald-500/15 text-emerald-500 border-emerald-500/30 print:text-emerald-700 print:bg-emerald-50"
+      ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-500 border-emerald-500/30 print:text-emerald-700 print:bg-emerald-50"
       : chip === "Good"
-        ? "bg-sky-500/15 text-sky-500 border-sky-500/30 print:text-sky-700 print:bg-sky-50"
-        : "bg-amber-500/15 text-amber-500 border-amber-500/30 print:text-amber-700 print:bg-amber-50";
+        ? "bg-sky-500/15 text-sky-700 dark:text-sky-500 border-sky-500/30 print:text-sky-700 print:bg-sky-50"
+        : "bg-amber-500/15 text-amber-700 dark:text-amber-500 border-amber-500/30 print:text-amber-700 print:bg-amber-50";
   return <Badge variant="outline" className={`ml-1 px-1.5 py-0 text-[10px] ${cls}`}>{chip}</Badge>;
 }
 

@@ -243,7 +243,7 @@ export default function Scenarios() {
                       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                         <div>
                           <p className="font-mono text-[10px] uppercase text-muted-foreground">Δ annual cost</p>
-                          <p className={`font-display text-lg font-bold ${r.siteTotalDeltaCost < 0 ? "text-emerald-500" : "text-destructive"}`}>
+                          <p className={`font-display text-lg font-bold ${r.siteTotalDeltaCost < 0 ? "text-emerald-700 dark:text-emerald-500" : "text-destructive"}`}>
                             {r.siteTotalDeltaCost < 0 ? "−" : "+"}
                             {fmtUsd(Math.abs(r.siteTotalDeltaCost))}
                           </p>

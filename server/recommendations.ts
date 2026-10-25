@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNotNull, lte } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, lte } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { auditLog, baselines, measureImplementations, meters, opportunities as opportunityTable, recommendationStates, sites } from "../drizzle/schema";
 import { savingsRangeFromEstimate, type SavingsConfidence, type SavingsRangeUsd } from "../shared/savingsRange";
@@ -8,8 +8,8 @@ import * as h from "./dbHelpers";
 import { pickSiteAnalysisMeter } from "./virtualTotal";
 
 const DAY_MS = 86_400_000;
-export const SAVINGS_BASIS = "Standalone before-change screening estimates, not additive. Combined and post-completion residual savings are not yet modeled; amounts are withheld. Completion is a count of identified actions, not energy savings or a fixed plan percentage.";
-export const VERIFICATION_BASIS = "Attribution inconclusive: immutable pre-change evidence and a unique site/commodity/month allocation are required. Whole-site reductions are not credited separately to multiple measures; historical proof amounts are withheld.";
+export const SAVINGS_BASIS = "Standalone before-change screening estimates, not additive. Measures overlap, so their ranges are not added together, and savings remaining after a completed measure are not yet re-estimated. Completion is a count of identified actions, not energy savings or a fixed plan percentage.";
+export const VERIFICATION_BASIS = "Attribution inconclusive: immutable pre-change evidence and a unique site/commodity/month allocation are required. A whole-site reduction is never credited to more than one measure, so no verified dollar amount is shown until that evidence exists.";
 export type RecommendationStatus = "planned" | "in_progress" | "completed" | "deferred" | "dismissed";
 type VerdictStatus = "awaiting_data" | "on_track" | "verified" | "underperforming" | "inconclusive";
 export interface QueueOpportunity {
@@ -155,7 +155,7 @@ async function transition(tx:Tx,input:StateInput) {
   const deferUntil = input.status === "deferred" ? now + (input.deferDays ?? 90)*DAY_MS : null;
   const values = {userId:input.userId,siteId:input.siteId,measure:input.measure,title:opportunity.title,status:input.status,implementationId,note:input.note ?? null,savingsLowUsd:range?.low ?? null,savingsHighUsd:range?.high ?? null,sourceSnapshot,reopened:false,deferUntil,changedAt:now};
   await tx.insert(recommendationStates).values(values).onDuplicateKeyUpdate({set:values});
-  await tx.insert(auditLog).values({userId:input.userId,action:"recommendation_state_changed",entity:"recommendation_state",entityId:`${input.siteId}:${input.measure}`,detail:{siteId:input.siteId,measure:input.measure,status:input.status,implementationId,deferUntil}});
+  await tx.insert(auditLog).values({userId:input.userId,action:"recommendation_state_changed",entity:"recommendation_state",entityId:`${input.siteId}:${input.measure}`,detail:{siteId:input.siteId,measure:input.measure,status:input.status,implementationId,deferUntil,previous:prior ? {status:prior.status,implementationId:prior.implementationId,note:prior.note,savingsLowUsd:prior.savingsLowUsd,savingsHighUsd:prior.savingsHighUsd,reopened:prior.reopened,sourceSnapshot:prior.sourceSnapshot,deferUntil:prior.deferUntil,changedAt:prior.changedAt,title:prior.title} : null}});
   return {implementationId,deferUntil,changedAt:now};
 }
 export async function setRecommendationStates(inputs:StateInput[]) {
@@ -183,6 +183,87 @@ export async function reopenRecommendation(input:{userId:number;siteId:number;me
   });
 }
 
+/* ---------------- Undo / reset (user-facing correction paths) ----------------
+ * undo   – reverses the most recent status change exactly (restores the prior
+ *          row, or the untouched state if there was none). Refuses when the
+ *          recommendation changed again afterwards, or when the completion being
+ *          undone already has verification results (use Reopen, which keeps them).
+ * reset  – returns a recommendation to untouched/open and removes its unverified
+ *          completion records. Never deletes measured verification evidence.
+ * Both write an audit_log row; nothing is silently discarded. */
+const LIFECYCLE_ACTIONS = ["recommendation_state_changed","recommendation_undone","recommendation_reset","recommendation_reopened"];
+type ImplRow = typeof measureImplementations.$inferSelect;
+function hasVerificationEvidence(impl: ImplRow) {
+  const verdicts = Array.isArray(impl.verdicts) ? impl.verdicts : [];
+  return impl.lastEvaluatedAt != null || verdicts.length > 0 || impl.status !== "awaiting_data";
+}
+const EVIDENCE_MESSAGE = "This completion already has verification results. Use Reopen instead — it puts the recommendation back in your queue and keeps that measured history.";
+async function undoOne(tx:Tx,userId:number,siteId:number,measure:string) {
+  const key = `${siteId}:${measure}`;
+  const [state] = await tx.select().from(recommendationStates).where(and(eq(recommendationStates.siteId,siteId),eq(recommendationStates.measure,measure))).limit(1).for("update");
+  const [last] = await tx.select().from(auditLog).where(and(eq(auditLog.userId,userId),eq(auditLog.entity,"recommendation_state"),eq(auditLog.entityId,key),inArray(auditLog.action,LIFECYCLE_ACTIONS))).orderBy(desc(auditLog.id)).limit(1);
+  if (!state || !last || last.action !== "recommendation_state_changed") throw new TRPCError({code:"PRECONDITION_FAILED",message:"There is no recent change to undo for this recommendation."});
+  const d = (last.detail ?? {}) as {status?:string;implementationId?:number|null;previous?:Record<string,unknown>|null};
+  if (state.reopened || state.status !== d.status || (state.implementationId ?? null) !== (d.implementationId ?? null))
+    throw new TRPCError({code:"CONFLICT",message:"This recommendation changed after that action. Use Reset or Reopen instead."});
+  let removedImplementationId:number|null = null;
+  if (d.implementationId != null) {
+    const [impl] = await tx.select().from(measureImplementations).where(and(eq(measureImplementations.id,d.implementationId),eq(measureImplementations.userId,userId))).limit(1);
+    if (impl && hasVerificationEvidence(impl)) throw new TRPCError({code:"PRECONDITION_FAILED",message:EVIDENCE_MESSAGE});
+    if (impl) { await tx.delete(measureImplementations).where(eq(measureImplementations.id,impl.id)); removedImplementationId = impl.id; }
+  }
+  const prev = d.previous ?? null;
+  if (prev && typeof prev.status === "string") {
+    const restored = {status:prev.status as RecommendationStatus,implementationId:(prev.implementationId as number|null) ?? null,note:(prev.note as string|null) ?? null,savingsLowUsd:(prev.savingsLowUsd as number|null) ?? null,savingsHighUsd:(prev.savingsHighUsd as number|null) ?? null,reopened:Boolean(prev.reopened),sourceSnapshot:prev.sourceSnapshot ?? null,deferUntil:(prev.deferUntil as number|null) ?? null,changedAt:Number(prev.changedAt ?? Date.now()),title:(prev.title as string|null) ?? state.title};
+    await tx.update(recommendationStates).set(restored).where(eq(recommendationStates.id,state.id));
+  } else {
+    await tx.delete(recommendationStates).where(eq(recommendationStates.id,state.id));
+  }
+  await tx.insert(auditLog).values({userId,action:"recommendation_undone",entity:"recommendation_state",entityId:key,detail:{siteId,measure,undidAuditId:last.id,undoneStatus:d.status,restoredStatus:prev?.status ?? "open",removedImplementationId}});
+  return {siteId,measure,restoredStatus:(prev?.status as string|undefined) ?? "open",removedImplementationId};
+}
+export async function undoRecommendationChanges(input:{userId:number;items:Array<{siteId:number;measure:string}>}) {
+  const items = Array.from(new Map(input.items.map(i=>[`${i.siteId}:${i.measure}`,i])).values());
+  if (!items.length) return [];
+  const db = await getDb(); if (!db) throw new Error("Database unavailable");
+  return db.transaction(async tx=>{
+    await lockSites(tx,input.userId,items.map(i=>i.siteId));
+    const out = [];
+    for (const i of items) out.push(await undoOne(tx,input.userId,i.siteId,i.measure));
+    return out;
+  });
+}
+export async function resetRecommendation(input:{userId:number;siteId:number;measure:string;reason?:string}) {
+  const db = await getDb(); if (!db) throw new Error("Database unavailable");
+  return db.transaction(async tx=>{
+    await lockSites(tx,input.userId,[input.siteId]);
+    const [state] = await tx.select().from(recommendationStates).where(and(eq(recommendationStates.siteId,input.siteId),eq(recommendationStates.measure,input.measure))).limit(1).for("update");
+    const impls = await tx.select().from(measureImplementations).where(and(eq(measureImplementations.siteId,input.siteId),eq(measureImplementations.userId,input.userId),eq(measureImplementations.measure,input.measure)));
+    if (impls.some(hasVerificationEvidence)) throw new TRPCError({code:"PRECONDITION_FAILED",message:EVIDENCE_MESSAGE});
+    if (!state && !impls.length) return {ok:true as const,changed:false,removedImplementationIds:[] as number[]};
+    if (impls.length) await tx.delete(measureImplementations).where(inArray(measureImplementations.id,impls.map(i=>i.id)));
+    if (state) await tx.delete(recommendationStates).where(eq(recommendationStates.id,state.id));
+    await tx.insert(auditLog).values({userId:input.userId,action:"recommendation_reset",entity:"recommendation_state",entityId:`${input.siteId}:${input.measure}`,detail:{siteId:input.siteId,measure:input.measure,priorStatus:state?.status ?? null,removedImplementationIds:impls.map(i=>i.id),reason:input.reason ?? "user_reset"}});
+    return {ok:true as const,changed:true,removedImplementationIds:impls.map(i=>i.id)};
+  });
+}
+/** Prove-it removal withdraws the completion it backed, so the queue never shows
+ * "completed" pointing at a deleted record (the Oct 24 Cantex defect). */
+export async function removeImplementationAndReconcile(input:{userId:number;id:number}) {
+  const impl = await h.getMeasureImplementation(input.id,input.userId); // tenancy assert
+  const db = await getDb(); if (!db) throw new Error("Database unavailable");
+  return db.transaction(async tx=>{
+    await lockSites(tx,input.userId,[impl.siteId]);
+    await tx.delete(measureImplementations).where(and(eq(measureImplementations.id,impl.id),eq(measureImplementations.userId,input.userId)));
+    const linked = await tx.select().from(recommendationStates).where(and(eq(recommendationStates.userId,input.userId),eq(recommendationStates.implementationId,impl.id)));
+    for (const st of linked) {
+      if (st.status === "completed") await tx.delete(recommendationStates).where(eq(recommendationStates.id,st.id));
+      else await tx.update(recommendationStates).set({implementationId:null}).where(eq(recommendationStates.id,st.id));
+    }
+    await tx.insert(auditLog).values({userId:input.userId,action:"recommendation_reset",entity:"recommendation_state",entityId:`${impl.siteId}:${impl.measure}`,detail:{siteId:impl.siteId,measure:impl.measure,removedImplementationIds:[impl.id],reason:"prove_it_entry_removed",withdrawnCompletion:linked.some(st=>st.status==="completed")}});
+    return {ok:true as const,withdrawnCompletion:linked.some(st=>st.status==="completed")};
+  });
+}
 /** Pipeline replacement shares lifecycle site locks and never exposes an empty queue. */
 export async function replaceRecommendationOpportunities(siteId:number,userId:number,rows:typeof opportunityTable.$inferInsert[]) {
   const db = await getDb(); if (!db) throw new Error("Database unavailable");

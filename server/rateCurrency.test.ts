@@ -318,7 +318,7 @@ describe("weekly sweep", () => {
       // all real registry sources: pretend unreachable so the test is hermetic
       return new Response("err", { status: 503 });
     }) as unknown as typeof fetch;
-    const result = await sweepRateSources(Date.now(), mockFetch);
+    const result = await sweepRateSources(Date.now(), mockFetch, { onlySourceKeys: [key] });
     expect(call).toBeGreaterThan(0);
     expect(result.changed).toContain(key);
     const row = (await db.select().from(tariffs).where(eq(tariffs.urdbId, urdbId)))[0];
@@ -496,7 +496,7 @@ describe("docket-watch sources", () => {
       }
       return new Response("err", { status: 503 });
     }) as unknown as typeof fetch;
-    const result = await sweepRateSources(Date.now(), mockFetch);
+    const result = await sweepRateSources(Date.now(), mockFetch, { onlySourceKeys: [key] });
     expect(result.changed).toContain(key);
     // audit row exists, and no tariff row anywhere was flipped by this docket
     const audits = await db.select().from(rateVerifications).where(eq(rateVerifications.sourceKey, key));

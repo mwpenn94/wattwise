@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.10.2"; // R2: historical UNS riders, billed ratchets, eligibility and incomplete-bill disclosures
+export const SEED_VERSION = "2026.10.3"; // Oct 24: UNS Gas Oct-1-2026 official values; MGS 750 kW reclassification condition
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -97,6 +97,17 @@ export const EUI_BENCHMARKS: Array<{
   { buildingType: "manufacturing", sectorClass: "commercial", commodity: "site_total", medianEui: 95.1, p25Eui: 45.0, p75Eui: 190.0, unit: "kBtu/sqft/yr", source: "MECS 2018 (approx)" },
   { buildingType: "manufacturing", sectorClass: "commercial", commodity: "electric", medianEui: 19.1, p25Eui: 8.9, p75Eui: 38.5, unit: "kWh/sqft/yr", source: "MECS 2018 (approx)" },
   { buildingType: "school", sectorClass: "commercial", commodity: "site_total", medianEui: 48.9, p25Eui: 33.2, p75Eui: 71.0, unit: "kBtu/sqft/yr", source: "CBECS 2018" },
+  // Oct 24: electric EUI rows from EIA CBECS 2018 Table C22 (released Dec 2022),
+  // "Distribution of building-level intensities (kWh/square foot)" — 25th
+  // percentile / median / 75th percentile. Without these, sites of these types
+  // silently skipped the electric benchmark.
+  // https://www.eia.gov/consumption/commercial/data/2018/ce/pdf/c22.pdf
+  { buildingType: "school", sectorClass: "commercial", commodity: "electric", medianEui: 9.6, p25Eui: 6.2, p75Eui: 13.1, unit: "kWh/sqft/yr", source: "CBECS 2018 Table C22 (K–12)" },
+  { buildingType: "hospital", sectorClass: "commercial", commodity: "electric", medianEui: 30.4, p25Eui: 22.2, p75Eui: 35.3, unit: "kWh/sqft/yr", source: "CBECS 2018 Table C22 (inpatient health care)" },
+  { buildingType: "hotel", sectorClass: "commercial", commodity: "electric", medianEui: 12.8, p25Eui: 8.7, p75Eui: 18.4, unit: "kWh/sqft/yr", source: "CBECS 2018 Table C22 (hotel)" },
+  { buildingType: "grocery", sectorClass: "commercial", commodity: "electric", medianEui: 43.5, p25Eui: 34.9, p75Eui: 77.8, unit: "kWh/sqft/yr", source: "CBECS 2018 Table C22 (grocery store or food market)" },
+  { buildingType: "restaurant", sectorClass: "commercial", commodity: "electric", medianEui: 36.7, p25Eui: 20.7, p75Eui: 52.6, unit: "kWh/sqft/yr", source: "CBECS 2018 Table C22 (restaurant or cafeteria)" },
+  { buildingType: "municipal", sectorClass: "commercial", commodity: "electric", medianEui: 8.2, p25Eui: 3.7, p75Eui: 14.9, unit: "kWh/sqft/yr", source: "CBECS 2018 Table C22 (public assembly proxy)" },
   { buildingType: "hospital", sectorClass: "commercial", commodity: "site_total", medianEui: 234.3, p25Eui: 178.0, p75Eui: 306.0, unit: "kBtu/sqft/yr", source: "CBECS 2018" },
   { buildingType: "hotel", sectorClass: "commercial", commodity: "site_total", medianEui: 63.0, p25Eui: 43.6, p75Eui: 91.0, unit: "kBtu/sqft/yr", source: "CBECS 2018" },
   { buildingType: "grocery", sectorClass: "commercial", commodity: "site_total", medianEui: 196.0, p25Eui: 141.0, p75Eui: 262.0, unit: "kBtu/sqft/yr", source: "CBECS 2018" },
@@ -704,6 +715,7 @@ export const SEED_TARIFFS: SeedTariff[] = [
       energy: [{ label: "All energy", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.074955 }],
       demand: [{ label: "Billing demand", months: ALL_MONTHS, ratePerKw: 14.67 }],
       demandMinKw: 20,
+      reclassifyAtKw: { kw: 750, to: "Large General Service (LGS)" },
       ...UNS_MODEL_TERMS,
       ratchet: { lookbackMonths: 11, ratchetPct: 0.75, applicablePeriod: "all", determinant: "billed" },
       riders: unsElectricRiders(350, true),
@@ -733,6 +745,7 @@ export const SEED_TARIFFS: SeedTariff[] = [
       ],
       demand: [{ label: "Billing demand", months: ALL_MONTHS, ratePerKw: 14.67 }],
       demandMinKw: 20,
+      reclassifyAtKw: { kw: 750, to: "Large General Service (LGS)" },
       ...UNS_MODEL_TERMS,
       ratchet: { lookbackMonths: 11, ratchetPct: 0.75, applicablePeriod: "all", determinant: "billed" },
       riders: unsElectricRiders(350, true),
@@ -910,7 +923,8 @@ export const SEED_TARIFFS: SeedTariff[] = [
   },
   /* -------------------- UNS Gas (UniSource, AZ) --------------------------- */
   // Verified against the UNS Gas Statement of Rates (Tariff Sheet 1.1,
-  // Decision No. 81653), effective 6/1/2026:
+  // Decision No. 81653), month Oct-26, effective 10/1/2026 (LFCR 0.1877% per
+  // Decision No. 82165) — re-read from the official PDF on Oct 24 2026:
   // https://docs.uesaz.com/wp-content/uploads/UNSG-Tariff-Sheet-1.1.pdf
   // Effective tariff rates INCLUDE the PGA gas adjustor and LFCR as filed
   // (taxes/assessments excluded). Serves Mohave, Yavapai, Coconino, Navajo and
@@ -927,13 +941,13 @@ export const SEED_TARIFFS: SeedTariff[] = [
     structure: {
       fixedMonthly: 11.96,
       energy: [
-        // $0.8304/therm = base $0.3801 + PGA $0.4487 + LFCR $0.0016.
-        { label: "All gas (base $0.3801 + PGA $0.4487 + LFCR $0.0016)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.8304 },
+        // $0.8292/therm = base $0.3801 + PGA $0.4475 + LFCR $0.0016 (eff. 10/1/2026).
+        { label: "All gas (base $0.3801 + PGA $0.4475 + LFCR $0.0016)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.8292 },
       ],
       demand: [],
     },
     freshness: "urdb_stale",
-    effectiveDate: "2026-06-01",
+    effectiveDate: "2026-10-01",
   },
   {
     urdbId: "unsg-ggsvs",
@@ -947,13 +961,13 @@ export const SEED_TARIFFS: SeedTariff[] = [
     structure: {
       fixedMonthly: 28.37,
       energy: [
-        // $0.7635/therm = base $0.3134 + PGA $0.4487 + LFCR $0.0014.
-        { label: "All gas (base $0.3134 + PGA $0.4487 + LFCR $0.0014)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.7635 },
+        // $0.7623/therm = base $0.3134 + PGA $0.4475 + LFCR $0.0014 (eff. 10/1/2026).
+        { label: "All gas (base $0.3134 + PGA $0.4475 + LFCR $0.0014)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.7623 },
       ],
       demand: [],
     },
     freshness: "urdb_stale",
-    effectiveDate: "2026-06-01",
+    effectiveDate: "2026-10-01",
   },
   /* -------------------- Gas & water (commodity-generality proof) --------- */
   {

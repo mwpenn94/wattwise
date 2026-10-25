@@ -250,7 +250,7 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
             · ${Math.round(a.annualTotalUsd).toLocaleString()}/yr entered
           </span>
           {savingsLabel && (
-            <span className="text-emerald-400">
+            <span className="text-emerald-700 dark:text-emerald-400">
               potential savings {savingsLabel}/yr
               <span className="text-muted-foreground"> (largest finding per service, ranges disclosed)</span>
             </span>

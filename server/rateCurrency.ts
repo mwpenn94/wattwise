@@ -443,7 +443,17 @@ export function effectiveCadenceDays(source: Pick<RateSourceRow, "adjustorCycle"
 
 /** Weekly sweep body — called from refreshReferenceHandler. Never throws;
  * per-source failures increment consecutiveFailures and continue. */
-export async function sweepRateSources(now = Date.now(), fetchImpl: typeof fetch = fetch): Promise<SweepResult> {
+/**
+ * Oct 24: `onlySourceKeys` scopes the fingerprint loop. Tests MUST pass their
+ * own keys — an unscoped sweep with a mock 503 fetch against the shared
+ * database incremented consecutiveFailures on every REAL source on each test
+ * run, making the Tariffs page falsely report "source unreachable ×18".
+ */
+export async function sweepRateSources(
+  now = Date.now(),
+  fetchImpl: typeof fetch = fetch,
+  opts: { onlySourceKeys?: string[] } = {},
+): Promise<SweepResult> {
   const db = await getDb();
   if (!db) throw new Error("db unavailable");
   await registerRateSources();
@@ -466,7 +476,10 @@ export async function sweepRateSources(now = Date.now(), fetchImpl: typeof fetch
   } catch {
     /* gas depth floor is additive; sweep continues regardless */
   }
-  const sources = await db.select().from(rateSources);
+  const allSources = await db.select().from(rateSources);
+  const sources = opts.onlySourceKeys
+    ? allSources.filter((s) => opts.onlySourceKeys!.includes(s.sourceKey))
+    : allSources;
   const result: SweepResult = { checked: 0, changed: [], due: [], unreachable: [] };
   for (const s of sources) {
     result.checked++;

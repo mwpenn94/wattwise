@@ -28,7 +28,7 @@ export interface InsightsPrintData {
   site: { name: string; buildingType: string | null; sqft: number | null; state: string | null; zip?: string | null; utilityName?: string | null };
   generatedAt: number;
   demand: InsightsPrintDemand | null;
-  benchmark: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
+  benchmark: { siteEui?: number | null; percentileBand?: string | null; source?: string | null; sqft?: number | null; sqftBasis?: string | null; plausibility?: { note?: string } | null } | null;
   emissions: { annualCo2eLb?: number; subregion?: string; factorYear?: number; mapped?: boolean } | null;
   currentCost: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
   /* HOL-6 (owner Jul 29): connectivity joins the report's cost picture like the
@@ -41,6 +41,7 @@ export interface InsightsPrintData {
     utilityName: string;
     freshness: string;
     eligible: boolean;
+    isCurrentBasis?: boolean;
     ineligibleReason?: string | null;
     annualCost: { total: number };
     savingsVsCurrent: number | null;
@@ -238,7 +239,9 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
     {
       label: "Benchmark",
       value: data.benchmark?.percentileBand ? String(data.benchmark.percentileBand).split("(")[0].trim() : "—",
-      sub: data.benchmark?.siteEui != null ? `EUI ${num(data.benchmark.siteEui)} kWh/sqft` : undefined,
+      sub: data.benchmark?.siteEui != null
+        ? `EUI ${num(data.benchmark.siteEui)} kWh/sqft${data.benchmark.sqftBasis === "public_record_estimate" ? " (floor area: public-record estimate)" : ""}${data.benchmark.plausibility ? " · unusually low — verify floor area and meters" : ""}`
+        : undefined,
     },
     {
       label: "Emissions",
@@ -375,7 +378,7 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
               </tr>
             </thead>
             <tbody>
-              {data.tariffComparisons.map((t) => (
+              {data.tariffComparisons.filter((t) => t.eligible || t.isCurrentBasis).map((t) => (
                 <tr key={`${t.utilityName}-${t.tariffName}`} className="border-b border-neutral-200 align-top break-inside-avoid">
                   <td className="py-1 pr-2 font-medium">{t.tariffName}</td>
                   <td className="py-1 pr-2">{t.utilityName}</td>
@@ -383,12 +386,21 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
                   <td className="py-1 pr-2 text-right">
                     {t.savingsVsCurrent == null ? "—" : t.savingsVsCurrent > 0 ? `save ${usd(t.savingsVsCurrent)}` : t.savingsVsCurrent < 0 ? `+${usd(-t.savingsVsCurrent)}` : "even"}
                   </td>
-                  <td className="py-1 pr-2">{t.eligible ? "yes" : t.ineligibleReason ?? "no"}</td>
+                  <td className="py-1 pr-2">{t.eligible ? (t.isCurrentBasis ? "current" : "yes") : `current (outside filed bracket: ${t.ineligibleReason ?? "see utility"})`}</td>
                   <td className="py-1 text-neutral-600">{t.freshness}{t.eligibilityNote ? ` · ${t.eligibilityNote}` : ""}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {data.tariffComparisons.some((t) => !t.eligible && !t.isCurrentBasis) && (
+            <p className="mt-1 text-[9px] text-neutral-600">
+              Not applicable to this site (not priced):{" "}
+              {data.tariffComparisons
+                .filter((t) => !t.eligible && !t.isCurrentBasis)
+                .map((t) => `${t.tariffName}${t.ineligibleReason ? ` — ${t.ineligibleReason}` : ""}`)
+                .join("; ")}
+            </p>
+          )}
         </section>
       )}
 

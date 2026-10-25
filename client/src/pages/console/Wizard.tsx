@@ -94,7 +94,7 @@ export default function Wizard() {
   if (done) {
     return (
       <div className="container max-w-2xl py-16 text-center">
-        <CheckCircle2 className="mx-auto h-12 w-12 text-emerald-500" />
+        <CheckCircle2 className="mx-auto h-12 w-12 text-emerald-700 dark:text-emerald-500" />
         <h1 className="mt-4 font-display text-2xl font-bold">Archetype analysis complete</h1>
         <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
           Your hypothetical building was synthesized from peer-archetype load shapes and pushed through the same analytics

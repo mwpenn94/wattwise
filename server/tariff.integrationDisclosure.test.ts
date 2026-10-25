@@ -14,9 +14,15 @@ describe("tariff review cross-file disclosure integration", () => {
     expect(priced.combined.switchRecommendationAllowed).toBe(false);
     const review = perMeterRateReview([account], [{ id: 2, name: "cheap candidate", utilityName: current.utilityName, structure: { fixedMonthly: 0, energy: [], demand: [] }, freshness: "verified", eligibleFor: () => true }]);
     expect(review.perMeter[0].rateCodeResolution?.match).toBe("family_inferred");
-    expect(review.perMeter[0].bestAlternative).toBeNull();
+    // Oct 24 owner directive: an inferred bill code WIDENS the range and adds a
+    // confirm-first note; the comparison is never withheld when data exists.
+    const best = review.perMeter[0].bestAlternative!;
+    expect(best).not.toBeNull();
+    expect(best.indicative).toBe(true);
+    expect(best.savingsRangeUsd.low).toBeCloseTo(best.savingsRangeUsd.high * 0.4, 6);
+    expect(best.basis).toContain("Indicative");
     expect(review.perMeter[0].period.calendarMonths).toBe(1);
-    expect(review.perMeter[0].disclosures.join(" ")).toContain("Alternative savings withheld");
+    expect(review.perMeter[0].disclosures.join(" ")).toContain("confirm your exact rate");
   });
   it("existing plausibility guard rejects the exact Springfield MA match for Kingman AZ", () => {
     expect(geocodeIsPlausible({ city: "Springfield", state: "MA" }, { city: "Kingman", state: "AZ" }).ok).toBe(false);

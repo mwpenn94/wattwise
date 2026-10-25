@@ -45,9 +45,9 @@ const KIND_META: Record<string, { label: string; icon: typeof TrendingDown }> = 
 };
 
 const CONF_CLASS: Record<string, string> = {
-  high: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
-  medium: "border-sky-500/40 bg-sky-500/10 text-sky-300",
-  low: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+  high: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  medium: "border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+  low: "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300",
 };
 
 interface FormState {
@@ -289,7 +289,7 @@ export default function Telecom() {
           <Card className={savingsLabel ? "border-emerald-500/40" : ""}>
             <CardContent className="pt-5">
               <p className="text-xs uppercase tracking-wide text-muted-foreground">Potential savings</p>
-              <p className="mt-1 font-display text-2xl font-bold text-emerald-400">{savingsLabel ?? "—"}</p>
+              <p className="mt-1 font-display text-2xl font-bold text-emerald-700 dark:text-emerald-400">{savingsLabel ?? "—"}</p>
               <p className="text-xs text-muted-foreground">
                 {savingsLabel ? "per year; largest finding per service, ranges disclosed" : "no savings findings right now"}
               </p>
@@ -376,7 +376,7 @@ export default function Telecom() {
                 <Card key={`${f.serviceId}-${f.kind}-${i}`}>
                   <CardHeader className="pb-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      <KIcon className="h-4 w-4 text-emerald-400" />
+                      <KIcon className="h-4 w-4 text-emerald-700 dark:text-emerald-400" />
                       <CardTitle className="text-base">{f.title}</CardTitle>
                       <Badge variant="outline" className={CONF_CLASS[f.confidence] ?? ""}>
                         {f.confidence} confidence
@@ -385,7 +385,7 @@ export default function Telecom() {
                         {km.label}
                       </Badge>
                       {f.estAnnualSavingsHi != null && f.estAnnualSavingsHi > 0 && (
-                        <span className="ml-auto text-sm font-semibold text-emerald-400">
+                        <span className="ml-auto text-sm font-semibold text-emerald-700 dark:text-emerald-400">
                           {f.estAnnualSavingsLo != null && f.estAnnualSavingsLo !== f.estAnnualSavingsHi
                             ? `$${f.estAnnualSavingsLo.toLocaleString()}–$${f.estAnnualSavingsHi.toLocaleString()}/yr`
                             : `~$${f.estAnnualSavingsHi.toLocaleString()}/yr`}

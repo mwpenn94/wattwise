@@ -448,7 +448,10 @@ export function runScenario(
   const scenPoints = hourlyToPoints(hourly);
   const baseCost = costOnTariff(basePoints, structure);
   const scenCost = costOnTariff(scenPoints, structure, { hasSolar: input.kind === "solar" || input.kind === "solar_battery" });
-  if (baseCost.switchRecommendationAllowed === false || scenCost.switchRecommendationAllowed === false) throw new Error("Scenario savings withheld: incomplete tariff/account terms. Confirm riders, billing basis and renewable REST treatment before modeling financial savings.");
+  // Oct 24 (owner): never withhold a modeled scenario because the filed-rate
+  // model is a subtotal — label it indicative instead.
+  const scenarioIndicative = baseCost.switchRecommendationAllowed === false || scenCost.switchRecommendationAllowed === false;
+  if (scenarioIndicative) disclosures.push("Indicative: priced on the filed base schedule, which excludes some riders/taxes; confirm account terms before committing.");
   disclosures.push(...baseCost.disclosures);
   disclosures.push(...scenCost.disclosures.filter((d) => !baseCost.disclosures.includes(d)));
 
@@ -495,7 +498,7 @@ export function runScenario(
   // high-confidence baseline); extrapolation always forces "low". The previous
   // ternary collapsed medium baselines to low with no cause, understating
   // reliability.
-  const confidence = extrapolated ? "low" : baselineConfidence === "low" ? "low" : "medium";
+  const confidence = extrapolated || scenarioIndicative ? "low" : baselineConfidence === "low" ? "low" : "medium";
   if (paybackYears == null && input.capexUsd && deltaCost < -1) {
     paybackYears = input.capexUsd / -deltaCost;
     // Accuracy pass (owner directive Jul 20, "as accurate/precise/justified as

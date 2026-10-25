@@ -4,7 +4,7 @@
  * opportunities, benchmark percentile card, emissions summary, and the
  * modeled-estimates disclaimer + provenance labels throughout.
  */
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { detectPersona, personaVocab } from "@/lib/persona";
 import AnalysisProgress from "@/components/AnalysisProgress";
@@ -17,7 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Activity, BarChart3, Droplets, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown, Wifi, Zap } from "lucide-react";
+import { Activity, BarChart3, ChevronDown, Droplets, Flame, Gauge, Leaf, Lightbulb, Play, TrendingDown, Wifi, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { decimateForChart, fmtNum, fmtUsd, type ChartPoint } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
@@ -27,6 +27,7 @@ import { MarkImplementedDialog, ProveItSection } from "@/components/ProveIt";
 import RefineChips from "@/components/RefineChips";
 import SiteGeometryPanel from "@/components/SiteGeometryPanel";
 import UtilityServicesCard from "@/components/UtilityServicesCard";
+import PropertyFactsCard from "@/components/PropertyFactsCard";
 import { siteHref, useActiveSite, useSiteRequestGuard } from "@/hooks/useActiveSite";
 import { Link } from "wouter";
 import { Printer } from "lucide-react";
@@ -73,7 +74,14 @@ export default function Dashboard() {
     meters.data?.find((m) => !["submeter", "generation", "ev", "virtual_total"].includes(m.meterRole)) ??
     meters.data?.[0];
   const flowUnit = meter?.commodity === "gas" ? "therms/day" : meter?.commodity === "water" ? "gal/day" : "kW";
-  const latest = trpc.analysis.latest.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
+  // RC3: a background re-analysis (after an address edit) shows as "running";
+  // poll until it lands, then refresh every dependent panel once.
+  const latest = trpc.analysis.latest.useQuery(
+    { siteId: activeSiteId! },
+    { enabled: activeSiteId != null, refetchInterval: (q) => (q.state.data?.status === "running" ? 3000 : false) },
+  );
+  const backgroundRunning = latest.data?.status === "running";
+  const retiredByLocation = latest.data?.status === "failed" && /location changed/i.test(latest.data?.error ?? "");
   const baseline = trpc.analysis.baseline.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const insights = trpc.insights.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const opps = trpc.insights.opportunities.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
@@ -83,6 +91,22 @@ export default function Dashboard() {
   const stats = trpc.intervalsApi.stats.useQuery({ meterId: meter?.id ?? 0 }, { enabled: !!meter });
   const utils = trpc.useUtils();
 
+  // RC3: when a background analysis finishes, refresh dependent panels once.
+  const prevStatus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const st = latest.data?.status;
+    if (prevStatus.current === "running" && st && st !== "running") {
+      void Promise.all([
+        utils.analysis.baseline.invalidate(),
+        utils.insights.list.invalidate(),
+        utils.insights.opportunities.invalidate(),
+        utils.recommendations.queue.invalidate(),
+        utils.sites.get.invalidate(),
+        utils.sites.propertyFacts.invalidate(),
+      ]);
+    }
+    prevStatus.current = st;
+  }, [latest.data?.status, utils]);
   const run = trpc.analysis.run.useMutation({
     onSuccess: async () => {
       toast.success("Analysis complete");
@@ -106,10 +130,22 @@ export default function Dashboard() {
   const [rangeDays, setRangeDays] = useState<30 | 90 | 365 | "all">(30);
   // §3e prove-it: which opportunity the "I did this" dialog is marking
   const [markTarget, setMarkTarget] = useState<{ id?: number; measure: string; title: string; expectedSavingsUsd: number | null } | null>(null);
+  const refreshRecommendations = () => Promise.all([utils.recommendations.queue.invalidate(), utils.recommendations.portfolioPriorities.invalidate(), utils.entities.portfolio.invalidate(), utils.proveIt.list.invalidate(), utils.proveIt.verifiedTotal.invalidate()]);
+  // Undo / reset: every status change can be reversed from its toast; an
+  // unverified completion can be undone later from the Completed list.
+  const undoRecommendation = trpc.recommendations.undo.useMutation({
+    onSuccess: async () => { await refreshRecommendations(); toast.success("Change undone"); },
+    onError: (error) => toast.error(error.message),
+  });
+  const resetRecommendation = trpc.recommendations.reset.useMutation({
+    onSuccess: async () => { await refreshRecommendations(); toast.success("Completion undone — the recommendation is back in your queue"); },
+    onError: (error) => toast.error(error.message),
+  });
   const changeRecommendation = trpc.recommendations.setState.useMutation({
     onSuccess: async (_result, input) => {
-      await Promise.all([utils.recommendations.queue.invalidate(), utils.recommendations.portfolioPriorities.invalidate(), utils.entities.portfolio.invalidate(), utils.proveIt.list.invalidate(), utils.proveIt.verifiedTotal.invalidate()]);
-      toast.success(input.status === "completed" ? "Marked complete — verification is ready for new data" : "Recommendation updated");
+      await refreshRecommendations();
+      const label = { completed: "Marked complete — verification is ready for new data", planned: "Added to plan", in_progress: "Marked in progress", deferred: "Deferred 90 days", dismissed: "Marked not applicable" }[input.status] ?? "Recommendation updated";
+      toast.success(label, { duration: 10000, action: { label: "Undo", onClick: () => undoRecommendation.mutate({ items: [{ siteId: input.siteId, measure: input.measure }] }) } });
     },
     onError: (error) => toast.error(error.message),
   });
@@ -156,7 +192,7 @@ export default function Dashboard() {
   const summaryRow = allInsightRows.find((i) => i.kind === "summary");
   const summary = (summaryRow?.metrics ?? null) as {
     demand?: Demand | null;
-    benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
+    benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null; sqft?: number | null; sqftBasis?: string | null; sqftBasisLabel?: string | null ; plausibility?: { flag?: string; note?: string } | null } | null;
     emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number; mapped?: boolean } | null;
     currentCost?: { disclosures?: string[]; pricingStatus?: string; breakdown?: { energy: number; demand: number; fixed: number; total: number; riders?: Array<{ label: string; amount: number }>; exportCredits?: number; cp?: number | null; minBillAdjustment?: number } } | null;
     /* TEL1C-4/TUX-2: connectivity subscription spend from the pipeline summary —
@@ -407,7 +443,17 @@ export default function Dashboard() {
         </div>
       )}
 
-      {activeSiteId != null && <PropertyRecordsCard key={`records:${activeSiteId}`} siteId={activeSiteId} />}
+      {/* Oct 24 property facts: automatic, in-app public-record enrichment
+          (replaces the outbound-link card — users never leave to look things up). */}
+      {activeSiteId != null && (
+        <PropertyFactsCard
+          key={`facts:${activeSiteId}`}
+          siteId={activeSiteId}
+          canEdit={(activeSite as { myRole?: string } | null)?.myRole !== "read_only"}
+          onFloorAreaChanged={() => run.mutate({ siteId: activeSiteId })}
+          plausibilityNote={summary?.benchmark?.plausibility?.note ?? null}
+        />
+      )}
 
       {/* SVC: per-commodity service applicability — what we analyze and why,
           with one-tap correction (all-electric, well water, off-grid). */}
@@ -417,6 +463,22 @@ export default function Dashboard() {
         </div>
       )}
 
+      {(backgroundRunning || retiredByLocation) && !run.isPending && (
+        <Card className="mt-6 border-dashed" data-testid="reanalysis-notice">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 py-5 text-sm">
+            <span className="text-muted-foreground">
+              {backgroundRunning
+                ? "Updating this site's analysis for its current address — figures refresh automatically."
+                : "The address changed, so the earlier figures were retired. Re-run to price this site at its current location."}
+            </span>
+            {retiredByLocation && activeSiteId != null && (
+              <Button size="sm" onClick={() => run.mutate({ siteId: activeSiteId })}>
+                <Play className="mr-1 h-4 w-4" /> Re-run analysis
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
       {latest.data == null && !latest.isLoading && (
         <Card className="mt-6 border-dashed">
           <CardContent className="py-10 text-center text-sm text-muted-foreground">
@@ -489,8 +551,14 @@ export default function Dashboard() {
              the sub shows only the extracted descriptive text, no redundant suffix */
           sub={
             benchmarkInsight
-              ? (String(benchmarkInsight.percentileBand ?? "").match(/\(([^)]+)\)/)?.[1] ??
-                String(benchmarkInsight.percentileBand ?? "")).trim()
+              ? `${(String(benchmarkInsight.percentileBand ?? "").match(/\(([^)]+)\)/)?.[1] ??
+                String(benchmarkInsight.percentileBand ?? "")).trim()}${
+                  benchmarkInsight.sqftBasis === "public_record_estimate" && benchmarkInsight.sqft
+                    ? ` · per ${Math.round(benchmarkInsight.sqft).toLocaleString()} sqft, a public-record estimate`
+                    : benchmarkInsight.sqftBasis === "placeholder"
+                      ? " · per a typical-size placeholder floor area"
+                      : ""
+                }`
               : ""
           }
         />
@@ -645,25 +713,25 @@ export default function Dashboard() {
               <AreaChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                 <defs>
                   <linearGradient id="kwFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="oklch(0.8 0.16 80)" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="oklch(0.8 0.16 80)" stopOpacity={0.02} />
+                    <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.35} />
+                    <stop offset="100%" stopColor="var(--chart-1)" stopOpacity={0.02} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="oklch(0.35 0.01 260)" />
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                 <XAxis
                   dataKey="ts"
                   tickFormatter={(ts: number) => new Date(ts).toLocaleDateString([], { month: "short", day: "numeric" })}
-                  stroke="oklch(0.6 0.01 260)"
+                  stroke="var(--muted-foreground)"
                   fontSize={11}
                   minTickGap={48}
                 />
-                <YAxis stroke="oklch(0.6 0.01 260)" fontSize={11} width={52} unit={` ${flowUnit === "kW" ? "kW" : flowUnit.split("/")[0]}`} />
+                <YAxis stroke="var(--muted-foreground)" fontSize={11} width={52} unit={` ${flowUnit === "kW" ? "kW" : flowUnit.split("/")[0]}`} />
                 <Tooltip
-                  contentStyle={{ background: "oklch(0.22 0.012 260)", border: "1px solid oklch(0.35 0.01 260)", borderRadius: 8, fontSize: 12 }}
+                  contentStyle={{ background: "var(--popover)", color: "var(--popover-foreground)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
                   labelFormatter={(ts) => new Date(Number(ts)).toLocaleString()}
                   formatter={(v) => [`${v} ${flowUnit === "kW" ? "kW" : flowUnit.split("/")[0]}`, flowUnit === "kW" ? "demand" : "usage"]}
                 />
-                <Area type="monotone" dataKey="kw" stroke="oklch(0.8 0.16 80)" strokeWidth={1.5} fill="url(#kwFill)" isAnimationActive={false} dot={false} />
+                <Area type="monotone" dataKey="kw" stroke="var(--chart-1)" strokeWidth={1.5} fill="url(#kwFill)" isAnimationActive={false} dot={false} />
               </AreaChart>
             </ResponsiveContainer>
           )}
@@ -799,7 +867,7 @@ export default function Dashboard() {
                       <Tooltip
                         formatter={(v: number) => [`${fmtNum(v)} kW`, "demand"]}
                         labelFormatter={(l: number) => `top ${l}% of hours`}
-                        contentStyle={{ background: "var(--card)", border: "1px solid var(--border)", fontSize: 11 }}
+                        contentStyle={{ background: "var(--card)", color: "var(--card-foreground)", border: "1px solid var(--border)", fontSize: 11 }}
                       />
                       <Area type="stepAfter" dataKey="kw" stroke="var(--primary)" fill="var(--primary)" fillOpacity={0.15} strokeWidth={1.5} />
                     </AreaChart>
@@ -879,60 +947,98 @@ export default function Dashboard() {
             {baseline.data && <ProvChip>{baseline.data.weatherBasis}</ProvChip>}
           </CardHeader>
           <CardContent className="space-y-3">
-            {baseline.data ? (
-              <>
-                <div className="grid grid-cols-2 gap-3 text-sm">
-                  <div>
-                    <p className="font-mono text-[10px] uppercase text-muted-foreground">Method</p>
-                    <p className="font-mono text-xs">{baseline.data.method}</p>
+            {/* Oct 24 (owner): PROGRESSIVE cost view — a simple Energy / Demand /
+                Fixed / Other / Total default with one plain sentence; method,
+                fit, rider lines and every disclosure stay one tap away. */}
+            {costInsight?.breakdown ? (
+              (() => {
+                const b = costInsight.breakdown;
+                const other = (b.riders ?? []).reduce((sum, r) => sum + r.amount, 0) + (b.cp ?? 0) + (b.minBillAdjustment ?? 0) - (b.exportCredits ?? 0);
+                const tiles: Array<{ label: string; value: number; strong?: boolean }> = [
+                  { label: "Energy", value: b.energy },
+                  { label: "Demand", value: b.demand },
+                  { label: "Fixed", value: b.fixed },
+                  ...(Math.abs(other) >= 0.5 ? [{ label: "Other", value: other }] : []),
+                  { label: "Total", value: b.total, strong: true },
+                ];
+                const tier = summary?.ratePricing?.tier;
+                // Measured demand only exists when interval data was uploaded;
+                // bill-only / described sites are priced on a modeled profile.
+                const usageWord = summary?.demand ? "Your interval data" : "Modeled usage for this building";
+                const plain =
+                  tier === "tariff_priced_actual"
+                    ? `${usageWord} priced on your utility's filed rate for the period covered.`
+                    : tier === "assumed" || tier === "filed"
+                      ? `${usageWord} priced on the closest filed rate for the period covered. Confirm the exact rate with your utility.`
+                      : `${usageWord} priced at an average local rate for the period covered.`;
+                return (
+                  <div data-testid="cost-simple">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm font-medium">Cost for the period covered</p>
+                      <ProvenanceBadge
+                        tier={(summary?.ratePricing?.tier as never) ?? null}
+                        basis={summary?.ratePricing?.basis ?? "modeled tariff basis — confirm actual account schedule"}
+                      />
+                    </div>
+                    <div className={`mt-2 grid gap-2 ${tiles.length === 5 ? "grid-cols-2 sm:grid-cols-5" : "grid-cols-2 sm:grid-cols-4"}`}>
+                      {tiles.map((t) => (
+                        <div key={t.label} className={`rounded-md border px-3 py-2 ${t.strong ? "border-primary/40 bg-primary/5" : "border-border/70"}`}>
+                          <p className="text-[11px] text-muted-foreground">{t.label}</p>
+                          <p className={`font-mono text-sm ${t.strong ? "font-semibold text-foreground" : "text-foreground/90"}`}>{fmtUsd(t.value)}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-xs text-muted-foreground">{plain}</p>
                   </div>
-                  <div>
-                    <p className="font-mono text-[10px] uppercase text-muted-foreground">Fit</p>
-                    <p className="font-mono text-xs">
-                      R² {baseline.data.rSquared != null ? baseline.data.rSquared.toFixed(2) : "n/a"} · CV(RMSE){" "}
-                      {baseline.data.cvrmse != null ? `${(baseline.data.cvrmse * 100).toFixed(0)}%` : "n/a (flat or archetype baseline)"}
-                    </p>
-                  </div>
-                </div>
-                <p className="text-xs leading-relaxed text-muted-foreground">{baseline.data.confidenceLabel}</p>
-              </>
+                );
+              })()
+            ) : baseline.data ? (
+              <p className="text-sm text-muted-foreground">{baseline.data.confidenceLabel}</p>
             ) : (
-              <p className="text-sm text-muted-foreground">No baseline yet.</p>
+              <p className="text-sm text-muted-foreground" data-testid="cost-empty">
+                No cost yet for this site.{" "}
+                <Link href={siteHref("/app/upload", activeSiteId)} className="text-primary underline">
+                  Add a bill or interval file
+                </Link>{" "}
+                to see Energy, Demand, Fixed, and Total.
+              </p>
             )}
-            {costInsight?.breakdown && (
-              <div className="border-t border-border pt-3">
-                <p className="flex items-center gap-2 text-sm font-medium">
-                  Modeled covered-period cost subtotal
-                  <ProvenanceBadge
-                    tier={(summary?.ratePricing?.tier as never) ?? null}
-                    basis={summary?.ratePricing?.basis ?? "modeled tariff basis — confirm actual account schedule"}
-                  />
-                </p>
-                <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground sm:grid-cols-4">
-                  <span>energy {fmtUsd(costInsight.breakdown.energy)}</span>
-                  <span>demand {fmtUsd(costInsight.breakdown.demand)}</span>
-                  <span>fixed {fmtUsd(costInsight.breakdown.fixed)}</span>
-                  {costInsight.breakdown.riders?.map((r, i) => <span key={`rider-${i}-${r.label}`}>{r.label} {fmtUsd(r.amount)}</span>)}
-                  {(costInsight.breakdown.exportCredits ?? 0) > 0 && <span>export credit −{fmtUsd(costInsight.breakdown.exportCredits ?? 0)}</span>}
-                  {/* Batch-23 (pass 772): CP proxy charges are tracked separately from
-                      windowed demand in the engine breakdown — omitting this line made
-                      energy+demand+fixed visibly fall short of total for CP tariffs. */}
-                  {(costInsight.breakdown.cp ?? 0) > 0 && <span>coincident-peak {fmtUsd(costInsight.breakdown.cp)}</span>}
-                  {/* Batch-40 (pass 1742): minimum-bill uplift is its own line so
-                      components always sum to total — not silently folded in. */}
-                  {(costInsight.breakdown.minBillAdjustment ?? 0) > 0 && (
-                    <span>min-bill adj {fmtUsd(costInsight.breakdown.minBillAdjustment ?? 0)}</span>
+            {(baseline.data || costInsight?.breakdown) && (
+              <Collapsible>
+                <CollapsibleTrigger className="group flex items-center gap-1 text-xs font-medium text-primary hover:underline" data-testid="cost-details-toggle">
+                  <ChevronDown className="h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-180" /> Details
+                </CollapsibleTrigger>
+                <CollapsibleContent className="mt-2 space-y-3" data-testid="cost-details">
+                  {baseline.data && (
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div>
+                        <p className="font-mono text-[10px] uppercase text-muted-foreground">Baseline method</p>
+                        <p className="font-mono text-xs">{baseline.data.method}</p>
+                      </div>
+                      <div>
+                        <p className="font-mono text-[10px] uppercase text-muted-foreground">Fit</p>
+                        <p className="font-mono text-xs">
+                          R² {baseline.data.rSquared != null ? baseline.data.rSquared.toFixed(2) : "n/a"} · CV(RMSE){" "}
+                          {baseline.data.cvrmse != null ? `${(baseline.data.cvrmse * 100).toFixed(0)}%` : "n/a (flat or archetype baseline)"}
+                        </p>
+                      </div>
+                      <p className="col-span-2 text-xs leading-relaxed text-muted-foreground">{baseline.data.confidenceLabel}</p>
+                    </div>
                   )}
-                  <span className="text-foreground">total {fmtUsd(costInsight.breakdown.total)}</span>
-                </div>
-                <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-                  Modeled estimate on your interval data and the seeded rate structure — not a bill reproduction.
-                  {costInsight.disclosures?.map((d, i) => <span key={`disc-${i}`} className="block">{d}</span>)}
-                </p>
-                {/* TUX-2 (owner Jul 23): telecom spend joins the SAME cost picture —
-                    one all-services view, not a separate widget. Subscription spend
-                    is user-entered (actual), unlike the modeled commodity estimate,
-                    and the disclosure says so. */}
+                  {costInsight?.breakdown && (
+                    <>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground sm:grid-cols-3">
+                        {costInsight.breakdown.riders?.map((r, i) => <span key={`rider-${i}-${r.label}`}>{r.label} {fmtUsd(r.amount)}</span>)}
+                        {(costInsight.breakdown.cp ?? 0) > 0 && <span>coincident-peak {fmtUsd(costInsight.breakdown.cp)}</span>}
+                        {(costInsight.breakdown.minBillAdjustment ?? 0) > 0 && <span>min-bill adj {fmtUsd(costInsight.breakdown.minBillAdjustment ?? 0)}</span>}
+                        {(costInsight.breakdown.exportCredits ?? 0) > 0 && <span>export credit −{fmtUsd(costInsight.breakdown.exportCredits ?? 0)}</span>}
+                      </div>
+                      <ul className="list-disc space-y-1 pl-4 text-[11px] leading-relaxed text-muted-foreground">
+                        <li>Modeled estimate on your interval data and the filed rate structure — not a bill reproduction.</li>
+                        {costInsight.disclosures?.map((d, i) => <li key={`disc-${i}`}>{d}</li>)}
+                      </ul>
+                    </>
+                  )}
                 {(summary?.telecomSpend ?? telecomSpendLive) != null ? (
                   (() => {
                     const ts = (summary?.telecomSpend ?? telecomSpendLive)!;
@@ -966,7 +1072,8 @@ export default function Dashboard() {
                     </p>
                   </div>
                 ) : null}
-              </div>
+                </CollapsibleContent>
+              </Collapsible>
             )}
           </CardContent>
         </Card>
@@ -1097,7 +1204,7 @@ export default function Dashboard() {
           <Card className="mt-4 border-sky-500/40 bg-sky-500/5">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 font-display text-base">
-                <Droplets className="h-4 w-4 text-sky-500" /> Your winter water use sets next year&apos;s sewer bill
+                <Droplets className="h-4 w-4 text-sky-700 dark:text-sky-500" /> Your winter water use sets next year&apos;s sewer bill
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -1162,7 +1269,7 @@ export default function Dashboard() {
                   <>
                     <div className="grid gap-2 rounded-md border border-border/70 bg-muted/30 p-3 text-xs sm:grid-cols-4">
                       <div><span className="font-medium">Your progress</span><br />{progress.completed} of {progress.totalIdentified} completed ({progress.completionPct}%)</div>
-                      <div title={progress.verificationBasis}><span className="text-muted-foreground">Verified to date</span><br />{progress.verifiedSavingsUsd == null ? "Withheld — attribution pending" : fmtUsd(progress.verifiedSavingsUsd)}</div>
+                      <div title={progress.verificationBasis}><span className="text-muted-foreground">Verified to date</span><br />{progress.verifiedSavingsUsd == null ? "Not verified yet" : fmtUsd(progress.verifiedSavingsUsd)}</div>
                       <div><span className="text-muted-foreground">Committed / yr</span><br />{formatSavingsRangeUsd(progress.committedRangeUsd)}</div>
                       <div><span className="text-muted-foreground">Open / yr</span><br />{formatSavingsRangeUsd(progress.projectedRangeUsd)}</div>
                     </div>
@@ -1202,7 +1309,7 @@ export default function Dashboard() {
                           {queue.completed.map((item) => (
                             <div key={item.measure} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-2 text-xs">
                               <div><span className="font-medium">{item.title}</span><span className="ml-2 text-muted-foreground">{formatSavingsRangeUsd(item.savingsRangeUsd)}/yr modeled range</span></div>
-                              <span className="flex items-center gap-2">{item.implementation ? <><ProveItStatusChip status={item.implementation.status} /><span className="text-muted-foreground">{item.implementation.verifiedSavingsUsd == null ? "savings attribution withheld" : `${fmtUsd(item.implementation.verifiedSavingsUsd)} verified`}</span></> : <span className="text-muted-foreground">Completion recorded</span>}<Button size="sm" variant="ghost" disabled={reopenRecommendation.isPending} onClick={() => reopenRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure })}>Reopen</Button></span>
+                              <span className="flex items-center gap-2">{item.implementation ? <><ProveItStatusChip status={item.implementation.status} /><span className="text-muted-foreground">{item.implementation.verifiedSavingsUsd == null ? "savings attribution withheld" : `${fmtUsd(item.implementation.verifiedSavingsUsd)} verified`}</span></> : <span className="text-muted-foreground">Completion recorded</span>}{(!item.implementation || item.implementation.status === "awaiting_data") && <Button size="sm" variant="ghost" data-testid={`rec-undo-completion-${item.measure}`} title="Marked complete by mistake, or not actually done? Removes this unverified completion and puts the recommendation back in your queue." disabled={resetRecommendation.isPending} onClick={() => resetRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure })}>Undo completion</Button>}<Button size="sm" variant="ghost" title="Put this back in your queue and keep its verification history." disabled={reopenRecommendation.isPending} onClick={() => reopenRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure })}>Reopen</Button></span>
                             </div>
                           ))}
                         </CollapsibleContent>
@@ -1321,37 +1428,6 @@ export default function Dashboard() {
   );
 }
 
-function PropertyRecordsCard({ siteId }: { siteId: number }) {
-  const records = trpc.sites.propertyRecords.useQuery({ siteId });
-  if (records.isLoading || (records.data?.links.length ?? 0) === 0) return null;
-  return (
-    <Card className="mt-4 border-border/70">
-      <CardHeader className="pb-2">
-        <CardTitle className="font-display text-base">Property records{records.data?.county ? ` · ${records.data.county} County${records.data.state ? `, ${records.data.state}` : ""}` : ""}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-wrap gap-2">
-          {records.data?.links.map((link) => (
-            <a
-              key={link.url}
-              href={link.url}
-              target="_blank"
-              rel="noreferrer"
-              title={link.note}
-              className="rounded-md border border-border px-2 py-1 text-xs text-primary hover:bg-muted"
-            >
-              {link.label}
-            </a>
-          ))}
-        </div>
-        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-          Official links open on county sites; CountyOffice is a third-party directory, not an official record source. Meterly does not import or store third-party property data. Paid property-data enrichment would require a licensed provider.
-        </p>
-      </CardContent>
-    </Card>
-  );
-}
-
 /** NAT-6 — Dashboard rate-activity card: the audit trail of the autonomous
  * rate-currency engine, so rate movements affecting analyses are visible
  * without visiting the Tariffs page. Hidden entirely when there are no
@@ -1432,8 +1508,25 @@ type TariffRow = {
   /** Null when no current-cost basis exists (Batch-38, pass 1559). */
   savingsVsCurrent: number | null;
   eligibilityNote?: string;
+  /** Oct 24: savings rest on an inferred schedule / modeled subtotal. */
+  indicative?: boolean;
+  /** Oct 24: what to confirm with the utility before switching. */
+  conditions?: string[];
 };
+/** Honesty Charter: savings are ranges — wider when indicative. */
+function savingsRangeText(v: number, indicative: boolean | undefined): string {
+  const lo = Math.round(v * (indicative ? 0.4 : 0.7));
+  return `${fmtUsd(lo)}–${fmtUsd(Math.round(v))}`;
+}
 
+/** Savings column text — shared by the table cell and the stacked phone layout. */
+function savingsCellText(r: TariffRow, hasCostBasis: boolean): string {
+  if (r.isCurrentBasis) return "—";
+  if (!hasCostBasis || r.savingsVsCurrent == null) return "— (no current-cost baseline)"; /* Batch-37/38: null — not a zeroed sentinel */
+  if (r.savingsVsCurrent >= 0.5) return `saves ${savingsRangeText(r.savingsVsCurrent, r.indicative)}/yr`; /* Oct 24: range, never a point promise */
+  if (r.savingsVsCurrent > -0.5) return "about the same";
+  return `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr`;
+}
 function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCostBasis?: boolean } | null }) {
   const rows = metrics?.comparisons ?? [];
   if (rows.length === 0) return null;
@@ -1445,56 +1538,90 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCos
   // Batch-37 (pass 1518): no current-cost basis → savings deltas are zero
   // sentinels, not real comparisons — never render them as "$0/yr".
   const hasCostBasis = metrics?.hasCostBasis ?? true;
+  // Oct 24 (owner, production Cantex screenshot): a schedule this site cannot
+  // take is NOT priced by the pipeline — its annualCost is a zero placeholder.
+  // Rendering it as "$0 (ref)" read as lost rate data. Priced rows (current
+  // basis + every schedule the site can take) stay in the table; schedules
+  // that do not apply are listed by name with the filed reason, never a $0.
+  const priced = rows.filter((r) => r.eligible || r.isCurrentBasis);
+  const notApplicable = rows.filter((r) => !r.eligible && !r.isCurrentBasis);
   return (
     <>
     {noneEligible && (
-      <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+      <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200/90">
         {currentAssignedIneligible
-          ? "Your assigned rate is shown below but sits outside this site's eligibility bracket (sector or peak-demand size), and no eligible seeded rate could be found for this site. Cost figures are computed on your assigned rate as the modeling basis — verify the assignment against an actual bill. The seeded rate library is a snapshot; your actual utility rate may not be included."
-          : "No seeded rate is eligible for this site's sector and peak-demand size — the rates shown below are for reference only (closest available structures, not offers you qualify for). The seeded rate library is a snapshot; your actual utility rate may not be included. Cost figures use the closest available structure as a modeling basis — verify against an actual bill."}
+          ? "Your assigned rate is shown below but sits outside this site's eligibility bracket (sector or peak-demand size), and no other rate in the library applies to this site. Cost figures use your assigned rate as the modeling basis — verify the schedule with your utility."
+          : "None of the rates in the library apply to this site's sector and size, so no rate comparison can be priced. Upload a bill so the app can read your actual rate schedule."}
       </p>
     )}
-    <Table className="mt-3">
+    {priced.length > 0 && (
+    <Table className="mt-3" data-testid="rate-table">
       <TableHeader>
         <TableRow>
           <TableHead className="font-mono text-xs">Rate</TableHead>
-          <TableHead className="text-right font-mono text-xs">Annual cost</TableHead>
-          <TableHead className="text-right font-mono text-xs">Savings vs current</TableHead>
-          <TableHead className="font-mono text-xs">Data freshness</TableHead>
+          <TableHead className="hidden text-right font-mono text-xs sm:table-cell">Annual cost</TableHead>
+          <TableHead className="hidden whitespace-normal text-right font-mono text-xs sm:table-cell">Savings vs current</TableHead>
+          <TableHead className="hidden font-mono text-xs md:table-cell">Data freshness</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.map((r, i) => (
-          <TableRow key={i} className={r.eligible ? "" : "opacity-50"}>
-            <TableCell className="text-xs">
+        {priced.map((r, i) => (
+          <TableRow key={i} data-testid="rate-row">
+            {/* Oct 24: rate text wraps so cost + savings stay on screen (cells default to nowrap) */}
+            <TableCell className="whitespace-normal text-xs sm:min-w-[12rem]">
               {r.utilityName} — {r.tariffName}
               {r.isCurrentBasis && <span className="ml-2 rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10px] text-primary">current basis</span>}
-              {!r.eligible && <span className="ml-2 font-mono text-[10px] text-muted-foreground">ineligible{r.ineligibleReason ? `: ${r.ineligibleReason}` : ""}</span>}
+              {r.isCurrentBasis && !r.eligible && r.ineligibleReason && (
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">Outside this rate's filed bracket: {r.ineligibleReason}</span>
+              )}
+              {r.eligible && r.indicative && !r.isCurrentBasis && (
+                <span className="ml-2 rounded border border-amber-500/40 px-1.5 py-0.5 font-mono text-[10px] text-amber-800 dark:text-amber-300" data-testid="rate-indicative">indicative</span>
+              )}
+              {r.eligible && (r.conditions?.length ?? 0) > 0 && !r.isCurrentBasis && (
+                <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11px] text-muted-foreground" data-testid="rate-conditions">
+                  {r.conditions!.map((c, ci) => <li key={ci}>{c}</li>)}
+                </ul>
+              )}
+              {/* phones: cost + savings stacked under the rate name instead of off-screen columns */}
+              <span className="mt-1 block font-mono text-xs sm:hidden" data-testid="rate-row-mobile-figures">
+                {fmtUsd(r.annualCost.total)}/yr
+                <span className={`ml-2 ${(r.savingsVsCurrent ?? 0) > 0 && !r.isCurrentBasis ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}`}>
+                  {r.isCurrentBasis ? "your current rate" : savingsCellText(r, hasCostBasis)}
+                </span>
+              </span>
+              <span className="mt-0.5 block text-[11px] text-muted-foreground md:hidden">{r.freshness === "urdb_stale" ? "Rate data stale — verify with utility" : `Rate data ${r.freshness.replace(/_/g, " ")}`}</span>
             </TableCell>
-            {/* Batch-17 (pass 308): costs ARE calculated for ineligible rates (the banner says
-                "for reference only") — show them in muted styling instead of a contradictory "—" */}
-            <TableCell className={`text-right font-mono text-xs ${r.eligible ? "" : "text-muted-foreground/70"}`}>
-              {fmtUsd(r.annualCost.total)}
-              {!r.eligible && <span className="ml-1 text-[10px]">(ref)</span>}
+            <TableCell className="hidden text-right font-mono text-xs sm:table-cell">{fmtUsd(r.annualCost.total)}</TableCell>
+            <TableCell className={`hidden min-w-[7rem] whitespace-normal text-right sm:table-cell font-mono text-xs ${(r.savingsVsCurrent ?? 0) > 0 ? "text-emerald-700 dark:text-emerald-400" : ""}`}>
+              {savingsCellText(r, hasCostBasis)}
             </TableCell>
-            <TableCell className={`text-right font-mono text-xs ${r.eligible && (r.savingsVsCurrent ?? 0) > 0 ? "text-emerald-400" : !r.eligible ? "text-muted-foreground/70" : ""}`}>
-              {r.isCurrentBasis
-                ? "—"
-                : !hasCostBasis || r.savingsVsCurrent == null
-                  ? "— (no current-cost baseline)" /* Batch-37/38 (passes 1518/1559): null — not a zeroed sentinel */
-                  : r.savingsVsCurrent >= 0
-                    ? `saves ${fmtUsd(r.savingsVsCurrent)}/yr${r.eligible ? "" : " (ref)"}` /* Batch-30 (pass 1078): verified both branches carry (ref) */
-                    : `adds ${fmtUsd(Math.abs(r.savingsVsCurrent))}/yr${r.eligible ? "" : " (ref)"}`}
-            </TableCell>
-            <TableCell className="text-xs text-muted-foreground">{r.freshness === "urdb_stale" ? "stale — verify with utility" : r.freshness.replace(/_/g, " ")}</TableCell>
+            <TableCell className="hidden text-xs text-muted-foreground md:table-cell">{r.freshness === "urdb_stale" ? "stale — verify with utility" : r.freshness.replace(/_/g, " ")}</TableCell>
           </TableRow>
         ))}
       </TableBody>
     </Table>
+    )}
+    {notApplicable.length > 0 && (
+      <Collapsible className="mt-2">
+        <CollapsibleTrigger className="group flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" data-testid="rate-not-applicable-toggle">
+          <ChevronDown className="h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-180" />
+          {notApplicable.length} other {notApplicable.length === 1 ? "rate does" : "rates do"} not apply to this site
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <ul className="mt-1.5 space-y-1 text-xs text-muted-foreground" data-testid="rate-not-applicable">
+            {notApplicable.map((r, i) => (
+              <li key={i}>
+                <span className="text-foreground/80">{r.tariffName}</span>
+                {r.ineligibleReason ? ` — ${r.ineligibleReason}` : " — not available for this site"}
+              </li>
+            ))}
+          </ul>
+        </CollapsibleContent>
+      </Collapsible>
+    )}
     </>
   );
 }
-
 function Kpi({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub?: string }) {
   return (
     <Card className="border-border/70">

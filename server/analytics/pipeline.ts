@@ -50,7 +50,9 @@ import { effectiveSchedules } from "../operatingHours";
 import { isVirtualTotalMeter, requireAlignedCampusSeries } from "../virtualTotal";
 import { replaceRecommendationOpportunities } from "../recommendations";
 import { resolveRateCode } from "../rateCodes";
-import { perMeterRateReview, priceAccountsSeparately, type MeterRateReview, type AccountPricingComponent, sameAccountProvider } from "./multiMeter";
+import { tariffMatchesSiteUtility } from "../utilityMatch";
+import { pickSizeFitBasis } from "./basisSelect";
+import { perMeterRateReview, priceAccountsSeparately, type MeterRateReview, type AccountPricingComponent, sameAccountProvider, RATE_RANGE_BASIS, INDICATIVE_RATE_RANGE_BASIS } from "./multiMeter";
 import type { Site, Meter } from "../../drizzle/schema";
 
 /** Opportunity candidate as it flows through ranking/persistence — electric
@@ -68,7 +70,7 @@ export interface PipelineResult {
   currentCost: CostResult | null;
   tariffComparisons: TariffComparison[];
   meterRateReview: MeterRateReview | null;
-  benchmark: { siteEui: number | null; percentileBand: string | null; betterThanMedian: boolean | null; source: string | null } | null;
+  benchmark: { siteEui: number | null; percentileBand: string | null; betterThanMedian: boolean | null; source: string | null; sqft?: number | null; sqftBasis?: string | null; sqftBasisLabel?: string | null; plausibility?: { flag: "implausibly_low"; note: string } | null } | null;
   emissions: { annualCo2eLb: number; subregion: string; factorYear: number; mapped: boolean } | null;
   insightsCount: number;
   opportunitiesCount: number;
@@ -112,6 +114,31 @@ async function assertLocationCurrent(site: Site, userId: number): Promise<void> 
   if (started == null) return;
   const current = await h.getSite(site.id, userId);
   if ((current as { locationRevision?: number | null }).locationRevision !== started) throw new StaleLocationError();
+}
+/**
+ * Oct 24 plausibility guard (Honesty Charter). An EUI under half the peer 25th
+ * percentile is far more often an input problem — floor area that counts
+ * canopies or unconditioned structures, meters missing from the upload, on-site
+ * solar netting grid use — than genuine top-tier efficiency. Callers keep the
+ * number but must not award a "top quartile" claim on it.
+ */
+export function euiPlausibility(
+  siteEui: number,
+  p25Eui: number | null | undefined,
+  sqftBasis: string,
+): { flag: "implausibly_low"; note: string } | null {
+  if (p25Eui == null || !(p25Eui > 0) || !(siteEui < 0.5 * p25Eui)) return null;
+  return {
+    flag: "implausibly_low",
+    note:
+      `${siteEui.toFixed(1)} kWh/sqft/yr is under half the low end of typical peers (${p25Eui.toFixed(1)}). ` +
+      (sqftBasis === "public_record_estimate"
+        ? "The floor area is a public-record estimate and may include covered walkways or unconditioned structures. "
+        : sqftBasis === "placeholder"
+          ? "The floor area is a typical-size placeholder, not this building's. "
+          : "") +
+      "Also check that every meter for this site is included and whether on-site solar lowers grid use.",
+  };
 }
 export async function runAnalysisPipeline(site: Site, meter: Meter | null, userId: number, tier: string): Promise<PipelineResult> {
   const t0 = Date.now();
@@ -444,7 +471,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     const allTariffs = await h.listTariffs(meter?.commodity ?? "electric", site.state ?? undefined);
     const current = meter?.currentTariffId ? allTariffs.find((t) => t.id === meter.currentTariffId) : undefined;
     const utilityTariffs = allTariffs.filter(
-      (t) => !site.utilityName || t.utilityName.toLowerCase().includes((site.utilityName ?? "").toLowerCase().split(" ")[0]),
+      (t) => tariffMatchesSiteUtility(t.utilityName, site.utilityName),
     );
     const peakKw = demand?.peakKw ?? null;
     const sectorClass = site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? "residential" : "commercial";
@@ -459,10 +486,13 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     })();
     // v1.18 applicability: closed/tech-conditioned flags threaded through so a
     // closed plan or an unlawful (solar-mismatched) plan never enters the sweep.
+    // Oct 24: monthly kWh history lets filed migration rules (UNS SGS) be
+    // evaluated in the basis ladder too, not only in the comparison table.
+    const basisMonthlyKwh = monthlyImportedKwh(costPoints, tz);
     const isElig = (t: (typeof allTariffs)[number]) =>
       tariffEligible(
         { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition, ...tariffEligibilityTerms(t.structure as TariffStructure) },
-        { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType },
+        { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType, monthlyImportedKwh: basisMonthlyKwh },
         peakKw,
       ).eligible;
     // TERR-2/3: territory-aware sweep. Utilities are territorial monopolies —
@@ -498,8 +528,22 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
 
     // Current basis: assigned tariff → else first ELIGIBLE same-utility rate →
     // else first eligible rate statewide → else first same-utility rate.
+    // Oct 24: an unassigned meter is priced on its bill's rate code when known,
+    // else the SIZE-FIT filed schedule (never a class whose filed minimum
+    // billing demand the site never reaches — e.g. UNS LGS's 450 kW floor).
+    const sizeFit = current
+      ? null
+      : pickSizeFitBasis(utilityTariffs, {
+          eligible: isElig,
+          // Without measured intervals, size the class on the modeled hourly
+          // profile's peak (same profile the cost is priced on) — never default
+          // a bill-only site into a 450 kW-minimum class.
+          peakKw: peakKw ?? (costPoints.length ? Math.max(...costPoints.map((p) => p.demand ?? p.usage)) : null),
+          rateCodeUrdbId: resolveRateCode(site.utilityName, meter?.rateScheduleCode ?? null)?.urdbId ?? null,
+        });
     const basis =
       current ??
+      sizeFit?.tariff ??
       utilityTariffs.find(isElig) ??
       eligibleAnywhere[0] ??
       utilityTariffs[0] ??
@@ -526,6 +570,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     // Batch-13 (pass 60): when the LAST-RESORT basis (first same-utility rate,
     // possibly ineligible) is used, every downstream dollar figure is priced on
     // a rate the customer may not qualify for — disclose it, never silently.
+    if (sizeFit?.disclosure && basis?.id === sizeFit.tariff.id && currentCost) currentCost.disclosures.unshift(sizeFit.disclosure);
     if (basis && !current && !isElig(basis) && currentCost) {
       currentCost.disclosures.push(
         // Batch-32 (pass 1179): scope the limitation to the CURRENT-COST baseline
@@ -589,7 +634,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         // exists. The UI already renders "— (no current-cost baseline)", but raw
         // API/export consumers received a literal 0 indistinguishable from a
         // genuine break-even delta. Null is the machine-readable equivalent.
-        savingsVsCurrent: cost && hasCostBasis && cost.switchRecommendationAllowed !== false && currentCost?.switchRecommendationAllowed !== false ? currentTotal - cost.breakdown.total : null,
+        // Oct 24 (owner: "0 or N/A is woefully inaccurate"): with a real cost
+        // basis the delta is always computed; an inferred schedule or modeled
+        // subtotal marks it INDICATIVE (wider range + one note), never null.
+        savingsVsCurrent: cost && hasCostBasis ? currentTotal - cost.breakdown.total : null,
+        indicative: Boolean(cost && hasCostBasis && (cost.switchRecommendationAllowed === false || currentCost?.switchRecommendationAllowed === false || currentCost?.rateCodeResolution?.match === "family_inferred")),
+        ...(elig.conditions?.length ? { conditions: elig.conditions } : {}),
         // Batch-34 (pass 1279): when the platform already KNOWS the rate is
         // ineligible, telling the user to "confirm final eligibility" was
         // contradictory — the specific reason replaces the generic caveat.
@@ -638,10 +688,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       }));
       if (componentPoints.length === 0) throw new Error(`Account ${component.id} has no intervals; partial campus pricing is withheld.`);
       const peakKw = computeDemandAnalytics(componentPoints, 4, [6, 7, 8, 9], component.timezone ?? tz)?.peakKw ?? null;
+      const componentMonthlyKwh = monthlyImportedKwh(componentPoints, component.timezone ?? tz);
       const assigned = component.currentTariffId ? await h.getTariff(component.currentTariffId) : undefined;
       const assignedElectric = assigned?.commodity === "electric" ? assigned : undefined;
       const utilityTariffs = allTariffs.filter(
-        (tariff) => !site.utilityName || tariff.utilityName.toLowerCase().includes((site.utilityName ?? "").toLowerCase().split(" ")[0]),
+        (tariff) => tariffMatchesSiteUtility(tariff.utilityName, site.utilityName),
       );
       const eligible = (tariff: (typeof allTariffs)[number]) =>
         tariffEligible(
@@ -654,13 +705,25 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
             techCondition: tariff.techCondition,
             ...tariffEligibilityTerms(tariff.structure as TariffStructure),
           },
-          { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType },
+          { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType, monthlyImportedKwh: componentMonthlyKwh },
           peakKw,
         ).eligible;
       const eligibleAnywhere = territoryTariffs.filter(eligible);
       const sweep = utilityTariffs.length > 0 ? utilityTariffs : territoryTariffs.length > 0 ? territoryTariffs : allTariffs;
-      const basis = assignedElectric;
-      if (!basis) throw new Error(`Account ${component.id} has no confirmed assigned electric tariff; campus pricing is withheld rather than imputing a provider.`);
+      // Oct 24 (owner: never return 0/N/A when data exists): an account with
+      // no assigned rate is priced on its bill's rate code, else the size-fit
+      // filed schedule at the SITE's named utility — disclosed per account.
+      // Without a named, matching utility there is no basis to impute a
+      // provider, so that (rare) case still stops campus pricing.
+      const accountFit = assignedElectric
+        ? null
+        : pickSizeFitBasis(utilityTariffs, {
+            eligible,
+            peakKw,
+            rateCodeUrdbId: resolveRateCode(site.utilityName, component.rateScheduleCode)?.urdbId ?? null,
+          });
+      const basis = assignedElectric ?? (site.utilityName ? accountFit?.tariff : undefined);
+      if (!basis) throw new Error(`Account ${component.id} has no assigned electric tariff and the site names no utility; campus pricing needs the account's utility.`);
       const resolution = resolveRateCode(basis.utilityName, component.rateScheduleCode);
       components.push({
         meterId: component.id,
@@ -672,8 +735,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         utilityName: basis.utilityName,
         timezone: component.timezone,
         rateCodeResolution: resolution ?? undefined,
-        disclosures: site.utilityName && !sameAccountProvider(site.utilityName, basis.utilityName)
-          ? [`Site provider metadata (${site.utilityName}) conflicts with assigned account provider (${basis.utilityName}); assigned account provider governs. Confirm site metadata.`] : [],
+        disclosures: [
+          ...(!assignedElectric && accountFit?.disclosure ? [accountFit.disclosure] : []),
+          ...(site.utilityName && !sameAccountProvider(site.utilityName, basis.utilityName)
+            ? [`Site provider metadata (${site.utilityName}) conflicts with assigned account provider (${basis.utilityName}); assigned account provider governs. Confirm site metadata.`] : []),
+        ],
       });
     }
     requireAlignedCampusSeries(components.map(component => component.points));
@@ -684,7 +750,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       basisStructureForAttribution = null;
       const reviewCandidates = new Map<number, (typeof allTariffs)[number]>();
       const siteUtilityTariffs = allTariffs.filter(
-        (tariff) => !site.utilityName || tariff.utilityName.toLowerCase().includes((site.utilityName ?? "").toLowerCase().split(" ")[0]),
+        (tariff) => tariffMatchesSiteUtility(tariff.utilityName, site.utilityName),
       );
       for (const tariff of [...siteUtilityTariffs, ...territoryTariffs]) reviewCandidates.set(tariff.id, tariff);
       const scopedReviewCandidates = reviewCandidates.size > 0 ? Array.from(reviewCandidates.values()) : allTariffs;
@@ -759,12 +825,32 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     if (bench) {
       const siteEui = annualUsage / site.sqft; // kWh/sqft/yr for electric benchmark
       const pct = benchmarkPercentile(siteEui, { medianEui: bench.medianEui, p25Eui: bench.p25Eui, p75Eui: bench.p75Eui });
-      benchmark = { siteEui, percentileBand: pct.percentileBand, betterThanMedian: pct.betterThanMedian, source: `${bench.source} (${bench.sourceVersion})` };
+      // Oct 24 property facts: the floor area behind EUI states its basis —
+      // a public-record footprint estimate is never presented as measured.
+      const { getPropertyFactsRow, floorAreaBasisOf } = await import("../propertyFacts");
+      const fa = floorAreaBasisOf(site, await getPropertyFactsRow(site.id).catch(() => null));
+      // Oct 24 plausibility guard (Honesty Charter): an EUI under half the
+      // peer 25th percentile is far more often an input problem (floor area
+      // that counts canopies/unconditioned structures, meters missing from the
+      // upload, on-site solar netting grid use) than real top-tier efficiency.
+      // Keep the number, but never award a "top quartile" claim on it.
+      const plausibility = euiPlausibility(siteEui, bench.p25Eui, fa.basis);
+      const implausiblyLow = plausibility != null;
+      benchmark = {
+        siteEui,
+        percentileBand: implausiblyLow ? "Unusually low (check floor area and meters)" : pct.percentileBand,
+        betterThanMedian: implausiblyLow ? null : pct.betterThanMedian,
+        plausibility,
+        source: `${bench.source} (${bench.sourceVersion})`,
+        sqft: site.sqft,
+        sqftBasis: fa.basis,
+        sqftBasisLabel: fa.label,
+      };
     }
   }
   narrate(
     benchmark
-      ? `Benchmarked against ${benchmark.source ?? "peer"} peers — ${benchmark.percentileBand ?? "percentile computed"}`
+      ? `Benchmarked against ${benchmark.source ?? "peer"} peers — ${benchmark.percentileBand ?? "percentile computed"}${benchmark.sqftBasis === "public_record_estimate" ? ` (floor area: ${benchmark.sqftBasisLabel})` : ""}${benchmark.plausibility ? ` — ${benchmark.plausibility.note}` : ""}`
       : "Benchmark skipped — needs building type, square footage, and an annualizable usage figure",
   );
 
@@ -1661,11 +1747,32 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // the explicit check documents it and satisfies the narrowed type.
   const bestSwitch = comparisons.find((c) => c.eligible && c.savingsVsCurrent != null && c.savingsVsCurrent > 50);
   if (meterRateReview) {
+    // Oct 24: per-account rate review results become ONE ranked action with a
+    // range (same-period repricing), instead of zero/N/A.
+    const better = meterRateReview.perMeter.filter((m) => m.bestAlternative);
+    if (better.length && meterRateReview.totalSavingsRangeUsd) {
+      const months = Math.max(1, ...better.map((m) => m.period.calendarMonths));
+      const scale = months >= 12 ? 12 / months : 1;
+      const anyIndicative = better.some((m) => m.bestAlternative!.indicative);
+      oppCands.push({
+        key: "rate_switch",
+        title: better.length === 1
+          ? `Rate review: ${better[0].bestAlternative!.name.split(" — ")[0]} for ${better[0].label}`
+          : `Rate review: lower-cost filed schedules for ${better.length} of ${meterRateReview.reviewedCount} service agreements`,
+        category: "tariff",
+        annualSavingsUsdLo: meterRateReview.totalSavingsRangeUsd.low * scale,
+        annualSavingsUsdHi: meterRateReview.totalSavingsRangeUsd.high * scale,
+        capexBand: "none",
+        confidence: "low",
+        rationale: `Re-priced each service agreement's own interval data on the utility's other filed schedules${months >= 12 ? `; scaled to a year from ${months} observed months` : ` over the observed period (${months} month${months === 1 ? "" : "s"}, not annualized)`}.${anyIndicative ? " Indicative: confirm the exact schedule and switching terms with the utility first." : ""}`,
+        disclosures: [anyIndicative ? INDICATIVE_RATE_RANGE_BASIS : RATE_RANGE_BASIS],
+      });
+    }
     oppCands.push({
       key: "account_demand_review", title: "Review each service agreement’s demand peaks and rate terms",
       category: "demand", annualSavingsUsdLo: 0, annualSavingsUsdHi: 0, capexBand: "none", confidence: "low",
       rationale: "Campus coincident peaks are not billed account peaks. Review account-specific demand windows, ratchets, block usage and eligibility before estimating savings.",
-      disclosures: ["Informational action; savings withheld pending per-account control modeling. Same-period rate-review ranges are shown separately, not labeled annual.", ...meterRateReview.disclosures],
+      disclosures: ["Informational action — no dollar estimate until each service agreement's demand is modeled. Rate-review ranges are shown separately.", ...meterRateReview.disclosures],
     });
   } else if (bestSwitch) {
     oppCands.push({
@@ -1676,15 +1783,17 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       // measured load — the old 0.6 haircut on the lower bound misrepresented a
       // computed figure as uncertain. Both bounds now equal the repriced savings;
       // the residual (future load drift) is disclosed in the rationale instead.
-      annualSavingsUsdLo: bestSwitch.savingsVsCurrent! * 0.7,
+      annualSavingsUsdLo: bestSwitch.savingsVsCurrent! * (bestSwitch.indicative ? 0.4 : 0.7),
       annualSavingsUsdHi: bestSwitch.savingsVsCurrent!,
       capexBand: "none",
-      confidence: bestSwitch.freshness === "urdb_stale" ? "low" : "medium",
+      confidence: bestSwitch.freshness === "urdb_stale" || bestSwitch.indicative ? "low" : "medium",
       rationale:
         bestSwitch.freshness === "urdb_stale"
           ? "Rate data unverified — structure may have changed; verify current rates with your utility before switching."
-          : "Re-priced your actual load profile on this tariff's published structure — exact for the observed period; assumes your load pattern repeats.",
-      disclosures: [MODELED_ESTIMATES_DISCLAIMER],
+          : bestSwitch.indicative
+            ? "Re-priced your actual load profile on this filed schedule. Indicative: confirm your exact rate and switching terms with the utility first."
+            : "Re-priced your actual load profile on this tariff's published structure — exact for the observed period; assumes your load pattern repeats.",
+      disclosures: bestSwitch.indicative ? [MODELED_ESTIMATES_DISCLAIMER, INDICATIVE_RATE_RANGE_BASIS] : [MODELED_ESTIMATES_DISCLAIMER],
     });
   }
   /* AC15 — incentives on the opportunity feed. Two obligations:

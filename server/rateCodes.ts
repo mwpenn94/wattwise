@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { tariffs } from "../drizzle/schema";
 import { getDb } from "./db";
 import * as h from "./dbHelpers";
+import { utilityToken } from "./utilityMatch";
 
 export type RateCodeResolution = {
   urdbId: string;
@@ -22,9 +23,12 @@ const EGMGSQ_DISCLOSURE =
   "EGMGSQ → EGMGS (inferred, unconfirmed). No official EGMGSQ crosswalk was found in the reviewed UNS/ACC sources. Modeled using EGMGS as an unverified family inference; confirm the actual schedule with UNS Electric before relying on costs or savings.";
 
 function isUnsElectricHint(utilityHint: string | null): boolean {
-  if (utilityHint == null) return true;
+  if (utilityHint == null || !utilityHint.trim()) return true;
   const normalized = utilityHint.trim().toLowerCase();
-  return normalized.includes("uns") || normalized.includes("unisource");
+  // EG* codes are UNS Electric schedules; a UNS *Gas* hint never resolves them.
+  if (/\b(gas|unsg)\b/.test(normalized)) return false;
+  // Oct 24: "UES"/"UNSE"/"UniSource" abbreviations (shared alias table).
+  return normalized.includes("uns") || normalized.includes("unisource") || utilityToken(utilityHint) === "unisource";
 }
 
 /** Resolve published UNS Electric bill codes without asserting an unsupported

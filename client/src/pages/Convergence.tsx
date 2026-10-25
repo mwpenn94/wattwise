@@ -3,6 +3,7 @@
  * Shows the recursive review cycles applied to the spec + build, and the
  * seeded reference-data provenance.
  */
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { trpc } from "@/lib/trpc";
 import { Link } from "wouter";
 import { ArrowLeft, GitBranch, Database } from "lucide-react";
@@ -16,7 +17,7 @@ export default function Convergence() {
   const seeders = trpc.reference.seederRuns.useQuery();
 
   return (
-    <div className="dark min-h-screen bg-background text-foreground">
+    <div className="min-h-screen bg-background text-foreground">
       <div className="min-h-screen grid-texture">
         <header className="border-b border-border/60">
           <div className="container flex h-14 items-center gap-3">
@@ -24,6 +25,7 @@ export default function Convergence() {
               <ArrowLeft className="h-4 w-4" /> Meterly
             </Link>
             <span className="font-mono text-xs uppercase tracking-widest text-muted-foreground">/ methodology & convergence log</span>
+            <ThemeToggle className="ml-auto" />
           </div>
         </header>
 

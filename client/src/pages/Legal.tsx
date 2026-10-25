@@ -8,6 +8,7 @@
  * the privacy policy are the same ones enforced in code (GPS never stored,
  * PII-free fingerprints, tenancy isolation).
  */
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { Link } from "wouter";
 import { ArrowLeft, Zap } from "lucide-react";
 import { useEffect } from "react";
@@ -24,7 +25,7 @@ export default function Legal() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-background text-foreground dark">
+    <div className="min-h-screen bg-background text-foreground">
       <div className="min-h-screen bg-background">
         <header className="border-b border-border/60">
           <div className="container flex h-16 items-center justify-between">
@@ -34,9 +35,12 @@ export default function Legal() {
               </div>
               <span translate="no" className="font-display text-lg font-bold tracking-tight">Meterly</span>
             </Link>
-            <Link href="/" className="flex items-center gap-1 font-mono text-xs text-muted-foreground hover:text-foreground">
-              <ArrowLeft className="h-3.5 w-3.5" /> Back to home
-            </Link>
+            <div className="flex items-center gap-2">
+              <ThemeToggle />
+              <Link href="/" className="flex items-center gap-1 font-mono text-xs text-muted-foreground hover:text-foreground">
+                <ArrowLeft className="h-3.5 w-3.5" /> Back to home
+              </Link>
+            </div>
           </div>
         </header>
 

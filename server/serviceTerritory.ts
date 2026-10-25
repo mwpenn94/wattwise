@@ -1,3 +1,4 @@
+import { utilityToken } from "./utilityMatch";
 /**
  * Service-territory awareness (TERR-2/TERR-3).
  *
@@ -240,7 +241,11 @@ export function resolveTerritory(site: SiteLocation, commodity: "electric" | "ga
   // 1) Explicit utility on the site record wins outright (user-confirmed or refined).
   const siteUtil = norm(site.utilityName);
   if (siteUtil) {
-    const named = catalog.filter((t) => siteUtil.includes(t.utilityMatch) || t.utilityLabel.toLowerCase().includes(siteUtil.split(" ")[0]));
+    // Oct 24: abbreviations ("UES", "UNSE") resolve through the shared alias
+    // table; the catalog is already commodity-filtered, so "UES" maps to UNS
+    // Electric for electric and UNS Gas for gas.
+    const token = utilityToken(site.utilityName);
+    const named = catalog.filter((t) => siteUtil.includes(t.utilityMatch) || t.utilityLabel.toLowerCase().includes(siteUtil.split(" ")[0]) || (token.length > 2 && (t.utilityMatch.startsWith(token) || t.utilityLabel.toLowerCase().includes(token))));
     if (named.length > 0) {
       return {
         plausibleUtilities: named.map((t) => t.utilityLabel),

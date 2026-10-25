@@ -14,13 +14,19 @@ export interface CoveredPeriod {fromTs:number;toTs:number;calendarMonths:number;
 export interface PerMeterRateReviewRow {
   meterId:number;label:string;tariffId:number;tariffName:string;utilityName:string;currentObservedCost:number;
   peakKw:number;period:CoveredPeriod;disclosures:string[];rateCodeResolution?:{match:"exact"|"family_inferred";disclosure:string};
-  bestAlternative:{id:number;name:string;observedCost:number;savingsRangeUsd:SavingsRangeUsd;freshness:string;disclosures:string[];basis:string}|null;
+  bestAlternative:{id:number;name:string;observedCost:number;savingsRangeUsd:SavingsRangeUsd;freshness:string;disclosures:string[];basis:string;
+    /** Oct 24: true when the comparison rests on an inferred schedule or a
+     * modeled subtotal. Shown as a wider range with a "confirm first" note —
+     * never withheld when the data exists. */
+    indicative?:boolean}|null;
 }
 export interface MeterRateReview {
   perMeter:PerMeterRateReviewRow[];totalCurrentObservedCost:number;totalSavingsRangeUsd:SavingsRangeUsd|null;
   reviewedCount:number;betterCount:number;disclosures:string[];savingsBasis:string;
 }
 export const RATE_RANGE_BASIS="Screening convention: 70–100% of the same-account, same-observed-period repricing difference; not a statistical confidence interval, annual projection or bill guarantee. Confirm utility eligibility before switching.";
+export const INDICATIVE_RATE_RANGE_BASIS="Indicative screening range: 40–100% of the same-account, same-observed-period repricing difference, widened because the current schedule is inferred from the bill code or the filed-rate model excludes some riders/taxes. Not a bill guarantee. Confirm the schedule and switching terms with the utility first.";
+export const INDICATIVE_RATE_NOTE="Indicative: priced on the filed base schedule; confirm your exact rate and switching terms with the utility before acting.";
 export function sameAccountProvider(a:string,b:string){
   const normalize=(s:string)=>s.trim().toLowerCase().replace(/[^a-z0-9]/g,"");
   const key=(s:string)=>/^(uns|unisource)/.test(normalize(s))&&/electric/.test(normalize(s))?"unselectric":normalize(s);
@@ -55,11 +61,14 @@ export function perMeterRateReview(components:AccountPricingComponent[],candidat
     const current=price(component);const peakKw=computeDemandAnalytics(component.points,4,[6,7,8,9],component.timezone)?.peakKw??0;
     const notes=disclosures(component,current);
     const eligible=candidates.filter(c=>c.id!==component.tariffId&&sameAccountProvider(c.utilityName,component.utilityName)&&c.eligibleFor(peakKw,component));
-    const alternatives=eligible.map(c=>({candidate:c,cost:price(component,c.structure)})).filter(c=>c.cost.switchRecommendationAllowed!==false).sort((a,b)=>a.cost.breakdown.total-b.cost.breakdown.total);
+    // Oct 24 (owner): a reconciled-but-inferred schedule or a modeled subtotal
+    // WIDENS the range and adds one plain note; it no longer hides the result.
+    const alternatives=eligible.map(c=>({candidate:c,cost:price(component,c.structure)})).sort((a,b)=>a.cost.breakdown.total-b.cost.breakdown.total);
     const cheapest=alternatives[0];const difference=cheapest?current.breakdown.total-cheapest.cost.breakdown.total:0;
-    const allowed=current.switchRecommendationAllowed!==false&&component.rateCodeResolution?.match!=="family_inferred";
-    if(!allowed)notes.push("Alternative savings withheld: incomplete or inferred account billing basis. Confirm missing riders, tariff identity and account terms first.");
-    const bestAlternative=allowed&&cheapest&&difference>Math.max(50,current.breakdown.total*0.02)?{id:cheapest.candidate.id,name:cheapest.candidate.name,observedCost:cheapest.cost.breakdown.total,savingsRangeUsd:{low:difference*0.7,high:difference},freshness:cheapest.candidate.freshness,disclosures:disclosures(component,cheapest.cost),basis:RATE_RANGE_BASIS}:null;
+    const definitive=current.switchRecommendationAllowed!==false&&component.rateCodeResolution?.match!=="family_inferred"&&(cheapest?.cost.switchRecommendationAllowed!==false);
+    const material=Boolean(cheapest)&&difference>Math.max(50,current.breakdown.total*0.02);
+    if(material&&!definitive)notes.push(INDICATIVE_RATE_NOTE);
+    const bestAlternative=material&&cheapest?{id:cheapest.candidate.id,name:cheapest.candidate.name,observedCost:cheapest.cost.breakdown.total,savingsRangeUsd:{low:difference*(definitive?0.7:0.4),high:difference},freshness:cheapest.candidate.freshness,disclosures:disclosures(component,cheapest.cost),basis:definitive?RATE_RANGE_BASIS:INDICATIVE_RATE_RANGE_BASIS,indicative:!definitive}:null;
     return {meterId:component.meterId,label:component.label,tariffId:component.tariffId,tariffName:component.tariffName,utilityName:component.utilityName,currentObservedCost:current.breakdown.total,period:period(component,current),peakKw,bestAlternative,disclosures:notes,rateCodeResolution:component.rateCodeResolution};
   });
   const better=perMeter.filter(r=>r.bestAlternative);
