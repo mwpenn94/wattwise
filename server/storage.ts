@@ -76,6 +76,40 @@ export async function storageGet(relKey: string): Promise<{ key: string; url: st
   return { key, url: `/manus-storage/${key}` };
 }
 
+/**
+ * Oct 25 — stream a body of known length straight to storage (no in-memory
+ * copy). Used by the binary upload route so a 50 MiB workbook never sits in
+ * the 512 MiB production container as base64 JSON + decoded copies.
+ */
+export async function storagePutStream(
+  relKey: string,
+  body: ReadableStream<Uint8Array>,
+  size: number,
+  contentType = "application/octet-stream",
+  signal?: AbortSignal,
+): Promise<{ key: string; url: string }> {
+  const { forgeUrl, forgeKey } = getForgeConfig();
+  const key = normalizeKey(relKey);
+  const presignUrl = new URL("v1/storage/presign/put", forgeUrl + "/");
+  presignUrl.searchParams.set("path", key);
+  const presignResp = await fetch(presignUrl, { headers: { Authorization: `Bearer ${forgeKey}` }, signal });
+  if (!presignResp.ok) {
+    const msg = await presignResp.text().catch(() => presignResp.statusText);
+    throw new Error(`Storage presign failed (${presignResp.status}): ${msg}`);
+  }
+  const { url: s3Url } = (await presignResp.json()) as { url: string };
+  if (!s3Url) throw new Error("Forge returned empty presign URL");
+  const uploadResp = await fetch(s3Url, {
+    method: "PUT",
+    headers: { "Content-Type": contentType, "Content-Length": String(size) },
+    body,
+    signal,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+  if (!uploadResp.ok) throw new Error(`Storage upload to S3 failed (${uploadResp.status})`);
+  return { key, url: `/manus-storage/${key}` };
+}
+
 export async function storageGetSignedUrl(relKey: string): Promise<string> {
   const { forgeUrl, forgeKey } = getForgeConfig();
   const key = normalizeKey(relKey);

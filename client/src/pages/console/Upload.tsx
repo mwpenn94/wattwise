@@ -8,8 +8,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
-import { CheckCircle2, FileSpreadsheet, FileUp, Receipt, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, FileSpreadsheet, FileUp, Loader2, Receipt, Trash2, XCircle } from "lucide-react";
 import { fileToBase64 } from "@/lib/wattwiseUi";
+import { isTransient, plainError, sleep, uploadClient, uploadRaw } from "@/lib/uploadClient";
+import { Progress } from "@/components/ui/progress";
 import { DisclaimerBanner } from "@/components/Honesty";
 import { useActiveSite, useSiteRequestGuard } from "@/hooks/useActiveSite";
 import { BulkImportPanel } from "@/components/BulkImportPanel";
@@ -43,14 +45,18 @@ export default function Upload() {
   const [mode, setMode] = useState<"single" | "bulk">(() => (new URLSearchParams(window.location.search).get("mode") === "bulk" ? "bulk" : "single"));
   const [billManual, setBillManual] = useState<null | { reason: string }>(null);
   const [manualBill, setManualBill] = useState({ periodStart: "", periodEnd: "", totalUsage: "", totalCost: "", billedDemandKw: "" });
+  // Oct 25: large workbooks import sheet-by-sheet in short server requests.
+  const [importing, setImporting] = useState<null | { filename: string; sheetsDone: number; sheetsTotal: number; note?: string }>(null);
+  const [choice, setChoice] = useState<null | { uploadId: number; filename: string; addresses: number; examples: string[]; sheets: number }>(null);
 
   useEffect(() => {
     setBusy(false);
     setBillManual(null);
     setManualBill({ periodStart: "", periodEnd: "", totalUsage: "", totalCost: "", billedDemandKw: "" });
+    setImporting(null);
+    setChoice(null);
   }, [activeSiteId]);
 
-  const ingest = trpc.uploads.ingest.useMutation();
   const billOcr = trpc.uploads.billOcr.useMutation();
   const delUpload = trpc.uploads.delete.useMutation({
     onSuccess: async (res) => {
@@ -61,6 +67,37 @@ export default function Upload() {
   });
   const billCreate = trpc.bills.create.useMutation();
 
+  type IngestResult = Awaited<ReturnType<typeof uploadClient.uploads.ingest.mutate>>;
+  /** Keep calling the server until the sliced import finishes (or needs a choice). */
+  async function driveIngest(filename: string, first: () => Promise<IngestResult>, isCurrent: () => boolean): Promise<IngestResult | null> {
+    let res: IngestResult | null = null;
+    let errors = 0;
+    let call: () => Promise<IngestResult> = first;
+    for (;;) {
+      try {
+        res = await call();
+        errors = 0;
+      } catch (e) {
+        // Only an already-created upload can be continued; a first call that
+        // never reached the server is retried as a whole (same bytes resume).
+        if (!isTransient(e) || ++errors > 6) throw e;
+        setImporting((p) => ({ filename, sheetsDone: p?.sheetsDone ?? 0, sheetsTotal: p?.sheetsTotal ?? 0, note: `Server busy — retrying (${errors}/6)…` }));
+        await sleep(Math.min(20_000, 1500 * errors * errors));
+        continue;
+      }
+      if (!isCurrent()) return null;
+      if (res.progress) setImporting({ filename, sheetsDone: res.progress.sheetsDone, sheetsTotal: res.progress.sheetsTotal, note: res.busy ? "Waiting for the previous step to finish…" : undefined });
+      if (res.needsChoice || !res.more) return res;
+      const uploadId = res.uploadId;
+      if (res.busy) await sleep(3000);
+      call = () => uploadClient.uploads.ingestContinue.mutate({ uploadId });
+    }
+  }
+  function reportResult(filename: string, res: IngestResult) {
+    if (res.duplicate) toast.info(`${filename}: already ingested (duplicate checksum) — skipped`);
+    else toast.success(`${filename}: ${res.totalPoints.toLocaleString()} interval points across ${res.meters.length} meter(s)`);
+  }
+
   async function onFiles(files: FileList | null) {
     if (busy || !files || files.length === 0) return;
     if (!siteId) {
@@ -69,27 +106,68 @@ export default function Upload() {
     }
     const isCurrent = captureSiteRequest();
     setBusy(true);
+    setChoice(null);
     try {
       for (const f of Array.from(files)) {
         const fmt = detectFormat(f.name);
-        const b64 = await fileToBase64(f);
-        if (!isCurrent()) return;
-        const res = await ingest.mutateAsync({ siteId: Number(siteId), filename: f.name, format: fmt, contentBase64: b64, timestampBasis: clockBasis });
-        if (!isCurrent()) return;
-        if (res.duplicate) toast.info(`${f.name}: already ingested (duplicate checksum) — skipped`);
-        else toast.success(`${f.name}: ${res.totalPoints.toLocaleString()} interval points across ${res.meters.length} meter(s)`);
+        if (f.size > 50 * 1024 * 1024) { toast.error(`${f.name}: the limit is 50 MiB per file.`); continue; }
+        setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0 });
+        try {
+          // Raw bytes stream to storage (no base64 copy in the browser or server).
+          setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: "Uploading file…" });
+          const { sourceRef } = await uploadRaw(f, (n, max) => setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: `Server busy — retrying upload (${n}/${max})…` }));
+          if (!isCurrent()) return;
+          setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: "Reading workbook…" });
+          const res = await driveIngest(f.name, () => uploadClient.uploads.ingest.mutate({ siteId: Number(siteId), filename: f.name, format: fmt, sourceRef, timestampBasis: clockBasis, askOnMultiAddress: true }), isCurrent);
+          if (!res || !isCurrent()) return;
+          if (res.needsChoice) {
+            setChoice({ uploadId: res.uploadId, filename: f.name, ...res.needsChoice });
+            break; // wait for the user's decision before any further files
+          }
+          reportResult(f.name, res);
+        } catch (e) {
+          if (!isCurrent()) return;
+          toast.error(`${f.name}: ${plainError(e, "Upload failed")}`);
+        }
       }
       await utils.uploads.list.invalidate();
       await utils.sites.meters.invalidate();
-    } catch (e) {
-      if (!isCurrent()) return;
-      toast.error(e instanceof Error ? e.message : "Upload failed");
     } finally {
       if (isCurrent()) {
         setBusy(false);
+        setImporting(null);
         if (fileRef.current) fileRef.current.value = "";
       }
     }
+  }
+
+  /** Continue an unfinished import (after a reload, or after the multi-address choice). */
+  async function continueUpload(uploadId: number, filename: string, confirmMultiAddress = false) {
+    if (busy) return;
+    const isCurrent = captureSiteRequest();
+    setBusy(true);
+    setChoice(null);
+    setImporting({ filename, sheetsDone: 0, sheetsTotal: 0 });
+    try {
+      const res = await driveIngest(filename, () => uploadClient.uploads.ingestContinue.mutate({ uploadId, confirmMultiAddress }), isCurrent);
+      if (!res || !isCurrent()) return;
+      if (res.needsChoice) setChoice({ uploadId, filename, ...res.needsChoice });
+      else reportResult(filename, res);
+    } catch (e) {
+      if (isCurrent()) toast.error(`${filename}: ${plainError(e, "Upload failed")}`);
+    } finally {
+      await utils.uploads.list.invalidate();
+      await utils.sites.meters.invalidate();
+      if (isCurrent()) { setBusy(false); setImporting(null); }
+    }
+  }
+  /** "Set up separate sites" — discard the pending single-site copy and open bulk setup. */
+  async function chooseSeparateSites(uploadId: number, filename: string) {
+    setChoice(null);
+    try { await uploadClient.uploads.delete.mutate({ uploadId }); } catch { /* already gone */ }
+    await utils.uploads.list.invalidate();
+    setMode("bulk");
+    toast.info(`Add “${filename}” here — each service address becomes its own site.`);
   }
 
   async function onBill(files: FileList | null) {
@@ -268,6 +346,42 @@ export default function Upload() {
         </div>
       </div>
 
+      {importing && (
+        <Card className="mt-6 border-primary/40" role="status" aria-live="polite" data-testid="single-import-progress">
+          <CardContent className="py-4">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden="true" />
+              Importing {importing.filename}
+              {importing.sheetsTotal > 0 && <span className="font-normal text-muted-foreground">— sheet {Math.min(importing.sheetsDone + 1, importing.sheetsTotal)} of {importing.sheetsTotal}</span>}
+            </div>
+            <Progress className="mt-3" value={importing.sheetsTotal > 0 ? (100 * importing.sheetsDone) / importing.sheetsTotal : 5} aria-label="Import progress" />
+            <p className="mt-2 text-xs text-muted-foreground">
+              {importing.note ?? "Large workbooks import one sheet at a time. Keep this page open — if the connection drops, choose the same file again and it picks up where it left off."}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {choice && (
+        <Card className="mt-6 border-amber-500/50" role="alertdialog" aria-labelledby="multi-address-title" data-testid="multi-address-choice">
+          <CardHeader>
+            <CardTitle id="multi-address-title" className="font-display text-base">This workbook covers {choice.addresses} service addresses</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              {choice.filename} has {choice.sheets} sheets listing {choice.addresses} different addresses
+              {choice.examples.length > 0 ? ` (for example ${choice.examples.join("; ")})` : ""}. Usually each address is its own building or campus. Nothing has been imported yet.
+            </p>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            <Button data-testid="choice-separate-sites" onClick={() => void chooseSeparateSites(choice.uploadId, choice.filename)}>
+              Set up a separate site for each address
+            </Button>
+            <Button variant="outline" data-testid="choice-this-site" onClick={() => void continueUpload(choice.uploadId, choice.filename, true)}>
+              Add every sheet to {sites.data?.find((s) => String(s.id) === siteId)?.name ?? "this site"}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {billManual && (
         <Card className="mt-6 border-amber-500/40">
           <CardHeader>
@@ -348,6 +462,21 @@ export default function Upload() {
                         <span className="text-emerald-700 dark:text-emerald-500">parsed</span>
                       ) : u.status === "failed" ? (
                         <span className="flex items-center gap-1 text-destructive"><XCircle className="h-3.5 w-3.5" /> {u.error?.slice(0, 60)}</span>
+                      ) : u.status === "pending" && u.progress ? (
+                        u.progress.active || busy ? (
+                          <span className="text-muted-foreground">importing {u.progress.sheetsDone}/{u.progress.sheetsTotal} sheets…</span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="text-primary underline underline-offset-2"
+                            data-testid={`continue-upload-${u.id}`}
+                            onClick={() => (u.progress?.awaitingChoice && u.progress.choice
+                              ? setChoice({ uploadId: u.id, filename: u.filename, ...u.progress.choice })
+                              : void continueUpload(u.id, u.filename))}
+                          >
+                            {u.progress.awaitingChoice ? "Needs your choice — review" : `Paused at ${u.progress.sheetsDone}/${u.progress.sheetsTotal} sheets — continue`}
+                          </button>
+                        )
                       ) : (
                         u.status
                       )}

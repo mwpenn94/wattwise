@@ -54,6 +54,7 @@ import { tariffMatchesSiteUtility } from "../utilityMatch";
 import { pickSizeFitBasis } from "./basisSelect";
 import { perMeterRateReview, priceAccountsSeparately, type MeterRateReview, type AccountPricingComponent, sameAccountProvider, RATE_RANGE_BASIS, INDICATIVE_RATE_RANGE_BASIS } from "./multiMeter";
 import type { Site, Meter } from "../../drizzle/schema";
+import { reclaimMemory, relieveMemoryPressure } from "../ingest/memory";
 
 /** Opportunity candidate as it flows through ranking/persistence — electric
  * candidates plus the cross-commodity extras (unit, commodity, per-unit
@@ -142,6 +143,9 @@ export function euiPlausibility(
 }
 export async function runAnalysisPipeline(site: Site, meter: Meter | null, userId: number, tier: string): Promise<PipelineResult> {
   const t0 = Date.now();
+  // Oct 25: return the previous run's garbage before allocating this run's
+  // interval series (512 MiB container; V8 assumes ~3 GiB — see ingest/memory).
+  reclaimMemory(0);
   const analysisId = await h.createAnalysis({ siteId: site.id, userId, status: "running" });
   try {
     const result = await timeoutGuard(execute(site, meter, userId, tier, analysisId));
@@ -159,6 +163,7 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
       // stage-key list; the narration IS the record of completed stages.
     });
     await h.audit(userId, "analysis_complete", "analysis", String(analysisId), { siteId: site.id, durationMs });
+    reclaimMemory(0);
     return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -192,6 +197,7 @@ export async function runAnalysisPipeline(site: Site, meter: Meter | null, userI
     const isComputeTimeout = e instanceof AnalysisTimeoutError;
     await h.updateAnalysis(analysisId, { status: isComputeTimeout ? "timeout" : "failed", error: msg, durationMs: failDurationMs, marginalCostUsd: failCost });
     await h.audit(userId, "analysis_failed", "analysis", String(analysisId), { siteId: site.id, error: msg, durationMs: failDurationMs });
+    reclaimMemory(0);
     throw e;
   }
 }
@@ -204,6 +210,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   const narration: string[] = [];
   const narrate = (line: string) => {
     narration.push(line);
+    // Stage boundary: collect only if resident memory is genuinely high.
+    relieveMemoryPressure();
     void h.updateAnalysis(analysisId, { stagesCompleted: [...narration] }).catch(() => {});
   };
 

@@ -6,13 +6,10 @@
  */
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
-import { createTRPCProxyClient, httpLink } from "@trpc/client";
-import superjson from "superjson";
-import type { AppRouter } from "../../../server/routers";
-import { COOKIE_NAME } from "@shared/const";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
-import { fileToBase64, fmtNum } from "@/lib/wattwiseUi";
+import { isTransient, plainError, sleep, uploadClient, uploadRaw } from "@/lib/uploadClient";
+import { fmtNum } from "@/lib/wattwiseUi";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,10 +21,6 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AlertTriangle, Building2, CheckCircle2, ChevronDown, ChevronRight, FileSpreadsheet, Layers, Loader2, MapPin, Trash2, Upload as UploadIcon, XCircle } from "lucide-react";
 
-const uploadClient = createTRPCProxyClient<AppRouter>({ links: [httpLink({url:"/api/trpc",transformer:superjson,
-  headers() { try { const raw=sessionStorage.getItem("manus-cookie"); const pair=raw?.split(";").find(s=>s.trim().startsWith(`${COOKIE_NAME}=`)); const token=pair?.trim().slice(COOKIE_NAME.length+1); return token ? {Authorization:`Bearer ${token}`} : {}; } catch { return {}; } },
-  fetch: (input,init) => fetch(input,{...init,credentials:"include"}),
-})] });
 const BUILDING_TYPES: Array<[string, string]> = [
   ["", "Leave unset (add later)"],
   ["school", "K-12 school"],
@@ -67,11 +60,17 @@ export function BulkImportPanel() {
   const [timestampBasis, setTimestampBasis] = useState<"start"|"end">("start");
   const [clockConfirmed, setClockConfirmed] = useState(false);
   const [committedId, setCommittedId] = useState<number | null>(null);
+  // Oct 25: production gives CPU only while a request is in flight, so the
+  // server imports in ~45 s slices and this page keeps calling until done.
+  const [driving, setDriving] = useState(false);
+  const drivingRef = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const autoContinues = useRef(0);
 
   const stage = trpc.bulkImport.stageFile.useMutation();
   const remove = trpc.bulkImport.removeFile.useMutation();
   const previewM = trpc.bulkImport.preview.useMutation();
-  const commitM = trpc.bulkImport.commit.useMutation();
   const sitesQ = trpc.sites.list.useQuery();
   const recent = trpc.bulkImport.list.useQuery(undefined, { staleTime: 10_000 });
 
@@ -93,9 +92,9 @@ export function BulkImportPanel() {
       },
     },
   );
-  const busy = !!staging || stage.isPending || remove.isPending || previewM.isPending || commitM.isPending;
+  const busy = !!staging || stage.isPending || remove.isPending || previewM.isPending || driving;
   const status = statusQ.data;
-  const finished = status && status.batch.status !== "committing";
+  const finished = !!status && status.batch.status !== "committing" && !driving;
   const prevFinished = useRef(false);
   useEffect(() => {
     if (finished && !prevFinished.current) {
@@ -119,11 +118,24 @@ export function BulkImportPanel() {
         if (f.size>50*1024*1024) { toast.error(`${f.name}: maximum workbook size is 50 MiB`); continue; }
         try {
           setStaging(`Saving ${f.name}…`);
-          const r=await uploadClient.bulkImport.stageFile.mutate({batchId:id,filename:f.name,contentBase64:await fileToBase64(f)});
-          id=r.batchId; setBatchId(id);
-          if(r.duplicate) toast.info(`${f.name} is already staged`);
-          else added.push({fileId:r.fileId,filename:f.name,sheets:r.sheets,skippedSheets:r.skippedSheets,sizeBytes:f.size});
-        } catch(e) { toast.error(e instanceof Error?e.message:"Could not stage workbook"); }
+          // Raw bytes stream to storage; staging then reads them server-side.
+          const { sourceRef }=await uploadRaw(f,(n,max)=>setStaging(`Saving ${f.name}… (server busy, retrying ${n}/${max})`));
+          // Staging is idempotent per batch (same bytes => same staged file),
+          // so a transient server error is retried automatically.
+          let r: Awaited<ReturnType<typeof uploadClient.bulkImport.stageFile.mutate>> | null = null;
+          for (let attempt=1; ; attempt++) {
+            try { r=await uploadClient.bulkImport.stageFile.mutate({batchId:id,filename:f.name,sourceRef}); break; }
+            catch(e) {
+              if (!isTransient(e) || attempt>=4) throw e;
+              setStaging(`Saving ${f.name}… (server busy, retrying ${attempt}/3)`);
+              await sleep(1500*attempt*attempt);
+            }
+          }
+          id=r!.batchId; setBatchId(id);
+          const known=files.some(x=>x.fileId===r!.fileId)||added.some(x=>x.fileId===r!.fileId);
+          if(r!.duplicate && known) toast.info(`${f.name} is already staged`);
+          else if(!known) added.push({fileId:r!.fileId,filename:f.name,sheets:r!.sheets,skippedSheets:r!.skippedSheets,sizeBytes:f.size});
+        } catch(e) { toast.error(`${f.name}: ${plainError(e,"Could not stage workbook")}`); }
       }
       setFiles(previous=>[...previous,...added]);
       if(id!=null && (added.length || files.length)) await runPreview(id,mode,overrides,true);
@@ -138,7 +150,7 @@ export function BulkImportPanel() {
       const r=await previewM.mutateAsync({batchId:id,groupingMode:m,planVersion:insideLock?undefined:version,timeZone:clockOverride?.timeZone??(timeZone||undefined),timestampBasis:clockOverride?.timestampBasis??timestampBasis,
         overrides:Object.entries(ov).map(([sheetId,target])=>({sheetId:Number(sheetId),siteId:typeof target==="number"?target:null,groupKey:typeof target==="string"?target:null}))});
       setPreview(r);
-    }catch(e){toast.error(e instanceof Error?e.message:"Preview failed");}
+    }catch(e){toast.error(plainError(e,"Preview failed"));}
     finally{setStaging(null);if(!insideLock)editorLock.current=false;}
   }
   async function removeStaged(fileId:number) {
@@ -155,20 +167,69 @@ export function BulkImportPanel() {
     }catch(e){toast.error(e instanceof Error?e.message:"Could not remove file");}
     finally{editorLock.current=false;setStaging(null);}
   }
+  type CommitInput = Parameters<typeof uploadClient.bulkImport.commit.mutate>[0];
+  /** Keep calling commit until the server reports the import finished. Each
+   * call does up to ~45 s of checkpointed work; transient failures back off
+   * and retry (the lease protocol prevents double work). */
+  async function driveCommit(first: CommitInput, opts: { starting: boolean }) {
+    if (drivingRef.current) return;
+    drivingRef.current = true; setDriving(true);
+    let input: CommitInput = first, errors = 0, started = !opts.starting;
+    // Refresh this batch's status by key. (statusQ.refetch() from this closure
+    // would bypass `enabled` and fetch the pre-commit key {batchId: 0}.)
+    const refreshStatus = () => void utils.bulkImport.status.invalidate({ batchId: first.batchId });
+    try {
+      while (mounted.current) {
+        try {
+          const r = await uploadClient.bulkImport.commit.mutate(input);
+          errors = 0;
+          if (!started) { started = true; setCommittedId(first.batchId); toast.success("Import started. Progress is saved after every sheet."); }
+          refreshStatus();
+          input = { batchId: first.batchId, planVersion: first.planVersion };
+          if (r.more) continue;
+          if (r.alreadyRunning) {
+            // Another tab/request holds this slice; check back shortly.
+            const st = await utils.client.bulkImport.status.query({ batchId: first.batchId });
+            if (st.batch.status !== "committing") break;
+            await sleep(4000); continue;
+          }
+          break;
+        } catch (e) {
+          if (!started && !isTransient(e)) { toast.error(plainError(e, "Import failed to start")); break; }
+          started = started || (await utils.client.bulkImport.status.query({ batchId: first.batchId }).then(st => st.batch.status === "committing", () => false));
+          if (started) setCommittedId(first.batchId);
+          errors++;
+          if (!isTransient(e) || errors > 8) { toast.error(plainError(e, "The import paused. Use Resume to continue.")); break; }
+          await sleep(Math.min(30_000, 2000 * errors));
+        }
+      }
+    } finally {
+      drivingRef.current = false;
+      if (mounted.current) { setDriving(false); refreshStatus(); void recent.refetch(); }
+    }
+  }
   async function doCommit() {
     if(batchId==null || !preview || !clockConfirmed || editorLock.current || busy)return;
-    editorLock.current=true;
+    editorLock.current=true; autoContinues.current=0;
     try {
-      await commitM.mutateAsync({batchId,planVersion:preview.planVersion,clockConfirmed,entityName:entityName.trim()||null,buildingType:buildingType||null,runAnalysis});
-      setCommittedId(batchId);toast.success("Import started; progress is saved after every sheet.");
-    }catch(e){toast.error(e instanceof Error?e.message:"Import failed to start");}
-    finally{editorLock.current=false;}
+      await driveCommit({batchId,planVersion:preview.planVersion,clockConfirmed,entityName:entityName.trim()||null,buildingType:buildingType||null,runAnalysis},{starting:true});
+    } finally{editorLock.current=false;}
   }
   async function resume() {
-    if(!status || commitM.isPending)return;
-    try {await commitM.mutateAsync({batchId:status.batch.id,planVersion:status.batch.planVersion});await statusQ.refetch();}
-    catch(e){toast.error(e instanceof Error?e.message:"Retry failed");}
+    if(!status || drivingRef.current)return;
+    autoContinues.current=0;
+    await driveCommit({batchId:status.batch.id,planVersion:status.batch.planVersion},{starting:false});
   }
+  // Pick a paused or interrupted import back up automatically (reload, tab
+  // switch, server restart). Bounded so a persistent fault surfaces Resume.
+  useEffect(() => {
+    if (!status || drivingRef.current || committedId == null) return;
+    if (status.batch.status === "committing" && (status.paused || status.stalled) && autoContinues.current < 20) {
+      autoContinues.current++;
+      void driveCommit({ batchId: status.batch.id, planVersion: status.batch.planVersion }, { starting: false });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.batch.status, status?.paused, status?.stalled, committedId]);
   async function openBatch(id:number) {
     if(busy || editorLock.current)return;
     editorLock.current=true;setStaging("Opening import…");
@@ -233,6 +294,11 @@ export function BulkImportPanel() {
         <CardContent className="space-y-4">
           <Progress aria-label="Workbook import progress" value={finished ? 100 : Math.min(100,pct)} />
           <p role="status" aria-live="polite" className="text-xs">{sum?phaseLabel[sum.phase]:"Loading import progress"}</p>
+          {!finished && (
+            <p className="text-xs text-muted-foreground" data-testid="bulk-keep-open">
+              Keep this page open while the import runs. If you leave or lose connection, it pauses safely and continues from the last saved sheet when you come back.
+            </p>
+          )}
           {status?.batch.error && <p role="alert" className="text-sm text-destructive">{status.batch.error}</p>}
           {sum && (
             <div className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
@@ -265,7 +331,7 @@ export function BulkImportPanel() {
           {(status?.stalled || ["partial","failed"].includes(status?.batch.status??"")) && (
             <div className="flex items-center justify-between rounded-md border p-3 text-xs">
               <span>Retry failed sheets or incomplete downstream work. Completed sheet checkpoints are preserved; warnings may require source correction.</span>
-              <Button size="sm" variant="outline" disabled={commitM.isPending} onClick={()=>void resume()}>
+              <Button size="sm" variant="outline" disabled={driving} onClick={()=>void resume()}>
                 Retry / Resume
               </Button>
             </div>
@@ -531,7 +597,7 @@ export function BulkImportPanel() {
                   </p>
                 ) : (
                   <Button className="mt-2" onClick={() => void doCommit()} disabled={busy || !clockConfirmed} data-testid="bulk-commit">
-                    {commitM.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-1 h-4 w-4" />}
+                    {driving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-1 h-4 w-4" />}
                     Import {totals.sites} site{totals.sites === 1 ? "" : "s"} · {totals.meters} meter{totals.meters === 1 ? "" : "s"}
                   </Button>
                 )}

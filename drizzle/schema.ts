@@ -241,6 +241,9 @@ export const uploads = mysqlTable(
     validation: json("validation"),
     status: mysqlEnum("status", ["pending", "parsed", "failed", "duplicate"]).default("pending").notNull(),
     error: text("error"),
+    /** Oct 25: checkpoint for request-sliced single-site workbook ingestion
+     * (sheet cursor, lease, running totals). Null for every other upload. */
+    ingestState: json("ingestState"),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   (t) => [index("uploads_user_idx").on(t.userId), index("uploads_sha_idx").on(t.sha256)],

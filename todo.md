@@ -598,11 +598,11 @@
 - [x] CO-1: Property records card (official Mohave Assessor/Recorder/GIS deep links + optional CountyOffice outbound link; no scraping per CountyOffice terms)
 - [x] CONCEPT-1: docs/concepts/2026-10-24-partner-monitoring-and-relationship-billing.md (partner monitoring, relationship-aware billing, per-persona billing) — concept only
 - [x] QA-1: Gates green (710 tests passed / 10 skipped, 91 files; build OK); authenticated browser E2E 37/38 (only fail = Google Maps proxy 401 on non-production origins)
-- [ ] OPEN-1: Re-run analysis after an address edit (old analyses retired, new run not auto-queued) — FA R3#6
+- [x] OPEN-1: Re-run analysis after an address edit — DONE Oct 24 (server/siteReanalysis.ts: property-facts refresh + background re-analysis queued by sites.update; Explore polls and shows "re-analyzing")
 - [ ] OPEN-2: Residual recomputation after a completed measure (combined amounts currently withheld + disclosed) — FD R4#1
 - [ ] OPEN-3: Campus scenarios/composed plans for virtual-total sites (currently blocked with PRECONDITION_FAILED) and account-level peak dollars (withheld) — FD R4#9/#10
 - [ ] OPEN-4: Bulk import for limited plans (Free/Plus) needs atomic site-capacity reservation — FE F8
-- [ ] OPEN-5: EGMGSQ official mapping (currently inferred EGMGS family, labeled; switching gated) — owner/utility confirmation
+- [ ] OPEN-5: EGMGSQ official mapping — owner/utility confirmation only (D-2). Since Oct 24 the inferred EGMGS family shows indicative savings ranges with conditions (no longer gated)
 - [ ] OPEN-6: Production route-split (1.57 MB JS bundle) — performance
 ## Carry-over queue (from Sept 26 handoff, still open)
 - [ ] BILL-1: Migrate requireTier/tierOf gates to effectiveEntitlement; constrain account.setTier; server/stripeBilling.test.ts
@@ -610,3 +610,25 @@
 - [ ] RATE-2: Adjudicate change_detected sources (SW Gas, UNS Gas, TEP, Phoenix Water, LG&E/KU, APS/TEP dockets, 4 telecom benchmarks) → /home/ubuntu/work/run/rate-adjudication-2026-10.md
 - [ ] RATE-3: Oct 3 monthly verification posted no findings; schedule expiry repaired Oct 24 (next run Nov 3 07:30 UTC) — confirm Nov run posts
 - [ ] TEL-1: Telecom "Add bill observation" UI for price history; Upload ?commodity preselect acceptance; print visual acceptance; Connectivity league-table tests
+- [ ] PF-2: Official county parcel adapters beyond Mohave (start with Pima for the owner's Tucson sites); FEMA structures-only fallback is live and disclosed
+
+## Oct 24 evening — completed and validated (checkpoint after 23:36 PT)
+- [x] Property facts: automatic in-app enrichment (Mohave County parcel GIS + FEMA USA Structures), provenance per figure, labeled estimates, never overwrites user entries; migration 0026; bulk-import phase; KUSD backfill both tenants
+- [x] CBECS 2018 C22 electric benchmarks (K-12 + 5 types) + EUI plausibility guard; floor-area basis labeled in Explore/print/Portfolio
+- [x] Light / Dark / Match-device themes; WCAG AA contrast (0 violations x12 pages each theme); print always white
+- [x] Joel regression: indicative ranges instead of withholding; single-file rate-code capture; size-fit current-rate basis; utility alias matcher; APS→UNS/TEP corrections; progressive cost card
+- [x] Cantex "$0 (ref)": conditions not blockers; not-applicable schedules listed with reasons (screen + print); 750 kW condition; responsive rate table
+- [x] Rate data integrity: seeders replay verified updates (UNS Gas Oct 1; telecom postpaid); rate-currency tests scoped to own sources; live source counts re-verified
+- [x] Validation: pnpm check; Vitest 751 passed/10 skipped; build; authenticated E2E 53/53 (owner read-only, 0 mutations)
+
+## Oct 25 — production "Service Unavailable" on bulk upload (KUSD workbooks)
+- [x] Root cause reproduced under the real 512 MiB / 1 vCPU envelope: whole-workbook SheetJS inflation (~596 MiB) OOM-killed the container → proxy 503
+- [x] Bounded XLSX reads (server/ingest/xlsxSubset.ts): one sheet / header prefix at a time; exact row-range chunking for large sheets
+- [x] Short-lived child-process parser (memory fully returned on exit), worker-thread fallback; heap exhaustion → plain "split by date range" message, never a crash
+- [x] Request-driven, checkpointed bulk commit slices (no detached background work); client drives slices, resumes after reload
+- [x] Raw binary upload transport (/api/uploads/raw → storage stream + signed sourceRef); no base64 copies in browser or server
+- [x] Single-site uploads: sliced, resumable ingest (server/singleIngest.ts, migration 0027 ingestCheckpoint), multi-address workbooks ask before importing, failed files roll back fully
+- [x] Streamed interval writer, memory-reducing GC at heavy boundaries, duplicate table build removed, campus-total fast path (parity-tested)
+- [x] Friendly errors: non-JSON 5xx / network drops retry automatically with calm progress notes; no raw parser text
+- [ ] Deployed production verification after Publish (isolated fixture)
+- [x] Analysis re-run on a large campus no longer OOMs the 512 MiB container: reclaim at pipeline start/end/failure, pressure relief at stage boundaries, process-wide memory watchdog (non-development only). Validated: 5 consecutive + 2 concurrent analyses of the 9- and 6-meter KUSD campuses under the cgroup, peak 323 MiB, oom 0 (was OOM on the 2nd run).

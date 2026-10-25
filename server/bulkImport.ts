@@ -23,6 +23,7 @@ import * as h from "./dbHelpers";
 import { entities, importBatches, importBatchFiles, importBatchSheets, importSiteGroups, meters, sites, users, uploads, intervals, tariffs, billingAccounts } from "../drizzle/schema";
 import { storageGetSignedUrl, storagePut } from "./storage";
 import { preParseGate, parseWorkbookInWorker } from "./ingest/hardening";
+import { reclaimMemory } from "./ingest/memory";
 import { PARSER_VERSION, parseSheetRows, type IntervalClock, type ParsedMeterSeries } from "./ingest/parsers";
 import { writeIntervals } from "./ingest/writer";
 import { geocodeAddress } from "./places";
@@ -60,6 +61,13 @@ async function loadBatch(batchId: number, userId: number) {
 type Db = Awaited<ReturnType<typeof db>>;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const LEASE_MS = 120_000;
+/** Oct 25 (prod 512 MiB / 1 vCPU, CPU only while a request is in flight):
+ * commit work runs INSIDE each commit request for at most this long before it
+ * stops at a checkpoint and returns {more:true}; the client calls again.
+ * Detached background work is throttled to ~0 in production and must not be used. */
+const COMMIT_SLICE_MS = Number(process.env.BULK_COMMIT_SLICE_MS ?? 45_000);
+/** After a slice pauses, the batch is "continuing" (not stalled) for this long. */
+const PAUSE_GRACE_MS = 90_000;
 const MAX_BATCH_FILES = 8, MAX_BATCH_BYTES = 150 * 1024 * 1024, MAX_BATCH_SHEETS = 128;
 const running = new Set<number>(); // admission optimization only, never ownership
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -109,21 +117,27 @@ async function fileBuffer(_fileId: number, fileKey: string | null): Promise<Buff
 }
 
 /* ---------------- stage ---------------- */
-export async function stageFile(userId: number, input: { batchId?: number | null; filename: string; contentBase64: string }) {
+export async function stageFile(userId: number, input: { batchId?: number | null; filename: string; buf: Buffer; storedKey?: string }) {
   const d = await db();
   if (input.batchId != null) await loadBatch(input.batchId, userId);
-  const buf = Buffer.from(input.contentBase64, "base64");
+  const buf = input.buf;
   const gate = preParseGate(buf, "xlsx");
   if (!gate.ok || gate.detected !== "xlsx") throw new TRPCError({ code: "BAD_REQUEST", message: gate.reason ?? "Bulk import requires an .xlsx workbook" });
   const headers = (await parseWorkbookInWorker(buf)).map(s => extractSheetHeaderMeta(s.name, s.rows));
+  reclaimMemory();
   const sha256 = createHash("sha256").update(buf).digest("hex");
   // Recognize editable batches staged before raw-byte hashes were introduced.
   // New rows and repaired duplicates always persist the real file checksum.
   const legacySha256 = input.batchId != null ? digest(buf.toString("base64")) : null;
   // Durable source FIRST. A failed upload never publishes a staged file.
   let fileKey: string;
-  try { fileKey = (await storagePut(`bulk-imports/${userId}/${sha256}.xlsx`, buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")).key; }
-  catch { throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Workbook was not saved. Retry staging; imports require a durable source." }); }
+  // Oct 25: bytes that arrived via POST /api/uploads/raw are already durable
+  // (checksum re-verified on load) — reuse them rather than buffering a copy.
+  if (input.storedKey) fileKey = input.storedKey;
+  else {
+    try { fileKey = (await storagePut(`bulk-imports/${userId}/${sha256}.xlsx`, buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")).key; }
+    catch { throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Workbook was not saved. Retry staging; imports require a durable source." }); }
+  }
   return d.transaction(async tx => {
     await lockUser(tx, userId);
     let batchId = input.batchId;
@@ -513,21 +527,39 @@ export async function commit(user: {id:number;tier?:string|null;role?:string}, i
     // Reserve capacity by rejecting new bulk creation on limited plans until
     // all legacy creation paths share this row-lock protocol (F8 interim).
     if (entitlement.maxSites!==null) throw new TRPCError({code:"FORBIDDEN",message:"Bulk imports are temporarily restricted to Founding/Pro accounts while shared site-capacity reservations are hardened. Use single-site upload on limited plans."});
-    const summary=prev ? {...prev,options,phase:"importing" as const,postProcessing:prev.postProcessing??{}} : emptySummary(options);
+    // A paused/stalled slice continues in its current phase; a retry of a
+    // finished partial/failed import re-walks from the import phase.
+    const continuing=b.status==="committing";
+    const summary=prev ? {...prev,options,phase:continuing ? prev.phase : "importing" as const,postProcessing:prev.postProcessing??{}} : emptySummary(options);
     await deriveProgress(tx,b.id,userId,summary);
     await tx.update(importBatches).set({status:"committing",workerToken:token,leaseUntil:Date.now()+LEASE_MS,error:null,summary}).where(owned(importBatches,b.id,userId));
     return {plan,summary,tier:entitlement.tier};
   });
-  if (!claim) return {batchId:input.batchId,started:false,alreadyRunning:true};
+  if (!claim) return {batchId:input.batchId,started:false,alreadyRunning:true,more:false};
   running.add(input.batchId);
-  void runCommit(input.batchId,userId,claim.tier,claim.plan.sites,claim.summary,token).catch(async e=> {
+  try {
+    const outcome=await runCommit(input.batchId,userId,claim.tier,claim.plan.sites,claim.summary,token,Date.now()+COMMIT_SLICE_MS);
+    return {batchId:input.batchId,started:true,alreadyRunning:false,more:outcome==="paused"};
+  } catch(e) {
     await d.update(importBatches).set({status:"failed",error:message(e).slice(0,4000),workerToken:null,leaseUntil:null}).where(and(owned(importBatches,input.batchId,userId),eq(importBatches.workerToken,token)));
-  }).finally(()=>running.delete(input.batchId));
-  return {batchId:input.batchId,started:true,alreadyRunning:false};
+    return {batchId:input.batchId,started:true,alreadyRunning:false,more:false};
+  } finally { running.delete(input.batchId); }
 }
 
-async function runCommit(batchId:number,userId:number,tier:Tier,planSites:PreviewSite[],summary:CommitSummary,token:string) {
+async function runCommit(batchId:number,userId:number,tier:Tier,planSites:PreviewSite[],summary:CommitSummary,token:string,deadline:number):Promise<"paused"|"done"> {
   const d=await db();
+  // Stop at a checkpoint boundary once the slice budget is spent. Every unit
+  // (sheet, campus total, property lookup, analysis) is already checkpointed,
+  // so the next commit call resumes exactly where this one stopped.
+  const timeUp=()=>Date.now()>=deadline;
+  const pause=async()=>{
+    await d.transaction(async tx=> {
+      await assertLiveLeaseForUpdate(tx,batchId,userId,token);
+      await deriveProgress(tx,batchId,userId,summary);
+      await tx.update(importBatches).set({summary:{...summary},workerToken:null,leaseUntil:Date.now()+PAUSE_GRACE_MS}).where(owned(importBatches,batchId,userId));
+    });
+    return "paused" as const;
+  };
   const save=async(extra:Partial<typeof importBatches.$inferInsert>={})=>fenced(batchId,userId,token,async tx=> {
     await deriveProgress(tx,batchId,userId,summary);
     await tx.update(importBatches).set({summary:{...summary},...extra}).where(owned(importBatches,batchId,userId));
@@ -549,6 +581,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
     // Only one workbook buffer is retained by a worker, never a global cache.
     let loadedFileId:number|null=null, buffer:Buffer|null=null;
     for (const ps of planSites) {
+      if (timeUp()) return await pause();
       summary.currentSite=ps.siteName;
       let site:typeof sites.$inferSelect;
       try {
@@ -580,6 +613,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
       for (const pm of ps.meters) {
         const [checkpoint]=await d.select().from(importBatchSheets).where(and(eq(importBatchSheets.id,pm.sheetId),eq(importBatchSheets.userId,userId)));
         if (!checkpoint || ["imported","duplicate"].includes(checkpoint.status)) continue;
+        if (timeUp()) return await pause();
         summary.currentSheet=pm.sheetName;
         try {
           const file=files.find(f=>f.id===pm.fileId); if (!file) throw new Error("Source file missing");
@@ -641,6 +675,9 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
           await fenced(batchId,userId,token,async tx=> { await tx.update(importBatchSheets).set({status:"failed",pointsWritten:0,rowsIngested:0,rowsSkipped:0,validation:null,detail:message(e).slice(0,4000)}).where(and(eq(importBatchSheets.id,pm.sheetId),eq(importBatchSheets.userId,userId))); });
         }
         await save();
+        // Collect this sheet's rows/series/insert batches before the next one
+        // allocates (512 MiB container; see ingest/memory.ts).
+        reclaimMemory();
       }
     }
     buffer=null;
@@ -660,6 +697,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
     const blockedSites=new Set<number>();
     for (const siteId of summary.siteIds) {
       const post=summary.postProcessing[siteId]??{}; summary.postProcessing[siteId]=post;
+      if (post.totals!=="done" && timeUp()) return await pause();
       const bad=await d.select({id:importBatchSheets.id}).from(importBatchSheets).where(and(eq(importBatchSheets.batchId,batchId),eq(importBatchSheets.siteId,siteId),eq(importBatchSheets.status,"failed")));
       if (bad.length) { blockedSites.add(siteId); post.detail="Some source sheets failed; totals/analysis withheld until retry succeeds."; await save(); continue; }
       try {
@@ -680,6 +718,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
         if (post.analysis!=="failed") delete post.detail;
       } catch(e) { blockedSites.add(siteId); post.totals="failed"; post.detail=`Campus total incomplete: ${message(e).slice(0,300)}`; }
       await save();
+      reclaimMemory();
     }
     // Property facts (Oct 24): look up official/public records for each new
     // site BEFORE analysis so floor area (and therefore EUI / benchmark /
@@ -693,6 +732,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
       for (const siteId of summary.siteIds) {
         const post=summary.postProcessing[siteId]??{}; summary.postProcessing[siteId]=post;
         if (post.propertyFacts==="done") { if (post.floorAreaApplied) estimated++; continue; }
+        if (timeUp()) return await pause();
         try {
           const site=await h.getSite(siteId,userId); if (!site) continue;
           summary.currentSite=site.name; await save();
@@ -704,6 +744,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
           if (post.floorAreaApplied) estimated++;
         } catch { post.propertyFacts="unavailable"; }
         await save();
+        reclaimMemory();
       }
       summary.floorAreaEstimated=estimated; summary.currentSite=null; await save();
     }
@@ -715,6 +756,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
         // Error text is not a checkpoint: retry failed/incomplete analysis once
         // this attempt's source-sheet and totals dependencies are healthy.
         if (post.analysis==="done" || blockedSites.has(siteId)) continue;
+        if (timeUp()) return await pause();
         try {
           await fenced(batchId,userId,token,async()=> {
             const site=await h.getSite(siteId,userId); if (!site) throw new Error("Site removed");
@@ -725,6 +767,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
           delete post.detail;
         } catch(e) { post.analysis="failed"; post.detail=`Analysis incomplete: ${message(e).slice(0,300)}. Retry or run analysis from Explore.`; }
         await save();
+        reclaimMemory();
       }
     }
     summary.phase="done"; summary.currentSite=null; summary.currentSheet=null;
@@ -735,6 +778,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
       const status=summary.sheetsFailed ? (summary.sheetsImported+summary.sheetsDuplicate ? "partial" : "failed") : warnings ? "partial" : "complete";
       await tx.update(importBatches).set({status,summary,completedAt:Date.now(),workerToken:null,leaseUntil:null}).where(owned(importBatches,batchId,userId));
     });
+    return "done";
   } finally { clearInterval(heartbeat); }
 }
 
@@ -744,7 +788,9 @@ export async function status(userId:number,batchId:number) {
   const files=await d.select().from(importBatchFiles).where(and(eq(importBatchFiles.batchId,b.id),eq(importBatchFiles.userId,userId)));
   const sheets=await d.select().from(importBatchSheets).where(and(eq(importBatchSheets.batchId,b.id),eq(importBatchSheets.userId,userId)));
   const isRunning=b.workerToken!=null&&(b.leaseUntil??0)>Date.now()&&b.status==="committing";
-  return {batch:{id:b.id,status:b.status,groupingMode:b.groupingMode,planVersion:b.planVersion,summary:b.summary as CommitSummary|null,plan:b.plan as {sites:PreviewSite[];totals:Record<string,number>;planLimit:{ok:boolean;limit:number|null;currentSites:number;newSites:number}}|null,error:b.error,createdAt:b.createdAt,completedAt:b.completedAt},running:isRunning,stalled:b.status==="committing"&&!isRunning,files:files.map(f=>({id:f.id,filename:f.filename,sheets:f.sheetCount,sizeBytes:f.sizeBytes})),sheets:sheets.map(s=>({id:s.id,fileId:s.fileId,sheetName:cleanSheetName(s.sheetName),facility:s.facilityLabel,address:s.addressRaw,servicePointId:s.servicePointId,rateScheduleCode:s.rateScheduleCode,status:s.status,siteId:s.siteId,meterId:s.meterId,pointsWritten:s.pointsWritten,detail:s.detail,overrideSiteId:s.overrideSiteId,overrideGroupKey:s.overrideGroupKey,sourceClock:s.sourceClock,validation:s.validation}))};
+  // Between request slices: no worker holds the lease, but the client is expected to continue.
+  const paused=b.status==="committing"&&b.workerToken==null&&(b.leaseUntil??0)>Date.now();
+  return {batch:{id:b.id,status:b.status,groupingMode:b.groupingMode,planVersion:b.planVersion,summary:b.summary as CommitSummary|null,plan:b.plan as {sites:PreviewSite[];totals:Record<string,number>;planLimit:{ok:boolean;limit:number|null;currentSites:number;newSites:number}}|null,error:b.error,createdAt:b.createdAt,completedAt:b.completedAt},running:isRunning,paused,stalled:b.status==="committing"&&!isRunning&&!paused,files:files.map(f=>({id:f.id,filename:f.filename,sheets:f.sheetCount,sizeBytes:f.sizeBytes})),sheets:sheets.map(s=>({id:s.id,fileId:s.fileId,sheetName:cleanSheetName(s.sheetName),facility:s.facilityLabel,address:s.addressRaw,servicePointId:s.servicePointId,rateScheduleCode:s.rateScheduleCode,status:s.status,siteId:s.siteId,meterId:s.meterId,pointsWritten:s.pointsWritten,detail:s.detail,overrideSiteId:s.overrideSiteId,overrideGroupKey:s.overrideGroupKey,sourceClock:s.sourceClock,validation:s.validation}))};
 }
 export async function listBatches(userId:number) {
   const rows=await (await db()).select().from(importBatches).where(eq(importBatches.userId,userId)).orderBy(desc(importBatches.id)).limit(10);

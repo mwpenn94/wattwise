@@ -12,6 +12,7 @@
  * Grouping is by normalized physical address, never by file.
  */
 import * as XLSX from "xlsx";
+import { boundedWorkbookInput } from "./ingest/xlsxSubset";
 import { createHash } from "node:crypto";
 import { scrubCell } from "./ingest/hardening";
 
@@ -85,7 +86,7 @@ export function extractSheetHeaderMeta(sheetName: string, rows: unknown[][]): Sh
 
 /** Header-only read: bounded rows per sheet (benchmarked ~3 s for a 19 MB, 20-sheet workbook). */
 export function readWorkbookHeaders(buf: Buffer, headerRows = 8): SheetHeaderMeta[] {
-  const wb = XLSX.read(buf, { type: "buffer", cellDates: false, sheetRows: headerRows });
+  const wb = XLSX.read(boundedWorkbookInput(buf, { mode: "header" }), { type: "buffer", cellDates: false, sheetRows: headerRows });
   const out: SheetHeaderMeta[] = [];
   for (const name of wb.SheetNames) {
     const ws = wb.Sheets[name];
@@ -294,7 +295,7 @@ export function buildSitePlan(sheets: PlanSheetInput[], mode: GroupingMode): Pla
 
 /** Read exactly one worksheet's rows (bounded memory: ~2.4 s / ~360 MB for a 35k-row sheet). */
 export function readSingleSheetRows(buf: Buffer, sheetName: string): unknown[][] | null {
-  const wb = XLSX.read(buf, { type: "buffer", cellDates: false, sheets: [sheetName] });
+  const wb = XLSX.read(boundedWorkbookInput(buf, { mode: "full", sheetName }), { type: "buffer", cellDates: false, sheets: [sheetName] });
   const ws = wb.Sheets[sheetName];
   if (!ws) return null;
   return XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, raw: true, defval: "" });

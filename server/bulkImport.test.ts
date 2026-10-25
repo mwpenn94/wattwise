@@ -108,6 +108,9 @@ async function waitForCommit(caller: ReturnType<typeof appRouter.createCaller>, 
   while (Date.now() < deadline) {
     latest = await caller.bulkImport.status({ batchId });
     if (!latest.running && latest.batch.status !== "committing") return latest;
+    // Commits run in request-sized slices; continue a paused slice exactly as
+    // the browser's drive loop does (same plan version, stored options).
+    if (latest.paused) { await caller.bulkImport.commit({ batchId, planVersion: latest.batch.planVersion }); continue; }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Timed out waiting for bulk import ${batchId}: ${latest.batch.status}; ${latest.batch.error ?? "no error"}`);
@@ -240,7 +243,7 @@ describe("bulk hardening",()=>{
       await caller.bulkImport.removeFile({batchId:staged.batchId,fileId:staged.fileId});
       await d.delete(importBatches).where(eq(importBatches.id,staged.batchId));
     }
-  });
+  }, 30_000);
   it("retries failed totals and analysis independently, clears stale detail, and preserves imported checkpoints",async()=>{
     const fx=await prepared([sample("post-a",{address:"900 Retry Ave, Unit A, Kingman, AZ"}),sample("post-b",{address:"900 Retry Ave, Unit B, Kingman, AZ"})]);
     const totalSpy=vi.spyOn(virtualTotal,"materializeVirtualTotal").mockRejectedValueOnce(new Error("temporary total failure"));
@@ -303,7 +306,7 @@ describe("bulk hardening",()=>{
       await expect(c.bulkImport.preview({batchId:f.batchId})).rejects.toThrow(/conflicting|durable/);
       await c.bulkImport.removeFile({batchId:f.batchId,fileId:f.fileId});await (await getDb())!.delete(importBatches).where(eq(importBatches.id,f.batchId));
     }
-  });
+  }, 30_000);
   it("rolls back actual interval inserts and checkpoint creation, then retries without stale counters",async()=>{
     const fx=await prepared([sample("rollback-a"),sample("rollback-b")]);
     const original=writer.writeIntervals;

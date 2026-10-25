@@ -190,6 +190,13 @@
       "when": 1792896749848,
       "tag": "0026_fresh_lockheed",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "5",
+      "when": 1792950124900,
+      "tag": "0027_burly_blindfold",
+      "breakpoints": true
     }
   ]
 }

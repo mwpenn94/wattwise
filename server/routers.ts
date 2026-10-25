@@ -101,6 +101,9 @@ import { VERTICAL_PACKS, addProductionPeriod, listProduction, deleteProductionPe
 import * as recommendations from "./recommendations";
 import { attributableVerifiedUsd, isAttributable, sanitizeProofRows } from "./proofAttribution";
 import * as bulkImport from "./bulkImport";
+import * as singleIngest from "./singleIngest";
+import { loadSourceRef } from "./rawUpload";
+import { isZip as isZipContainer } from "./ingest/xlsxSubset";
 
 /** GAP-D / AC16a: self-calibration on every real bill — fail-open so bill
  * ingest never breaks because the calibration couldn't run. */
@@ -112,7 +115,7 @@ async function maybeReconcileBill(billId: number, meterId: number, userId: numbe
   }
 }
 import { createHash } from "crypto";
-import { intervals as intervalsTable, siteSchedules } from "../drizzle/schema";
+import { intervals as intervalsTable, siteSchedules, uploads as uploadsTable } from "../drizzle/schema";
 import { effectiveSchedules } from "./operatingHours";
 import { and, asc, eq, gte, lte } from "drizzle-orm";
 
@@ -1880,8 +1883,14 @@ export const appRouter = router({
      meter per service agreement; re-import is idempotent by service point. */
   bulkImport: router({
     stageFile: protectedProcedure
-      .input(z.object({ batchId: z.number().int().nullable().optional(), filename: z.string().min(1).max(500), contentBase64: z.string().max(70_000_000) }))
-      .mutation(({ ctx, input }) => bulkImport.stageFile(ctx.user.id, input)),
+      // Oct 25: the app sends `sourceRef` (bytes already streamed to storage by
+      // POST /api/uploads/raw); `contentBase64` stays for API callers and tests.
+      .input(z.object({ batchId: z.number().int().nullable().optional(), filename: z.string().min(1).max(500), contentBase64: z.string().max(70_000_000).optional(), sourceRef: z.string().max(2048).optional() })
+        .refine((v) => (v.contentBase64 == null) !== (v.sourceRef == null), { message: "Provide the file once (contentBase64 or sourceRef)." }))
+      .mutation(async ({ ctx, input }) => {
+        const src = input.sourceRef ? await loadSourceRef(ctx.user.id, input.sourceRef) : null;
+        return bulkImport.stageFile(ctx.user.id, { batchId: input.batchId, filename: input.filename, buf: src ? src.buf : Buffer.from(input.contentBase64!, "base64"), storedKey: src?.key });
+      }),
     removeFile: protectedProcedure
       .input(z.object({ batchId: z.number().int(), fileId: z.number().int() }))
       .mutation(({ ctx, input }) => bulkImport.removeFile(ctx.user.id, input.batchId, input.fileId)),
@@ -1914,11 +1923,14 @@ export const appRouter = router({
     list: protectedProcedure.query(({ ctx }) => bulkImport.listBatches(ctx.user.id)),
   }),
   uploads: router({
-    list: protectedProcedure.query(async ({ ctx }) => h.listUploads(ctx.user.id)),
+    // Oct 25: lease internals of sliced single-site imports never leave the
+    // server; the history only sees plain progress.
+    list: protectedProcedure.query(async ({ ctx }) => (await h.listUploads(ctx.user.id)).map(({ ingestState, ...u }) => ({ ...u, progress: singleIngest.ingestProgressOf({ status: u.status, ingestState }) }))),
     /** Back out a bad file: removes the upload row, every interval it ingested,
      * and any bills parsed from it. Returns how many intervals were removed so
      * the UI can say exactly what happened. */
     delete: protectedProcedure.input(z.object({ uploadId: z.number() })).mutation(async ({ ctx, input }) => {
+      await singleIngest.assertNotImporting(input.uploadId, ctx.user.id);
       const removedIntervals = await h.deleteUpload(input.uploadId, ctx.user.id);
       await h.audit(ctx.user.id, "upload_delete", "upload", String(input.uploadId), { removedIntervals });
       return { ok: true as const, removedIntervals };
@@ -1938,13 +1950,20 @@ export const appRouter = router({
           // MAX_UPLOAD_BYTES, and preParseGate re-checks the decoded byte length.
           // A payload that exhausts memory can't reach Buffer.from: Express has
           // already 413'd anything over 50mb on the wire.
-          contentBase64: z.string().max(70_000_000),
+          // Oct 25: the app sends `sourceRef` instead (bytes streamed to storage
+          // by POST /api/uploads/raw — base64 JSON held 5–6 copies in memory).
+          contentBase64: z.string().max(70_000_000).optional(),
+          sourceRef: z.string().max(2048).optional(),
           timeZone: z.string().max(64).optional(),
           timestampBasis: z.enum(["start", "end"]).optional(),
           commodityHint: z.enum(["electric", "gas", "water"]).optional(),
-        }),
+          /** Oct 25: when true, a workbook listing several service addresses
+           * stops for the user's choice (separate sites vs. this site) before
+           * anything is written. API callers that omit it keep prior behavior. */
+          askOnMultiAddress: z.boolean().optional(),
+        }).refine((v) => (v.contentBase64 == null) !== (v.sourceRef == null), { message: "Provide the file once (contentBase64 or sourceRef)." }),
       )
-      .mutation(async ({ ctx, input }) => {
+      .mutation(async ({ ctx, input }): Promise<singleIngest.IngestResult> => {
         await seeded();
         const tier = tierOf(ctx.user);
         const site = await h.getSite(input.siteId, ctx.user.id);
@@ -1954,7 +1973,8 @@ export const appRouter = router({
         const clockZones = Array.from(new Set(clockMeters.filter(m => m.meterRole !== "virtual_total").map(m => m.timezone)));
         if (!input.timeZone && clockZones.length > 1) throw new TRPCError({ code: "BAD_REQUEST", message: "This site has multiple meter timezones; specify the source timezone." });
         const sourceClock = { timeZone: input.timeZone ?? clockZones[0] ?? tzForState(site.state), timestampBasis: input.timestampBasis ?? "start", ambiguousTime: "reject" } as const;
-        const buf = Buffer.from(input.contentBase64, "base64");
+        const stored = input.sourceRef ? await loadSourceRef(ctx.user.id, input.sourceRef) : null;
+        const buf = stored ? stored.buf : Buffer.from(input.contentBase64!, "base64");
         const gate = preParseGate(buf, input.format);
         if (!gate.ok) throw new TRPCError({ code: "BAD_REQUEST", message: gate.reason ?? "File rejected" });
         // Parser routing is based on the gate-verified DETECTED content type, not
@@ -1971,8 +1991,23 @@ export const appRouter = router({
         const sha256 = createHash("sha256").update(buf).digest("hex");
         const dup = await h.findUploadByHash(ctx.user.id, sha256);
         if (dup && dup.status === "parsed") {
-          return { uploadId: dup.id, duplicate: true as const, meters: [], totalPoints: 0, validations: [] };
+          return { uploadId: dup.id, duplicate: true, more: false, meters: [], totalPoints: 0, validations: [] };
         }
+        // Oct 25: modern (zip-container) workbooks import one worksheet at a
+        // time in request-sized slices — the old all-sheets-in-memory path
+        // OOM-killed the 512 MiB production container on a 20-sheet utility
+        // export. Legacy .xls / csv / xml / zip bundles keep the path below.
+        const sliced = verifiedFormat === "xlsx" && isZipContainer(buf);
+        const ingestCtx: singleIngest.IngestContext = {
+          userId: ctx.user.id, tier, siteId: input.siteId, siteUtility: site.utilityName ?? null,
+          tzNote: tzAmbiguityNote(site.state), filename: input.filename, format: input.format,
+        };
+        if (sliced) {
+          // A retry after a dropped connection resumes the same pending upload.
+          const resumable = await singleIngest.findResumable(ctx.user.id, input.siteId, sha256);
+          if (resumable) return singleIngest.continueWorkbookIngest(resumable.id, ingestCtx, { buf, askOnMultiAddress: input.askOnMultiAddress === true });
+        }
+        const sliceToken = singleIngest.newIngestToken();
 
         const t0 = Date.now();
         // Batch-13 (passes 56/76/86/95): the monthly-quota count and the upload-row
@@ -1994,6 +2029,7 @@ export const appRouter = router({
             parser: verifiedFormat === "xlsx" ? "excel_build0103" : verifiedFormat === "csv" ? "csv_build0103" : verifiedFormat === "zip" ? "zip_multi" : "espi_xml",
             parserVersion: PARSER_VERSION,
             status: "pending",
+            ...(sliced ? { ingestState: singleIngest.initialIngestState(sourceClock, input.commodityHint ?? null, sliceToken) } : {}),
           });
         });
 
@@ -2002,11 +2038,17 @@ export const appRouter = router({
         // be possible) and logged loudly — never silently swallowed.
         let storageWarning: string | null = null;
         try {
-          const put = await storagePut(`uploads/${ctx.user.id}/${uploadId}-${input.filename}`, buf, "application/octet-stream");
+          // Oct 25: raw-transport uploads are already durable; reuse that copy.
+          const put = stored ? { key: stored.key, url: `/manus-storage/${stored.key}` } : await storagePut(`uploads/${ctx.user.id}/${uploadId}-${input.filename}`, buf, "application/octet-stream");
           await h.updateUpload(uploadId, { fileKey: put.key, fileUrl: put.url });
         } catch (e) {
           storageWarning = `Raw file could not be durably stored (${e instanceof Error ? e.message : "storage error"}); parsing proceeded but re-parse from source will not be possible.`;
           console.error("[uploads.ingest] storagePut failed for upload", uploadId, e);
+        }
+        if (sliced) {
+          return singleIngest.startWorkbookIngest(uploadId, ingestCtx, buf, {
+            token: sliceToken, storageWarning, durable: storageWarning == null, askOnMultiAddress: input.askOnMultiAddress === true,
+          });
         }
 
         // Cycle 5, pass 195: XXE gate runs BEFORE any parse work is scheduled —
@@ -2205,11 +2247,28 @@ export const appRouter = router({
         });
         return {
           uploadId,
-          duplicate: false as const,
+          duplicate: false,
+          more: false,
           meters: out,
           totalPoints: out.reduce((a, m) => a + m.points, 0),
           validations: series.map((s) => ({ sheet: s.sourceKey, ...s.validation, footer: s.footerTotals })),
         };
+      }),
+    /** Oct 25: continue a request-sliced workbook upload (or confirm the
+     * multi-address choice). Idempotent: concurrent calls are fenced by a lease
+     * and simply report {busy:true}; a finished upload reports its final state. */
+    ingestContinue: protectedProcedure
+      .input(z.object({ uploadId: z.number().int(), confirmMultiAddress: z.boolean().optional() }))
+      .mutation(async ({ ctx, input }): Promise<singleIngest.IngestResult> => {
+        const d = (await getDb())!;
+        const [u] = await d.select().from(uploadsTable).where(and(eq(uploadsTable.id, input.uploadId), eq(uploadsTable.userId, ctx.user.id)));
+        if (!u || u.siteId == null) throw new TRPCError({ code: "NOT_FOUND", message: "Upload not found" });
+        const site = await h.getSite(u.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        return singleIngest.continueWorkbookIngest(u.id, {
+          userId: ctx.user.id, tier: tierOf(ctx.user), siteId: u.siteId, siteUtility: site.utilityName ?? null,
+          tzNote: tzAmbiguityNote(site.state), filename: u.filename, format: u.format,
+        }, { confirmMultiAddress: input.confirmMultiAddress === true });
       }),
 
     /** Bill image/PDF OCR (LLM vision; kill-switch degrades to manual entry). */
@@ -2396,6 +2455,9 @@ export const appRouter = router({
       await seeded();
       const site = await h.getSite(input.siteId, ctx.user.id);
       if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+      // Oct 25: never analyze half of a workbook that is still importing.
+      const unfinished = await singleIngest.unfinishedUploadFor(input.siteId);
+      if (unfinished) throw new TRPCError({ code: "CONFLICT", message: `“${unfinished.filename}” is still importing (${unfinished.sheetsDone} of ${unfinished.sheetsTotal} sheets). Finish it on the Upload page, then run the analysis.` });
       // An implicit site analysis needs the campus physical total when two or
       // more separately billed mains exist. Explicit meterId remains exactly a
       // single-account drilldown and never gets substituted.

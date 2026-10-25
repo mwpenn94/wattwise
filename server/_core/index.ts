@@ -11,6 +11,8 @@ import { serveStatic, setupVite } from "./vite";
 import { digestHandler, refreshReferenceHandler } from "../scheduledHandlers";
 import { rateVerifyHandler } from "../rateVerifyHandler";
 import { stripeWebhookHandler } from "../stripeBilling";
+import { rawUploadHandler } from "../rawUpload";
+import { startMemoryWatchdog } from "../ingest/memory";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -32,11 +34,19 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  // Oct 25: production runs in a 512 MiB container while V8 sizes its heap
+  // from host memory (~3 GiB), so collectable garbage from large analyses
+  // and imports can pile up until the container is killed. The watchdog
+  // collects only when resident memory is genuinely high (see ingest/memory).
+  if (process.env.NODE_ENV !== "development") startMemoryWatchdog();
   const app = express();
   const server = createServer(app);
   // Stripe signatures cover the exact raw bytes; this route must precede the
   // global JSON parser and stays setup-blocked until test-mode secrets exist.
   app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
+  // Oct 25: interval workbooks arrive as raw bytes streamed to storage (see
+  // server/rawUpload.ts); mounted before any body parser so nothing buffers them.
+  app.post("/api/uploads/raw", rawUploadHandler);
   // Configure body parser with larger size limit for file uploads
   app.use("/api/trpc", (req, res, next) => {
     if (req.path.includes("bulkImport.stageFile") && (req.path !== "/bulkImport.stageFile" || req.query.batch != null)) {

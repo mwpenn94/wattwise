@@ -5,6 +5,7 @@
  * compares ingested sums against the workbook's own Total=/Max= footers.
  */
 import * as XLSX from "xlsx";
+import { boundedWorkbookInput, workbookSheetNames } from "./xlsxSubset";
 import { XMLParser } from "fast-xml-parser";
 import {
   Row,
@@ -14,9 +15,11 @@ import {
   numberValue,
   parseCSV,
   rowsToFile,
+  type ParsedTable,
 } from "../../shared/build0103";
 import { rejectXxe, scrubCell } from "./hardening";
 import { inferColumns } from "./columnInference";
+import { heapGuard } from "./memory";
 
 export const PARSER_VERSION = "BUILD-010.3-clock2";
 
@@ -168,7 +171,10 @@ function inferDurationMin(tss: number[]): number {
  * the single-series path unchanged.
  */
 function tableToSeriesMulti(name: string, rows: Row[], clock: IntervalClock): ParsedMeterSeries[] {
-  const probe = rowsToFile(name, rows);
+  // Oct 25: the probe table IS the single-series table (same name, same rows),
+  // so reuse it rather than building a second full copy — on a 175k-row sheet
+  // each copy is ~80 MiB of heap inside a 512 MiB container.
+  let probe: ParsedTable | null = rowsToFile(name, rows);
   const meterCol = findHeader(probe.headers, [/^meter\s*(#|number|id)?$/i], [/read/i]);
   if (meterCol) {
     const meterValues = new Set<string>();
@@ -180,10 +186,12 @@ function tableToSeriesMulti(name: string, rows: Row[], clock: IntervalClock): Pa
       const out: ParsedMeterSeries[] = [];
       const headerRows = rows.slice(0, probe.headerRowIndex + 1);
       const meterIdx = probe.headers.indexOf(meterCol);
+      const dataStart = probe.headerRowIndex + 1;
+      probe = null; // per-meter subsets build their own tables
       for (const mv of Array.from(meterValues)) {
         const subset = [
           ...headerRows,
-          ...rows.slice(probe.headerRowIndex + 1).filter((r) => String(r?.[meterIdx] ?? "").trim() === mv),
+          ...rows.slice(dataStart).filter((r) => String(r?.[meterIdx] ?? "").trim() === mv),
         ];
         const s = tableToSeries(`${name} · meter ${mv}`, subset, clock);
         if (s) out.push(s);
@@ -191,12 +199,12 @@ function tableToSeriesMulti(name: string, rows: Row[], clock: IntervalClock): Pa
       if (out.length > 0) return out;
     }
   }
-  const single = tableToSeries(name, rows, clock);
+  const single = tableToSeries(name, rows, clock, probe ?? undefined);
   return single ? [single] : [];
 }
 
-function tableToSeries(name: string, rows: Row[], clock: IntervalClock): ParsedMeterSeries | null {
-  const table = rowsToFile(name, rows);
+function tableToSeries(name: string, rows: Row[], clock: IntervalClock, prebuilt?: ParsedTable): ParsedMeterSeries | null {
+  const table = prebuilt ?? rowsToFile(name, rows);
   if (table.data.length < 3) return null;
   const headers = table.headers;
 
@@ -308,7 +316,10 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock): ParsedM
   const points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }> = [];
   let skipped = 0;
   let receivedRows = 0;
+  // Bounded garbage on very long sheets (no effect on results).
+  const tick = heapGuard();
   for (const r of table.data) {
+    tick();
     // LGE-2: "Usage Direction" — only Delivered (or blank) rows are consumption;
     // Received rows are net-metering export and are excluded with disclosure.
     if (directionCol) {
@@ -398,16 +409,27 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock): ParsedM
 
 /* ---------------- Excel (D3: every sheet; D11: raw floats) ---------------- */
 export function parseExcelIntervals(buf: Buffer, clock: IntervalClock = DEFAULT_CLOCK): ParsedMeterSeries[] {
-  const wb = XLSX.read(buf, { type: "buffer", cellDates: false });
   const out: ParsedMeterSeries[] = [];
-  for (const sheetName of wb.SheetNames) {
-    const ws = wb.Sheets[sheetName];
-    if (!ws) continue;
+  const pushSheet = (sheetName: string, ws: XLSX.WorkSheet | undefined) => {
+    if (!ws) return;
     // D11: raw:true preserves full float precision (never display-rounded)
     const rows = XLSX.utils.sheet_to_json<Row>(ws, { header: 1, raw: true, defval: "" });
-    if (!rows || rows.length < 4) continue;
+    if (!rows || rows.length < 4) return;
     const scrubbed = rows.map((r) => r.map((c) => (typeof c === "string" ? scrubCell(c) : c)));
     out.push(...tableToSeriesMulti(sheetName, scrubbed, clock));
+  };
+  // Oct 25: read one worksheet at a time from a bounded subset. SheetJS
+  // inflates every zip member up front, so a whole multi-sheet utility
+  // workbook can exceed the 512 MiB production container.
+  const names = workbookSheetNames(buf);
+  if (!names) {
+    const wb = XLSX.read(buf, { type: "buffer", cellDates: false });
+    for (const sheetName of wb.SheetNames) pushSheet(sheetName, wb.Sheets[sheetName]);
+    return out;
+  }
+  for (const sheetName of names) {
+    const wb = XLSX.read(boundedWorkbookInput(buf, { mode: "full", sheetName }), { type: "buffer", cellDates: false, sheets: [sheetName] });
+    pushSheet(sheetName, wb.Sheets[sheetName]);
   }
   return out;
 }

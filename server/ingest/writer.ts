@@ -7,6 +7,7 @@
  *   duration for the same meter resolves by precedence per covered window;
  *   losers get qcFlags='superseded_overlap' (retained for audit).
  */
+import { reclaimMemory } from "./memory";
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { intervals } from "../../drizzle/schema";
@@ -60,10 +61,15 @@ export async function writeIntervals(
     .sort((a, b) => a.ts - b.ts);
 
   const supersededIds = new Set<number>();
-  const rowsToInsert: Array<typeof intervals.$inferInsert> = [];
+  // Oct 25 (512 MiB envelope): a 140k-point sheet used to materialize 140k
+  // insert objects up front (~130 MiB of heap at once, the phase that tipped
+  // the container into an OOM kill). Only point indices are kept; each
+  // 1,000-row batch object is built right before its INSERT.
+  const toInsert: number[] = [];
 
   let overlapStart = 0;
-  for (const p of series.points) {
+  for (let pi = 0; pi < series.points.length; pi++) {
+    const p = series.points[pi];
     const key = `${p.ts}:${p.durationMin}`;
     const exact = exactKey.get(key);
     if (exact) {
@@ -102,7 +108,7 @@ export async function writeIntervals(
         // incoming wins: mark existing as superseded, insert new
         for (const o of overlapping) supersededIds.add(o.id);
         res.overlapsResolved += overlapping.length;
-        rowsToInsert.push({ meterId, ts: p.ts, durationMin: p.durationMin, usage: p.usage, demand: p.demand, uploadId, precedence });
+        toInsert.push(pi);
         res.inserted++;
       } else {
         // existing wins: skip incoming
@@ -110,9 +116,10 @@ export async function writeIntervals(
       }
       continue;
     }
-    rowsToInsert.push({ meterId, ts: p.ts, durationMin: p.durationMin, usage: p.usage, demand: p.demand, uploadId, precedence });
+    toInsert.push(pi);
     res.inserted++;
   }
+  exactKey.clear();
 
   if (supersededIds.size > 0) {
     await db
@@ -123,8 +130,23 @@ export async function writeIntervals(
 
   // Chunked insert
   const CHUNK = 1000;
-  for (let i = 0; i < rowsToInsert.length; i += CHUNK) {
-    const chunk = rowsToInsert.slice(i, i + CHUNK);
+  for (let i = 0; i < toInsert.length; i += CHUNK) {
+    // Objects that live across an awaited INSERT get promoted to old space and,
+    // with Node sizing its heap from host memory (~3 GiB) instead of the 512 MiB
+    // container, are otherwise not collected until the sheet ends. At most one
+    // full GC per second; a no-op when the runtime does not expose gc.
+    if (i > 0 && (i / CHUNK) % 10 === 0) {
+      const ran = reclaimMemory(1000);
+      if (process.env.INGEST_MEM_LOG) {
+        const m = process.memoryUsage();
+        console.log(`[writer] meter ${meterId} batch ${i / CHUNK}/${Math.ceil(toInsert.length / CHUNK)} gc=${ran} rss=${Math.round(m.rss / 1048576)} heapUsed=${Math.round(m.heapUsed / 1048576)} heapTotal=${Math.round(m.heapTotal / 1048576)} external=${Math.round(m.external / 1048576)} ab=${Math.round(m.arrayBuffers / 1048576)}`);
+      }
+    }
+    const chunk: Array<typeof intervals.$inferInsert> = [];
+    for (let j = i; j < Math.min(i + CHUNK, toInsert.length); j++) {
+      const p = series.points[toInsert[j]];
+      chunk.push({ meterId, ts: p.ts, durationMin: p.durationMin, usage: p.usage, demand: p.demand, uploadId, precedence });
+    }
     const insRes = await db
       .insert(intervals)
       .values(chunk)

@@ -37,7 +37,9 @@ afterAll(async()=>{
 async function stageBoth(){let batchId:number|undefined;for(const file of paths){const r=await caller.bulkImport.stageFile({batchId,filename:path.basename(file),contentBase64:readFileSync(file).toString("base64")});batchId=r.batchId;}return batchId!;}
 async function drain(batchId:number){const deadline=Date.now()+1_200_000;let last=-1;
  while(Date.now()<deadline){const s=await caller.bulkImport.status({batchId});if(s.batch.summary?.sheetsDone!==last){last=s.batch.summary?.sheetsDone??0;console.log(`Real workbook batch ${batchId}: ${last}/38 sheets; ${s.batch.summary?.phase??s.batch.status}`);}
-  if(!s.running&&s.batch.status!=="committing")return s;await new Promise(r=>setTimeout(r,1000));}
+  if(!s.running&&s.batch.status!=="committing")return s;
+  if(s.paused){await caller.bulkImport.commit({batchId,planVersion:s.batch.planVersion});continue;}
+  await new Promise(r=>setTimeout(r,1000));}
  throw new Error("Real workbook commit timed out");}
 describe.skipIf(!paths.every(existsSync))("real KUSD end-to-end bulk proof",()=>{
  it("stages both real files, previews 38→18/37, fences concurrent commit, preserves Phoenix interval-end placement and re-imports idempotently",async()=>{

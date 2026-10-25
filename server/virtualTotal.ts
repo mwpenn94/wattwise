@@ -21,15 +21,51 @@ export function sumComponentSeries(series:ComponentIntervalSeries[]):SummedCompo
   if(missing) notes.push(`Demand is null for ${missing} points because at least one contributing service agreement did not report demand.`);
   return {points,notes};
 }
+const CAMPUS_ALIGNMENT_ERROR="Incomplete campus alignment: normalize durations and continuous coverage before publishing a campus total; component data and the previous total are retained.";
+/** Oct 25 (512 MiB production envelope): when every component is already
+ * ts-ordered, contiguous and index-aligned (the normal case for one utility
+ * export), sum by index without per-point string keys, Maps, Sets or sorted
+ * copies. Returns null whenever that precondition does not hold so the caller
+ * uses the original keyed algorithm; outputs are identical by construction
+ * (same points, same summation order, same notes) and pinned by tests. */
+function alignedFastPath(series:ComponentIntervalSeries[]):SummedComponentSeries|null {
+  const n=series[0]?.length??0;
+  if(!n||series.some(s=>s.length!==n)) return null;
+  for(const s of series){
+    for(let i=0;i<n;i++){
+      const p=s[i]!;
+      if(!Number.isFinite(p.usage)||p.durationMin<=0) return null;
+      if(i>0){const q=s[i-1]!; if(p.ts!==q.ts+q.durationMin*60_000) return null;}
+    }
+  }
+  const first=series[0]!;
+  for(let k=1;k<series.length;k++){const s=series[k]!;for(let i=0;i<n;i++){if(s[i]!.ts!==first[i]!.ts||s[i]!.durationMin!==first[i]!.durationMin) return null;}}
+  const points:IntervalPoint[]=new Array(n);let missing=0;
+  for(let i=0;i<n;i++){
+    let usage=0,demand:number|null=0;
+    for(const s of series){const p=s[i]!;usage+=p.usage;if(demand!=null) demand=p.demand!=null?demand+p.demand:null;}
+    if(demand==null) missing++;
+    points[i]={ts:first[i]!.ts,durationMin:first[i]!.durationMin,usage,demand} as IntervalPoint;
+  }
+  const notes=[`Summed ${series.length} separately billed electric service agreements; only timestamp/duration points shared by every account are included.`];
+  if(missing) notes.push(`Demand is null for ${missing} points because at least one contributing service agreement did not report demand.`);
+  return {points,notes};
+}
 /** Conservative publication gate: no partial, overlapping or duplicated source series. */
 export function requireAlignedCampusSeries(series:ComponentIntervalSeries[]):SummedComponentSeries {
+  const fast=alignedFastPath(series);
+  if(fast) return fast;
+  return requireAlignedCampusSeriesKeyed(series);
+}
+/** Original keyed algorithm (authoritative fallback; also used by tests as the oracle). */
+export function requireAlignedCampusSeriesKeyed(series:ComponentIntervalSeries[]):SummedComponentSeries {
   const summed=sumComponentSeries(series);
   const union=new Set(series.flatMap(s=>s.map(p=>`${p.ts}:${p.durationMin}`)));
   const invalid=series.some(s=>{
     const sorted=[...s].sort((a,b)=>a.ts-b.ts);
     return !sorted.length || sorted.some((p,i)=>!Number.isFinite(p.usage)||p.durationMin<=0||(i>0&&p.ts!==sorted[i-1]!.ts+sorted[i-1]!.durationMin*60_000));
   });
-  if(invalid||!summed.points.length||summed.points.length!==union.size) throw new Error("Incomplete campus alignment: normalize durations and continuous coverage before publishing a campus total; component data and the previous total are retained.");
+  if(invalid||!summed.points.length||summed.points.length!==union.size) throw new Error(CAMPUS_ALIGNMENT_ERROR);
   return summed;
 }
 export function pickSiteAnalysisMeter<T extends Pick<Meter,"commodity"|"meterRole">>(rows:T[]):T|null {
