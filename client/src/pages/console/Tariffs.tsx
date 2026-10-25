@@ -15,11 +15,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { toast } from "sonner";
 import { ChevronDown, ChevronUp, Receipt, ShieldCheck } from "lucide-react";
 import { ProvChip } from "@/components/Honesty";
+import { useActiveSite } from "@/hooks/useActiveSite";
+import type { TariffStructure } from "@shared/wattwise";
 
 export default function Tariffs() {
-  const sites = trpc.sites.list.useQuery();
-  const [siteId, setSiteId] = useState<string>("");
-  const activeSiteId = siteId ? Number(siteId) : (sites.data?.[0]?.id ?? null);
+  const { activeSiteId, sites, setActiveSite } = useActiveSite();
   // Default the library to the active site's state so users see their own
   // utility's rates first; "all" shows the whole nationwide snapshot.
   const [stateFilter, setStateFilter] = useState<string>("");
@@ -52,8 +52,8 @@ export default function Tariffs() {
       <h1 className="font-display text-2xl font-bold tracking-tight">Tariff library</h1>
       <p className="mt-1 text-sm text-muted-foreground">
         Nationwide representative rates (all 50 states + DC) from a URDB-style snapshot — electric, natural gas, and
-        water structures per state. Assign a rate to a meter, then re-run analysis for an exact-rules bill
-        simulation. Expand any row to see its TOU windows, demand charges, ratchet, and coincident-peak terms.
+        water structures per state. Assign a rate to a meter, then re-run analysis for a modeled cost subtotal,
+        not a bill reproduction. Expand any row for rates, riders, verified periods and exclusions; confirm eligibility before switching.
       </p>
       <div className="mt-4 flex gap-1 rounded-lg border border-border/70 bg-muted/30 p-1 w-fit">
         {(["electric", "gas", "water"] as const).map((c) => (
@@ -97,7 +97,7 @@ export default function Tariffs() {
       <div className="mt-6 grid gap-3 sm:grid-cols-[240px_1fr]">
         <div>
           <label className="text-sm font-medium">Assign to site</label>
-          <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={setSiteId}>
+          <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={(value) => setActiveSite(Number(value))}>
             <SelectTrigger className="mt-1">
               <SelectValue placeholder="Select site…" />
             </SelectTrigger>
@@ -366,20 +366,12 @@ function fmtHours(hs?: number, he?: number): string {
 function TariffRowGroup({ t, meters, onAssign, rateUnit }: { t: TariffListRow; meters: MeterRow[]; onAssign: (meterId: number) => void; rateUnit: string }) {
   const [openDetail, setOpenDetail] = useState(false);
   const detail = trpc.tariffs.detail.useQuery({ tariffId: t.id }, { enabled: openDetail });
-  const s = (detail.data?.structure ?? null) as {
-    fixedMonthly?: number;
-    energy?: Array<{ label: string; months: number[]; daysOfWeek: number[]; hourStart: number; hourEnd: number; ratePerUnit: number }>;
-    demand?: Array<{ label: string; months: number[]; hourStart?: number; hourEnd?: number; daysOfWeek?: number[]; ratePerKw: number; demandGroup?: string }>;
-    ratchet?: { lookbackMonths: number; ratchetPct: number; applicablePeriod: string };
-    cp?: { topN: number; peakSeasonMonths: number[]; ratePerKw: number };
-    exportRate?: { type: string; ratePerKwh: number; notes?: string };
-    minBill?: number;
-  } | null;
+  const s = (detail.data?.structure ?? null) as TariffStructure | null;
   return (
     <>
       <TableRow>
-        <TableCell className="text-sm">{t.utilityName}</TableCell>
-        <TableCell className="max-w-64 text-sm">
+        <TableCell className="max-w-48 whitespace-normal break-words text-sm">{t.utilityName}</TableCell>
+        <TableCell className="max-w-64 whitespace-normal break-words text-sm">
           <button
             type="button"
             className="inline-flex items-center gap-1 text-left hover:text-primary"
@@ -404,7 +396,7 @@ function TariffRowGroup({ t, meters, onAssign, rateUnit }: { t: TariffListRow; m
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="font-mono text-[10px] text-muted-foreground">{t.freshness}</span>
+                      <span className="inline-block max-w-36 whitespace-normal font-mono text-[10px] text-muted-foreground">{t.freshness === "verified" ? "base table verified — check rider/account coverage" : t.freshness}</span>
                     </TableCell>
         <TableCell>
           {meters.length > 0 ? (
@@ -429,28 +421,44 @@ function TariffRowGroup({ t, meters, onAssign, rateUnit }: { t: TariffListRow; m
       </TableRow>
       {openDetail && (
         <TableRow>
-          <TableCell colSpan={6} className="bg-muted/30">
+          <TableCell colSpan={6} className="whitespace-normal bg-muted/30">
             {detail.isLoading ? (
               <Skeleton className="h-20 w-full" />
             ) : s ? (
-              <div className="grid gap-4 py-2 text-xs lg:grid-cols-2">
-                <div>
-                  <p className="font-mono text-[10px] uppercase text-muted-foreground">Energy periods (TOU)</p>
+              <div className="grid min-w-0 gap-4 py-2 text-xs lg:grid-cols-2">
+                <div className="min-w-0">
+                  <p className="font-mono text-[10px] uppercase text-muted-foreground">{s.energyBlocks?.length ? "Progressive monthly energy blocks" : "Energy periods (TOU)"}</p>
                   <ul className="mt-1 space-y-1">
+                    {s.energyBlocks?.map((block, i) => (
+                      <li key={`block-${i}`} className="flex flex-wrap justify-between gap-2 font-mono">
+                        <span>{i === 0 ? "First" : `Above ${s.energyBlocks![i - 1].upToKwh?.toLocaleString()}`} {block.upToKwh == null ? "— remaining kWh" : `through ${block.upToKwh.toLocaleString()} kWh`}</span>
+                        <span>${block.ratePerUnit.toFixed(6)}/{rateUnit}</span>
+                      </li>
+                    ))}
                     {(s.energy ?? []).map((p, i) => (
                       <li key={i} className="flex flex-wrap justify-between gap-2 font-mono">
                         <span>
                           {p.label} · {fmtMonths(p.months)} · {fmtDays(p.daysOfWeek)} · {fmtHours(p.hourStart, p.hourEnd)}
+                          {p.holidayExclusions?.length ? " · excludes actual and observed holidays" : ""}
                         </span>
-                        <span className="text-foreground">${p.ratePerUnit.toFixed(4)}/{rateUnit}</span>
+                        <span className="text-foreground">${p.ratePerUnit.toFixed(6)}/{rateUnit}</span>
                       </li>
                     ))}
                   </ul>
                   <p className="mt-2 font-mono text-[11px] text-muted-foreground">
                     fixed ${s.fixedMonthly?.toFixed(2) ?? "0.00"}/mo{s.minBill != null ? ` · min bill $${s.minBill.toFixed(2)}/mo` : ""}
                   </p>
+                  {!!s.riders?.length && <div className="mt-3 space-y-2">
+                    <p className="font-mono text-[10px] uppercase text-muted-foreground">Date-versioned riders (USD)</p>
+                    {s.riders.map((r, i) => <div key={`${r.label}-${r.validFrom}-${i}`} className="border-t border-border/40 pt-1">
+                      <p className="font-mono">{r.label}: ${r.ratePerUnit.toFixed(6)}/{r.basis === "billing_demand_kw" ? "billed kW-month" : "imported kWh"}{r.monthlyCapUsd != null ? ` · cap $${r.monthlyCapUsd.toFixed(2)}/mo` : ""}</p>
+                      <p className="text-muted-foreground">{r.validFrom ?? "start not specified"} through {r.validTo ?? "until superseded (verify current filing)"}</p>
+                      {r.renewableClassAverageUsd != null && <p>Qualifying renewable installation: ${r.renewableClassAverageUsd.toFixed(2)}/mo instead of usage/cap; confirm incentive/interconnection dates under sheet 706.</p>}
+                      {r.source && <p className="break-all text-[10px] text-muted-foreground">Source: {r.source}</p>}
+                    </div>)}
+                  </div>}
                 </div>
-                <div className="space-y-2">
+                <div className="min-w-0 space-y-2 break-words">
                   <div>
                     <p className="font-mono text-[10px] uppercase text-muted-foreground">Demand charges</p>
                     {(s.demand ?? []).length > 0 ? (
@@ -469,10 +477,12 @@ function TariffRowGroup({ t, meters, onAssign, rateUnit }: { t: TariffListRow; m
                       <p className="mt-1 font-mono text-muted-foreground">none — energy-only rate</p>
                     )}
                   </div>
+                  {s.demandMinKw != null && <p>Minimum billing demand: greater of contract capacity or {s.demandMinKw} kW.</p>}
+                  {s.primaryVoltageDemandCreditPct != null && <p>Confirmed primary-voltage service: {(s.primaryVoltageDemandCreditPct * 100).toFixed(0)}% demand-charge credit. Otherwise secondary-voltage assumption.</p>}
                   {s.ratchet && (
                     <p className="font-mono text-[11px] text-muted-foreground">
-                      ratchet: billed demand ≥ {(s.ratchet.ratchetPct * 100).toFixed(0)}% of the {s.ratchet.applicablePeriod} peak over the past{" "}
-                      {s.ratchet.lookbackMonths} months
+                      ratchet: billed demand ≥ {(s.ratchet.ratchetPct * 100).toFixed(0)}% of greatest {s.ratchet.determinant === "billed" ? "billed demand" : `${s.ratchet.applicablePeriod} measured peak`} in preceding{" "}
+                      {s.ratchet.lookbackMonths} calendar months
                     </p>
                   )}
                   {s.cp && (
@@ -485,6 +495,9 @@ function TariffRowGroup({ t, meters, onAssign, rateUnit }: { t: TariffListRow; m
                       export: {s.exportRate.type.replace(/_/g, " ")} at ${s.exportRate.ratePerKwh.toFixed(4)}/kWh
                     </p>
                   )}
+                  {s.verifiedThrough && <p>Source history verified through {s.verifiedThrough}; future PPFAC is not projected. Missing historical rider versions are excluded and disclosed by month.</p>}
+                  {s.billingCaveat && <p className="rounded border border-amber-500/30 p-2">{s.billingCaveat}</p>}
+                  {s.notes?.map((note) => <p key={note} className="text-muted-foreground">{note}</p>)}
                 </div>
               </div>
             ) : (

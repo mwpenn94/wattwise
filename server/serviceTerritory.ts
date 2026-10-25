@@ -247,7 +247,7 @@ export function resolveTerritory(site: SiteLocation, commodity: "electric" | "ga
         matchPrefixes: named.map((t) => t.utilityMatch),
         confidence: "name_match",
         overlap: false,
-        basis: `Utility confirmed on the site record (${site.utilityName}).`,
+        basis: `Utility on the site record (${site.utilityName}) — edit the site if it is wrong.`,
       };
     }
   }
@@ -351,7 +351,7 @@ export async function resolveTerritoryUnified(
         overlap: chosen.length > 1,
         basis:
           named.length > 0
-            ? `Utility confirmed on the site record (${site.utilityName}).`
+            ? `Utility on the site record (${site.utilityName}) — edit the site if it is wrong.`
             : chosen.length > 1
               ? `ZIP ${norm(site.zip).slice(0, 3)}xx is served by multiple ${commodity} utilities — confirm which serves you.`
               : `Territory resolved from the nationwide ZIP-level registry (EIA-861-derived).`,

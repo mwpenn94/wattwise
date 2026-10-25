@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.07.9"; // SW Gas G-5 stable urdbId (swgas-az-res) so the rate-currency source binding actually governs the row
+export const SEED_VERSION = "2026.10.2"; // R2: historical UNS riders, billed ratchets, eligibility and incomplete-bill disclosures
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -273,8 +273,9 @@ export interface SeedTariff {
   peakKwMin: number | null;
   peakKwMax: number | null;
   structure: TariffStructure;
-  freshness: "urdb_stale";
+  freshness: "urdb_stale" | "verified";
   effectiveDate: string;
+  source?: string;
 }
 
 const ALL_MONTHS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
@@ -282,6 +283,51 @@ const SUMMER = [5, 6, 7, 8, 9, 10];
 const WINTER = [11, 12, 1, 2, 3, 4];
 const WEEKDAYS = [1, 2, 3, 4, 5];
 const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
+const UNS_ELECTRIC_UTILITY = "UniSource Energy Services (UNS Electric)";
+const UNS_OFFICIAL_SOURCE = "uns_official_tariff";
+const UNS_SOC = "https://docs.uesaz.com/wp-content/uploads/801-UNSE-Statement-of-Charges.pdf";
+const UNS_PPFAC = "https://docs.uesaz.com/wp-content/uploads/701-Rider-1-PPFAC-Clean.pdf";
+const UNS_EXCLUDED_RIDER_NOTE = "Modeled subtotal; excludes LFCR, taxes/assessments and unconfirmed account-specific terms. LFCR EE/DG rates are 0.7536%/0.3462% from 2025-10-01 (ACC announcement 2025-09-17), then 0.9298%/0.4138% from 2026-09-01 (Statement of Charges sheet 801-2, p.3). The complete assessment base is unverified, so no LFCR dollar charge is invented.";
+const UNS_MODEL_TERMS = {
+  requiredRiderLabels: ["PPFAC", "DSMS", "REST", "TCA", "TEAM", "Regulatory Expense"],
+  verifiedThrough: "2026-10-31",
+  billingCaveat: "Modeled subtotal, not a complete utility bill: LFCR, taxes/assessments, actual utility billing-cycle boundaries and unconfirmed account-specific terms are excluded. No definitive switch or solar-savings recommendation is supported.",
+  switchRequiresConfirmation: true,
+};
+const UNS_SWITCH_NOTE = "Switching is limited to once in a rolling 12-month period and requires utility confirmation; TOU service requires an appropriate meter. MGS customers at 750 kW may be moved by the utility to LGS, not automatically excluded. Base schedules effective 2024-02-01; rider versions have independent dates.";
+
+function unsElectricRiders(restCapUsd: number, demandBilled = false): NonNullable<TariffStructure["riders"]> {
+  return [
+    ...([
+      ["2025-10-01", "2025-10-31", 0.016629],
+      ["2025-11-01", "2025-11-30", 0.015548],
+      ["2025-12-01", "2025-12-31", 0.014480],
+      ["2026-01-01", "2026-01-31", 0.013425],
+      ["2026-02-01", "2026-02-28", 0.012384],
+      ["2026-03-01", "2026-03-31", 0.011356],
+      ["2026-04-01", "2026-04-30", 0.010341],
+      ["2026-05-01", "2026-05-31", 0.009338],
+      ["2026-06-01", "2026-06-30", 0.008348],
+      ["2026-07-01", "2026-07-31", 0.007370],
+      ["2026-08-01", "2026-08-31", 0.006404],
+      ["2026-09-01", "2026-09-30", 0.005450],
+      ["2026-10-01", "2026-10-31", 0.004508],
+    ] as Array<[string, string, number]>).map(([validFrom, validTo, ratePerUnit]) => ({
+      label: "PPFAC", validFrom, validTo, ratePerUnit, source: `${UNS_PPFAC}#page=2 (sheet 701-1, issued 2026-10-01)`,
+    })),
+    { label: "PPFAC temporary surcharge", ratePerUnit: 0.022259, validFrom: "2025-10-01", validTo: "2025-11-30", source: `${UNS_PPFAC}#page=2 (sheet 701-1)` },
+    { label: "PPFAC temporary credit", ratePerUnit: -0.020931, validFrom: "2026-05-01", validTo: "2026-12-31", source: `${UNS_SOC}#page=2 (sheet 801-1)` },
+    { label: "DSMS", ratePerUnit: 0.0015, validFrom: "2014-08-01", source: `${UNS_SOC}#page=2 (sheet 801-1)` },
+    { label: "REST", ratePerUnit: 0.0126, monthlyCapUsd: restCapUsd,
+      renewableClassAverageUsd: restCapUsd === 59.5 ? 13.46 : restCapUsd === 350 ? 203.39 : 911.50,
+      validFrom: "2026-05-01", source: `${UNS_SOC}#page=3 (sheet 801-2); renewable eligibility: sheet 706 p.1` },
+    { label: "TCA", ratePerUnit: demandBilled ? 0.36 : 0.001474, basis: demandBilled ? "billing_demand_kw" : "import_kwh",
+      validFrom: "2026-06-01", source: `${UNS_SOC}#page=3 (sheet 801-2); basis: sheet 709 p.1` },
+    { label: "TEAM", ratePerUnit: -0.0001, validFrom: "2026-01-01", source: `${UNS_SOC}#page=4 (sheet 801-3)` },
+    { label: "SRB", ratePerUnit: 0, validFrom: "2024-02-01", source: `${UNS_SOC}#page=4 (sheet 801-3)` },
+    { label: "Regulatory Expense", ratePerUnit: 0.000192, validFrom: "2024-02-01", validTo: "2027-01-31", source: `${UNS_SOC}#page=4 (sheet 801-3); three-year recovery: sheet 721 p.1` },
+  ];
+}
 
 export const SEED_TARIFFS: SeedTariff[] = [
   /* -------------------- APS (Arizona Public Service) -------------------- */
@@ -614,27 +660,141 @@ export const SEED_TARIFFS: SeedTariff[] = [
     effectiveDate: "2025-01-01",
   },
   {
-    urdbId: "uns-lgs",
-    utilityName: "UniSource Energy Services (UNS Electric)",
-    name: "Large General Service (Mohave/Santa Cruz) w/ demand",
+    urdbId: "uns-egsgs",
+    utilityName: UNS_ELECTRIC_UTILITY,
+    name: "Small General Service (EGSGS) — filed base; modeled subtotal",
     sector: "commercial",
     commodity: "electric",
     state: "AZ",
-    peakKwMin: 100,
+    peakKwMin: null,
     peakKwMax: null,
     structure: {
-      fixedMonthly: 150.0,
-      energy: [
-        { label: "All energy", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.0782 },
+      ...UNS_MODEL_TERMS,
+      fixedMonthly: 25.0,
+      migrationAtConsecutiveMonthlyKwh: { kwh: 12000, months: 2 },
+      energy: [],
+      energyBlocks: [
+        { upToKwh: 400, ratePerUnit: 0.104167 },
+        { upToKwh: 7500, ratePerUnit: 0.114417 },
+        { upToKwh: null, ratePerUnit: 0.159003 },
       ],
-      demand: [
-        { label: "Billing demand", months: ALL_MONTHS, ratePerKw: 13.55 },
+      demand: [],
+      riders: unsElectricRiders(59.5),
+      notes: [
+        UNS_EXCLUDED_RIDER_NOTE,
+        UNS_SWITCH_NOTE,
+        "SGS customers meeting or exceeding 12,000 kWh for two consecutive months migrate to Medium General Service (EGMGS).",
       ],
-      ratchet: { lookbackMonths: 11, ratchetPct: 0.75, applicablePeriod: "all" },
-      exportRate: { type: "net_billing_avoided_cost", ratePerKwh: 0.0581 },
     },
-    freshness: "urdb_stale",
-    effectiveDate: "2024-06-01",
+    freshness: "verified",
+    effectiveDate: "2024-02-01",
+    source: UNS_OFFICIAL_SOURCE,
+  },
+  {
+    urdbId: "uns-egmgs",
+    utilityName: UNS_ELECTRIC_UTILITY,
+    name: "Medium General Service (EGMGS) — filed base; modeled subtotal",
+    sector: "commercial",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 100.0,
+      energy: [{ label: "All energy", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.074955 }],
+      demand: [{ label: "Billing demand", months: ALL_MONTHS, ratePerKw: 14.67 }],
+      demandMinKw: 20,
+      ...UNS_MODEL_TERMS,
+      ratchet: { lookbackMonths: 11, ratchetPct: 0.75, applicablePeriod: "all", determinant: "billed" },
+      riders: unsElectricRiders(350, true),
+      notes: [UNS_EXCLUDED_RIDER_NOTE, UNS_SWITCH_NOTE],
+    },
+    freshness: "verified",
+    effectiveDate: "2024-02-01",
+    source: UNS_OFFICIAL_SOURCE,
+  },
+  {
+    urdbId: "uns-egmgst",
+    utilityName: UNS_ELECTRIC_UTILITY,
+    name: "Medium General Service Time-of-Use (EGMGST) — filed base; modeled subtotal",
+    sector: "commercial",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 100.0,
+      energy: [
+        { label: "Summer on-peak", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 14, hourEnd: 20, ratePerUnit: 0.155789, holidayExclusions: ["memorial_day", "independence_day", "labor_day"] },
+        { label: "Summer off-peak", months: SUMMER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.04846 },
+        { label: "Winter on-peak morning", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 5, hourEnd: 9, ratePerUnit: 0.138183, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "Winter on-peak evening", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 17, hourEnd: 21, ratePerUnit: 0.138183, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "Winter off-peak", months: WINTER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.046609 },
+      ],
+      demand: [{ label: "Billing demand", months: ALL_MONTHS, ratePerKw: 14.67 }],
+      demandMinKw: 20,
+      ...UNS_MODEL_TERMS,
+      ratchet: { lookbackMonths: 11, ratchetPct: 0.75, applicablePeriod: "all", determinant: "billed" },
+      riders: unsElectricRiders(350, true),
+      notes: [UNS_EXCLUDED_RIDER_NOTE, UNS_SWITCH_NOTE],
+    },
+    freshness: "verified",
+    effectiveDate: "2024-02-01",
+    source: UNS_OFFICIAL_SOURCE,
+  },
+  {
+    urdbId: "uns-egmgsst",
+    utilityName: UNS_ELECTRIC_UTILITY,
+    name: "Time-of-Use for Medium General Service Schools (EGMGSST) — filed base; modeled subtotal",
+    sector: "commercial",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 100.0,
+      energy: [
+        { label: "Summer on-peak", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 15, hourEnd: 19, ratePerUnit: 0.163269, holidayExclusions: ["memorial_day", "independence_day", "labor_day"] },
+        { label: "Summer off-peak", months: SUMMER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.05594 },
+        { label: "Winter on-peak morning", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 5, hourEnd: 9, ratePerUnit: 0.145108, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "Winter on-peak evening", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 17, hourEnd: 21, ratePerUnit: 0.145108, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "Winter off-peak", months: WINTER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.054089 },
+      ],
+      demand: [{ label: "Billing demand", months: ALL_MONTHS, ratePerKw: 14.67 }],
+      demandMinKw: 20,
+      ...UNS_MODEL_TERMS,
+      ratchet: { lookbackMonths: 11, ratchetPct: 0.75, applicablePeriod: "all", determinant: "billed" },
+      schoolOnly: true,
+      riders: unsElectricRiders(350, true),
+      notes: [UNS_EXCLUDED_RIDER_NOTE, UNS_SWITCH_NOTE, "School TOU requires confirmed public/private K–12 status (sheet 212 p.1); a generic school/daycare building label is not proof."],
+    },
+    freshness: "verified",
+    effectiveDate: "2024-02-01",
+    source: UNS_OFFICIAL_SOURCE,
+  },
+  {
+    urdbId: "uns-lgs",
+    utilityName: UNS_ELECTRIC_UTILITY,
+    name: "Large General Service (EGLGS) — filed base; modeled subtotal",
+    sector: "commercial",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      fixedMonthly: 300.0,
+      energy: [{ label: "All energy", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.074848 }],
+      demand: [{ label: "Billing demand", months: ALL_MONTHS, ratePerKw: 14.58 }],
+      ...UNS_MODEL_TERMS,
+      demandMinKw: 450,
+      primaryVoltageDemandCreditPct: 0.03,
+      ratchet: { lookbackMonths: 11, ratchetPct: 0.75, applicablePeriod: "all", determinant: "billed" },
+      riders: unsElectricRiders(950, true),
+      notes: [UNS_EXCLUDED_RIDER_NOTE, UNS_SWITCH_NOTE, "EGLGS service must be below 69 kV; primary metering is required for new installations exceeding 2,500 kW (sheet 220 p.1). Contract capacity may exceed the 450-kW class minimum (sheet 220-1 p.2)."],
+    },
+    freshness: "verified",
+    effectiveDate: "2024-02-01",
+    source: UNS_OFFICIAL_SOURCE,
   },
   /* -------------------- LG&E (Louisville Gas and Electric, KY) ----------- */
   // Verified against LG&E's filed electric tariff (P.S.C. Electric No. 13),

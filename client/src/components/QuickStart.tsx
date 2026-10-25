@@ -153,9 +153,17 @@ export default function QuickStart({ compact = false }: { compact?: boolean }) {
   }
   async function finishToDashboard(siteId: number) {
     setAnalyzingSiteId(siteId);
-    await analyze.mutateAsync({ siteId });
-    await Promise.all([utils.insights.invalidate(), utils.sites.list.invalidate()]);
-    navigate(`/app?site=${siteId}`);
+    try {
+      await analyze.mutateAsync({ siteId });
+    } finally {
+      try {
+        await Promise.all([utils.insights.invalidate(), utils.sites.list.invalidate()]);
+      } finally {
+        // Creation succeeded even when analysis did not; never strand the user
+        // on the previous site or imply the newly created site was lost.
+        navigate(`/app?site=${siteId}`);
+      }
+    }
   }
 
   async function startFromPin() {

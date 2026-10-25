@@ -135,7 +135,9 @@ export async function computeRateChangeImpact(deltas: RateDelta[], opts?: { maxS
       })
       .from(meters)
       .innerJoin(sites, eq(meters.siteId, sites.id))
-      .where(eq(meters.commodity, t.commodity as "electric" | "gas" | "water"))
+      // R4 #3: only MAIN service meters carry financial impact; a campus
+      // virtual_total (and submeters) would double-count the same kWh.
+      .where(and(eq(meters.commodity, t.commodity as "electric" | "gas" | "water"), eq(meters.meterRole, "main")))
       .limit(2000);
     for (const c of candidates) {
       if (perSite.length >= cap) break;
@@ -144,7 +146,8 @@ export async function computeRateChangeImpact(deltas: RateDelta[], opts?: { maxS
       const assignedMatch = c.currentTariffId === t.id;
       const stateMatch = (c.siteState ?? "").toUpperCase() === (t.state ?? "").toUpperCase();
       const utilityMatch = stateMatch && c.siteUtility != null && c.siteUtility.length > 1 && utilityNamesMatch(c.siteUtility, t.utilityName);
-      if (!assignedMatch && !utilityMatch) continue;
+      // An explicit meter tariff assignment wins over the site-utility inference.
+      if (c.currentTariffId != null ? !assignedMatch : !utilityMatch) continue;
       seenMeter.add(key);
       const usage = await estimateAnnualUsage(c.meterId);
       const avgVolDelta = d.volumetricDeltas.length > 0 ? d.volumetricDeltas.reduce((s, x) => s + x, 0) / d.volumetricDeltas.length : 0;

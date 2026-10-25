@@ -65,7 +65,7 @@ export function MarkImplementedDialog(props: {
   const utils = trpc.useUtils();
   const mark = trpc.proveIt.mark.useMutation({
     onSuccess: async () => {
-      await utils.proveIt.list.invalidate();
+      await Promise.all([utils.proveIt.list.invalidate(), utils.recommendations.queue.invalidate(), utils.recommendations.portfolioPriorities.invalidate(), utils.entities.portfolio.invalidate()]);
       props.onOpenChange(false);
       toast.success("Marked as implemented", {
         description: "The verification clock starts now — a first read arrives after one full calendar month of post-change data.",
@@ -160,7 +160,7 @@ export function ProveItSection({ siteId }: { siteId: number }) {
   const rows = impls.data ?? [];
   if (impls.isLoading || rows.length === 0) return null;
 
-  const totalVerified = rows.reduce((s, r) => s + (r.verifiedSavingsUsd ?? 0), 0);
+  const totalVerified = 0; // Whole-site observations are not attributable per measure.
 
   return (
     <Card className="mt-4 border-border/70" data-testid="proveit-section">
@@ -176,8 +176,7 @@ export function ProveItSection({ siteId }: { siteId: number }) {
           )}
         </CardTitle>
         <p className="text-xs text-muted-foreground">
-          Actual usage vs the weather-adjusted counterfactual, month by month. Only band-clearing months count as
-          verified — changes inside the model’s uncertainty band are reported as inconclusive, never claimed.
+          Implementation progress is retained. Savings attribution is inconclusive until an immutable pre-change baseline and unique site/commodity/month allocation are available. Historical amounts are withheld, not summed.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -190,13 +189,13 @@ export function ProveItSection({ siteId }: { siteId: number }) {
                   <p className="truncate text-sm font-semibold">{r.title}</p>
                   <p className="text-xs text-muted-foreground">
                     Implemented {new Date(r.implementedAt).toLocaleDateString()}
-                    {r.expectedSavingsUsd != null && <> · expected ~${Math.round(r.expectedSavingsUsd).toLocaleString()}/yr</>}
+                    
                     {r.lastEvaluatedAt != null && <> · last checked {new Date(r.lastEvaluatedAt).toLocaleDateString()}</>}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <ProveItStatusChip status={r.status} />
-                  {(r.verifiedSavingsUsd ?? 0) > 0 && (
+                  <ProveItStatusChip status={r.status === "awaiting_data" ? "awaiting_data" : "inconclusive"} />
+                  {false && (
                     <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
                       ${Math.round(r.verifiedSavingsUsd!).toLocaleString()}
                     </span>
@@ -205,7 +204,7 @@ export function ProveItSection({ siteId }: { siteId: number }) {
                     size="sm"
                     variant="outline"
                     className="h-7 gap-1 px-2 text-xs"
-                    disabled={evaluate.isPending}
+                    disabled={true} title="Verification withheld pending immutable-baseline and site/month allocation safeguards"
                     onClick={() => evaluate.mutate({ id: r.id })}
                   >
                     <RefreshCw className={`h-3 w-3 ${evaluate.isPending ? "animate-spin" : ""}`} /> Check now
@@ -224,7 +223,7 @@ export function ProveItSection({ siteId }: { siteId: number }) {
                   </Button>
                 </div>
               </div>
-              {verdicts.length > 0 && (
+              {false && verdicts.length > 0 && (
                 <Collapsible className="mt-2">
                   <CollapsibleTrigger className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">
                     <ChevronDown className="h-3 w-3" /> {verdicts.length} month verdict{verdicts.length === 1 ? "" : "s"}

@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLang } from "@/lib/i18n";
+import { activeSiteStorageKey } from "@/hooks/useActiveSite";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
@@ -62,6 +63,19 @@ const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 280;
 const MIN_WIDTH = 200;
 const MAX_WIDTH = 480;
+const SITE_SCOPED_PATHS = new Set(["/app", "/app/explore", "/app/sites", "/app/portfolio", "/app/upload", "/app/scenarios", "/app/tariffs", "/app/reports"]);
+
+function siteScopedPath(path: string, userId?: number) {
+  if (!SITE_SCOPED_PATHS.has(path) || typeof window === "undefined") return path;
+  try {
+    const fromUrl = Number(new URLSearchParams(window.location.search).get("site"));
+    const stored = Number(window.localStorage.getItem(activeSiteStorageKey(userId)));
+    const siteId = Number.isInteger(fromUrl) && fromUrl > 0 ? fromUrl : Number.isInteger(stored) && stored > 0 ? stored : null;
+    return siteId != null ? `${path}?site=${siteId}` : path;
+  } catch {
+    return path;
+  }
+}
 
 /**
  * I18N-2 — Spanish-preference console tip. The hand-crafted ES table covers
@@ -147,6 +161,7 @@ export default function DashboardLayout({
 
   return (
     <SidebarProvider
+      key={user.id}
       style={
         {
           "--sidebar-width": `${sidebarWidth}px`,
@@ -260,7 +275,7 @@ function DashboardLayoutContent({
                   <SidebarMenuItem key={item.path}>
                     <SidebarMenuButton
                       isActive={isActive}
-                      onClick={() => setLocation(item.path)}
+                      onClick={() => setLocation(siteScopedPath(item.path, user?.id))}
                       tooltip={item.label}
                       className={`h-10 transition-all font-normal`}
                     >

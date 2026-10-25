@@ -96,11 +96,11 @@ describe("source registry", () => {
     // each registration is a couple of DB round-trips on the shared dev DB.
   }, 20000);
 
-  it("covers every filed (hand-modeled) tariff urdbId in exactly one source", () => {
+  it("covers filed tariffs and permits independently watched UNS base/rider documents", () => {
     const seen = new Map<string, string>();
     for (const s of RATE_SOURCE_SEEDS) {
       for (const id of s.governsUrdbIds) {
-        expect(seen.has(id), `${id} governed by both ${seen.get(id)} and ${s.sourceKey}`).toBe(false);
+        if (!id.startsWith("uns-")) expect(seen.has(id), `${id} governed by both ${seen.get(id)} and ${s.sourceKey}`).toBe(false);
         seen.set(id, s.sourceKey);
       }
     }
@@ -108,6 +108,17 @@ describe("source registry", () => {
     for (const id of ["lge-rs", "lge-rtod-energy", "lge-gs", "lge-rgs", "lge-cgs", "unsg-grres", "unsg-ggsvs"]) {
       expect(seen.has(id), `${id} missing from RATE_SOURCE_SEEDS`).toBe(true);
     }
+  });
+  it("watches monthly UNS PDF bytes at 30-day cadence without certifying residential approximations", () => {
+    const sources = RATE_SOURCE_SEEDS.filter((s) => s.sourceKey.startsWith("unse-az-"));
+    expect(sources).toHaveLength(3);
+    const pdfs = sources.filter((s) => s.sourceUrl.endsWith(".pdf"));
+    expect(pdfs).toHaveLength(2);
+    expect(pdfs.every((s) => effectiveCadenceDays(s) <= 30)).toBe(true);
+    expect(pdfs.map((s) => s.sourceUrl).join(" ")).toContain("701-Rider-1-PPFAC-Clean.pdf");
+    expect(pdfs.map((s) => s.sourceUrl).join(" ")).toContain("801-UNSE-Statement-of-Charges.pdf");
+    expect(sources.flatMap((s) => s.governsUrdbIds)).not.toContain("uns-erres");
+    expect(sources.flatMap((s) => s.governsUrdbIds)).not.toContain("uns-errest");
   });
 });
 

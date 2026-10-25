@@ -28,7 +28,7 @@ import {
   hourlyToPoints,
   SOLAR_FALLBACK_YIELD_KWH_PER_KW,
 } from "./scenarios";
-import { costOnTariff, tariffEligible } from "./tariffEngine";
+import { costOnTariff, tariffEligible, tariffEligibilityTerms, monthlyImportedKwh } from "./tariffEngine";
 import { TariffStructure, BATTERY_DEFAULTS, LABEL_NORMAL_YEAR, SOLAR_DISCLOSURE, BATTERY_DISCLOSURE } from "@shared/wattwise";
 
 /** One selectable measure in the plan basket. */
@@ -222,8 +222,10 @@ export function composeMeasures(
   /* ---- 3. price both profiles on the current rate ---- */
   const basePoints = hourlyToPoints(baselineHourly);
   const composedPoints = hourlyToPoints(hourly);
-  const baseCost = costOnTariff(basePoints, structure);
-  const composedCost = costOnTariff(composedPoints, structure);
+  const baseCost = costOnTariff(basePoints, structure, { hasSolar: siteHasSolar });
+  const composedCost = costOnTariff(composedPoints, structure, { hasSolar: siteHasSolar || totalSolarKw > 0 });
+  disclosures.push(...baseCost.disclosures, ...composedCost.disclosures);
+  if (baseCost.switchRecommendationAllowed === false || composedCost.switchRecommendationAllowed === false) throw new Error("Plan savings withheld: incomplete tariff/account terms. Confirm riders, billing basis and renewable REST treatment before modeling financial savings.");
   const baselineAnnualCost = cap(baseCost.breakdown.total);
   const composedAnnualCost = cap(composedCost.breakdown.total);
   const composedSavings = cap(baselineAnnualCost - composedAnnualCost);
@@ -284,18 +286,19 @@ export function composeMeasures(
   /* ---- 5. rate re-sweep on the composed profile (§3c: rate last) ---- */
   const rateSweep = candidateTariffs.map((t) => {
     const elig = tariffEligible(
-      { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition },
+      { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition, ...tariffEligibilityTerms(t.structure) },
       // v1.18: composing solar INTO the plan flips solar-conditioned eligibility —
       // a basket containing a solar measure is priced as a solar customer.
-      { sectorClass, hasSolar: siteHasSolar || measures.some((m) => m.kind === "solar"), isCurrentBasis: t.isCurrentBasis },
+      { sectorClass, hasSolar: siteHasSolar || measures.some((m) => m.kind === "solar"), isCurrentBasis: t.isCurrentBasis, monthlyImportedKwh: monthlyImportedKwh(composedPoints) },
       composedPeakKw > 0 ? composedPeakKw : null,
     );
-    const cost = costOnTariff(composedPoints, t.structure);
+    const cost = costOnTariff(composedPoints, t.structure, { hasSolar: siteHasSolar || totalSolarKw > 0 });
+    disclosures.push(...cost.disclosures);
     return {
       tariffId: t.id,
       tariffName: t.name,
       utilityName: t.utilityName,
-      eligible: elig.eligible,
+      eligible: elig.eligible && cost.switchRecommendationAllowed !== false,
       ineligibleReason: elig.reason,
       annualCostOnComposed: cap(cost.breakdown.total),
       savingsVsCurrentOnComposed: cap(composedAnnualCost - cost.breakdown.total),

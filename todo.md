@@ -586,3 +586,27 @@
 - [x] HOL-5: Sites card parity — per-service connectivity chips identical to meter chips (Wifi lucide icon, same border/mono styling, no emoji)
 - [x] HOL-6: Reports/print parity — Connectivity KPI (Entered chip + all-services total) in printed Site Insights Report; telecom opportunities already flow via the shared opportunities list
 - [x] HOL-7: Verify visually (Explore/Sites/Portfolio full-page screenshots) + full suite green (522 passed | 8 skipped) + checkpoint
+## School portfolio bulk setup + reliability (owner Oct 24, 2026)
+- [x] BULK-1: Reusable multi-file / multi-sheet bulk setup on Upload ("Many sites" mode): stage files, cross-file preview, campus vs building grouping toggle, per-sheet site override, explicit source-clock confirmation, resumable per-sheet commit with live progress, batch lineage (import_batches/files/sheets/site_groups), idempotent re-import
+- [x] BULK-2: Dynamic relationship model: owner → entity → sites → meters (1 meter per service agreement); campus-total virtual meter per multi-meter site; each service agreement priced on its own tariff; per-meter rate review card
+- [x] BULK-3: KUSD workbooks (2 files, 38 sheets) imported through the UI as virtual user: 18 campus sites, 38 meters, 1,331,520 intervals, 38/38 filed rates matched from bill rate codes, 18/18 analyses complete
+- [x] FOOT-1: Footprint reliability: geocode on demand, parallel Esri sources, no caching of empty results, explicit terminal states, premise-centroid precision rule, retry bypasses cache
+- [x] SITE-1: Active site persists across all console views (URL ?site → per-user localStorage → first site); new or edited sites populate immediately; sidebar carries site context
+- [x] RATE-1: Localized rates: territory-aware utility derivation, bill-code utility evidence, official UNS Electric SGS/MGS/MGS-TOU/K-12 TOU/LGS rows with PPFAC/REST/DSMS/TCA riders; uns-lgs corrected to official EGLGS; site-scoped rate-activity feed (no APS/TEP on Kingman)
+- [x] RECS-1: Progressive recommendations: plan/start/complete/defer/dismiss/reopen, next-ranked item promoted, progress %, attribution gate (only verified savings count as verified)
+- [x] PORT-1: Portfolio priorities across all sites, a saved group, or a custom subset; range-only totals with basis
+- [x] CO-1: Property records card (official Mohave Assessor/Recorder/GIS deep links + optional CountyOffice outbound link; no scraping per CountyOffice terms)
+- [x] CONCEPT-1: docs/concepts/2026-10-24-partner-monitoring-and-relationship-billing.md (partner monitoring, relationship-aware billing, per-persona billing) — concept only
+- [x] QA-1: Gates green (710 tests passed / 10 skipped, 91 files; build OK); authenticated browser E2E 37/38 (only fail = Google Maps proxy 401 on non-production origins)
+- [ ] OPEN-1: Re-run analysis after an address edit (old analyses retired, new run not auto-queued) — FA R3#6
+- [ ] OPEN-2: Residual recomputation after a completed measure (combined amounts currently withheld + disclosed) — FD R4#1
+- [ ] OPEN-3: Campus scenarios/composed plans for virtual-total sites (currently blocked with PRECONDITION_FAILED) and account-level peak dollars (withheld) — FD R4#9/#10
+- [ ] OPEN-4: Bulk import for limited plans (Free/Plus) needs atomic site-capacity reservation — FE F8
+- [ ] OPEN-5: EGMGSQ official mapping (currently inferred EGMGS family, labeled; switching gated) — owner/utility confirmation
+- [ ] OPEN-6: Production route-split (1.57 MB JS bundle) — performance
+## Carry-over queue (from Sept 26 handoff, still open)
+- [ ] BILL-1: Migrate requireTier/tierOf gates to effectiveEntitlement; constrain account.setTier; server/stripeBilling.test.ts
+- [ ] BILL-2: Stripe test-mode prices + hosted flow E2E (owner decisions: prices, tax, terms) — no live Stripe
+- [ ] RATE-2: Adjudicate change_detected sources (SW Gas, UNS Gas, TEP, Phoenix Water, LG&E/KU, APS/TEP dockets, 4 telecom benchmarks) → /home/ubuntu/work/run/rate-adjudication-2026-10.md
+- [ ] RATE-3: Oct 3 monthly verification posted no findings; schedule expiry repaired Oct 24 (next run Nov 3 07:30 UTC) — confirm Nov run posts
+- [ ] TEL-1: Telecom "Add bill observation" UI for price history; Upload ?commodity preselect acceptance; print visual acceptance; Connectivity league-table tests

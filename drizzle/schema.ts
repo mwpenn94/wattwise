@@ -84,6 +84,9 @@ export const sites = mysqlTable(
     lng: double("lng"),
     state: varchar("state", { length: 8 }),
     zip: varchar("zip", { length: 16 }),
+    /** Incremented on location edits; old geometry cannot remain current. */
+    locationRevision: int("locationRevision").default(0).notNull(),
+    locationChangedAt: bigint("locationChangedAt", { mode: "number" }),
     buildingType: varchar("buildingType", { length: 64 }),
     sqft: double("sqft"),
     vintage: int("vintage"),
@@ -177,9 +180,18 @@ export const meters = mysqlTable(
     activeTo: bigint("activeTo", { mode: "number" }),
     timezone: varchar("timezone", { length: 64 }).default("America/Phoenix").notNull(),
     currentTariffId: int("currentTariffId"),
+    /** BULK-1 (Oct 2026): utility-bill identity carried from bulk workbooks —
+     * one site (campus) can hold many service agreements; the service point is
+     * the idempotency key, the agreement/rate code/facility label are metadata. */
+    serviceAgreementId: varchar("serviceAgreementId", { length: 64 }),
+    rateScheduleCode: varchar("rateScheduleCode", { length: 32 }),
+    facilityLabel: varchar("facilityLabel", { length: 255 }),
+    importBatchId: int("importBatchId"),
+    importIdentity: varchar("importIdentity", { length: 191 }),
+    timestampBasis: mysqlEnum("timestampBasis", ["start", "end"]),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
-  (t) => [index("meters_site_idx").on(t.siteId), index("meters_user_idx").on(t.userId)],
+  (t) => [index("meters_site_idx").on(t.siteId), index("meters_user_idx").on(t.userId), uniqueIndex("meters_user_import_identity_uq").on(t.userId, t.importIdentity)],
 );
 
 /** 3. intervals — canonical interval store; dedupe invariant enforced. */
@@ -532,7 +544,10 @@ export const baselines = mysqlTable(
      * "observed-period basis (not weather-normalized)" (46 chars), which
      * crashed ANY analysis whose weather regression degenerated. */
     weatherBasis: varchar("weatherBasis", { length: 64 }).notNull(),
-    confidenceLabel: varchar("confidenceLabel", { length: 128 }).notNull(),
+    /** Oct 2026: widened 128→512 — weak-fit disclosures ("low confidence — R²=…,
+     * CVRMSE=…, 12 months — low confidence because weather model fit is weak …")
+     * exceeded 128 chars and failed the whole analysis for poorly-fit sites. */
+    confidenceLabel: varchar("confidenceLabel", { length: 512 }).notNull(),
     source: varchar("source", { length: 64 }).notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
@@ -610,6 +625,12 @@ export const measureImplementations = mysqlTable(
     title: varchar("title", { length: 512 }).notNull(),
     /** ms epoch: when the user says the change went in */
     implementedAt: bigint("implementedAt", { mode: "number" }).notNull(),
+    /** Immutable pre-change baseline and source identity; never replaced by reanalysis. */
+    baselineId: int("baselineId"),
+    analysisMeterId: int("analysisMeterId"),
+    baselineSnapshot: json("baselineSnapshot"),
+    sourceSnapshot: json("sourceSnapshot"),
+    episodeKey: varchar("episodeKey", { length: 64 }),
     /** expected annual $ savings at mark time (from the opportunity), for comparison */
     expectedSavingsUsd: double("expectedSavingsUsd"),
     status: mysqlEnum("status", ["awaiting_data", "on_track", "verified", "underperforming", "inconclusive"])
@@ -903,6 +924,8 @@ export const siteGeometry = mysqlTable(
     id: int("id").autoincrement().primaryKey(),
     siteId: int("siteId").notNull(),
     userId: int("userId").notNull(),
+    /** Location revision explicitly confirmed by the actor; old drawings are retained but hidden. */
+    locationRevision: int("locationRevision").default(0).notNull(),
     /** GeoJSON polygon of the building footprint */
     footprint: json("footprint"),
     footprintSource: mysqlEnum("footprintSource", ["assessor_gis", "microsoft", "usa_structures", "osm", "user_drawn"]),
@@ -1392,3 +1415,124 @@ export const billingAudit = mysqlTable(
   (t) => [index("billing_audit_user_idx").on(t.userId, t.createdAt)],
 );
 export type BillingAuditRow = typeof billingAudit.$inferSelect;
+
+/** BULK-1 (Oct 2026) import batches — one user-facing bulk setup run spanning
+ * many files and many worksheets. Lineage: batch → files → sheets → meters →
+ * uploads → intervals. Re-running the same files is idempotent (service-point
+ * identity + content hash), and every sheet carries its own disposition so a
+ * failed sheet never masquerades as success. */
+export const importBatches = mysqlTable(
+  "import_batches",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    entityId: int("entityId"),
+    status: mysqlEnum("status", ["staging", "previewed", "committing", "complete", "partial", "failed"]).default("staging").notNull(),
+    groupingMode: mysqlEnum("groupingMode", ["campus", "building"]).default("campus").notNull(),
+    planVersion: int("planVersion").default(0).notNull(),
+    workerToken: varchar("workerToken", { length: 36 }),
+    leaseUntil: bigint("leaseUntil", { mode: "number" }),
+    /** preview plan: [{groupKey, siteName, address, city, state, zip, lat, lng, existingSiteId, sheetIds[]}] */
+    plan: json("plan"),
+    summary: json("summary"),
+    error: text("error"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+    completedAt: bigint("completedAt", { mode: "number" }),
+  },
+  (t) => [index("import_batches_user_idx").on(t.userId)],
+);
+export type ImportBatch = typeof importBatches.$inferSelect;
+
+export const importBatchFiles = mysqlTable(
+  "import_batch_files",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    batchId: int("batchId").notNull(),
+    userId: int("userId").notNull(),
+    filename: varchar("filename", { length: 512 }).notNull(),
+    sha256: varchar("sha256", { length: 64 }).notNull(),
+    fileKey: varchar("fileKey", { length: 512 }),
+    sizeBytes: int("sizeBytes").notNull(),
+    sheetCount: int("sheetCount").default(0).notNull(),
+    uploadId: int("uploadId"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [index("import_batch_files_batch_idx").on(t.batchId), uniqueIndex("import_batch_files_hash_uq").on(t.batchId, t.sha256)],
+);
+
+export const importBatchSheets = mysqlTable(
+  "import_batch_sheets",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    batchId: int("batchId").notNull(),
+    fileId: int("fileId").notNull(),
+    userId: int("userId").notNull(),
+    sheetName: varchar("sheetName", { length: 255 }).notNull(),
+    accountNumber: varchar("accountNumber", { length: 64 }),
+    serviceAgreementId: varchar("serviceAgreementId", { length: 64 }),
+    servicePointId: varchar("servicePointId", { length: 64 }),
+    rateScheduleCode: varchar("rateScheduleCode", { length: 32 }),
+    addressRaw: varchar("addressRaw", { length: 512 }),
+    baseAddress: varchar("baseAddress", { length: 512 }),
+    facilityLabel: varchar("facilityLabel", { length: 255 }),
+    groupKey: varchar("groupKey", { length: 512 }),
+    /** user override: force this sheet onto a specific existing site */
+    overrideSiteId: int("overrideSiteId"),
+    overrideGroupKey: varchar("overrideGroupKey", { length: 512 }),
+    sourceClock: json("sourceClock"),
+    validation: json("validation"),
+    rowsIngested: int("rowsIngested").default(0).notNull(),
+    rowsSkipped: int("rowsSkipped").default(0).notNull(),
+    meterIds: json("meterIds"),
+    status: mysqlEnum("status", ["pending", "importing", "imported", "duplicate", "skipped", "failed"]).default("pending").notNull(),
+    siteId: int("siteId"),
+    meterId: int("meterId"),
+    pointsWritten: int("pointsWritten").default(0).notNull(),
+    detail: text("detail"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [index("import_batch_sheets_batch_idx").on(t.batchId), uniqueIndex("import_batch_sheets_name_uq").on(t.fileId, t.sheetName)],
+);
+
+/** REC-1 (Oct 2026) recommendation lifecycle — per (site, measure) state that
+ * survives re-analysis (opportunity rows are regenerated each run). Completing
+ * a measure links to the prove-it implementation; deferring/dismissing removes
+ * it from the active ranked set so the NEXT recommendations surface. */
+export const recommendationStates = mysqlTable(
+  "recommendation_states",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    siteId: int("siteId").notNull(),
+    measure: varchar("measure", { length: 128 }).notNull(),
+    title: varchar("title", { length: 512 }),
+    status: mysqlEnum("status", ["planned", "in_progress", "completed", "deferred", "dismissed"]).notNull(),
+    implementationId: int("implementationId"),
+    note: text("note"),
+    /** savings range at the time of the state change (never a point promise) */
+    savingsLowUsd: double("savingsLowUsd"),
+    savingsHighUsd: double("savingsHighUsd"),
+    /** Explicit open state overrides old implementation history without deletion. */
+    reopened: boolean("reopened").default(false).notNull(),
+    sourceSnapshot: json("sourceSnapshot"),
+    deferUntil: bigint("deferUntil", { mode: "number" }),
+    changedAt: bigint("changedAt", { mode: "number" }).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [uniqueIndex("rec_states_site_measure_uq").on(t.siteId, t.measure), index("rec_states_user_idx").on(t.userId)],
+);
+export type RecommendationState = typeof recommendationStates.$inferSelect;
+
+/** Durable owner/group -> site identity. Separate table keeps legacy sites untouched. */
+export const importSiteGroups = mysqlTable("import_site_groups", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  groupingMode: mysqlEnum("groupingMode", ["campus", "building"]).notNull(),
+  groupHash: varchar("groupHash", { length: 64 }).notNull(),
+  groupKey: varchar("groupKey", { length: 512 }).notNull(),
+  siteId: int("siteId").notNull(),
+  batchId: int("batchId").notNull(),
+}, t => [uniqueIndex("import_site_groups_identity_uq").on(t.userId, t.groupingMode, t.groupHash)]);

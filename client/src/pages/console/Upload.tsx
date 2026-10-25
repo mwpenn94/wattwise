@@ -11,6 +11,8 @@ import { toast } from "sonner";
 import { CheckCircle2, FileSpreadsheet, FileUp, Receipt, Trash2, XCircle } from "lucide-react";
 import { fileToBase64 } from "@/lib/wattwiseUi";
 import { DisclaimerBanner } from "@/components/Honesty";
+import { useActiveSite, useSiteRequestGuard } from "@/hooks/useActiveSite";
+import { BulkImportPanel } from "@/components/BulkImportPanel";
 import { Link } from "wouter";
 
 type Fmt = "xlsx" | "csv" | "espi_xml" | "zip" | "auto";
@@ -29,22 +31,24 @@ function detectFormat(name: string): Fmt {
 
 export default function Upload() {
   const utils = trpc.useUtils();
-  const sites = trpc.sites.list.useQuery();
+  const { activeSiteId, sites, setActiveSite } = useActiveSite();
+  const captureSiteRequest = useSiteRequestGuard(activeSiteId);
   const uploads = trpc.uploads.list.useQuery();
-  const [siteId, setSiteId] = useState<string>("");
-  // CONF-1 (Jul 21): one-click calibrate links from Portfolio arrive as
-  // /app/upload?site=<id> — preselect that site once the list loads, but
-  // never stomp a choice the user already made.
-  useEffect(() => {
-    if (siteId) return;
-    const qs = new URLSearchParams(window.location.search).get("site");
-    if (qs && (sites.data ?? []).some((s) => String(s.id) === qs)) setSiteId(qs);
-  }, [sites.data, siteId]);
+  const siteId = activeSiteId != null ? String(activeSiteId) : "";
   const fileRef = useRef<HTMLInputElement>(null);
   const billRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  // R2 #2: the source timestamp convention is explicit, never silently assumed.
+  const [clockBasis, setClockBasis] = useState<"start" | "end">("start");
+  const [mode, setMode] = useState<"single" | "bulk">(() => (new URLSearchParams(window.location.search).get("mode") === "bulk" ? "bulk" : "single"));
   const [billManual, setBillManual] = useState<null | { reason: string }>(null);
   const [manualBill, setManualBill] = useState({ periodStart: "", periodEnd: "", totalUsage: "", totalCost: "", billedDemandKw: "" });
+
+  useEffect(() => {
+    setBusy(false);
+    setBillManual(null);
+    setManualBill({ periodStart: "", periodEnd: "", totalUsage: "", totalCost: "", billedDemandKw: "" });
+  }, [activeSiteId]);
 
   const ingest = trpc.uploads.ingest.useMutation();
   const billOcr = trpc.uploads.billOcr.useMutation();
@@ -58,42 +62,51 @@ export default function Upload() {
   const billCreate = trpc.bills.create.useMutation();
 
   async function onFiles(files: FileList | null) {
-    if (!files || files.length === 0) return;
+    if (busy || !files || files.length === 0) return;
     if (!siteId) {
       toast.error("Pick a site first");
       return;
     }
+    const isCurrent = captureSiteRequest();
     setBusy(true);
     try {
       for (const f of Array.from(files)) {
         const fmt = detectFormat(f.name);
         const b64 = await fileToBase64(f);
-        const res = await ingest.mutateAsync({ siteId: Number(siteId), filename: f.name, format: fmt, contentBase64: b64 });
+        if (!isCurrent()) return;
+        const res = await ingest.mutateAsync({ siteId: Number(siteId), filename: f.name, format: fmt, contentBase64: b64, timestampBasis: clockBasis });
+        if (!isCurrent()) return;
         if (res.duplicate) toast.info(`${f.name}: already ingested (duplicate checksum) — skipped`);
         else toast.success(`${f.name}: ${res.totalPoints.toLocaleString()} interval points across ${res.meters.length} meter(s)`);
       }
       await utils.uploads.list.invalidate();
       await utils.sites.meters.invalidate();
     } catch (e) {
+      if (!isCurrent()) return;
       toast.error(e instanceof Error ? e.message : "Upload failed");
     } finally {
-      setBusy(false);
-      if (fileRef.current) fileRef.current.value = "";
+      if (isCurrent()) {
+        setBusy(false);
+        if (fileRef.current) fileRef.current.value = "";
+      }
     }
   }
 
   async function onBill(files: FileList | null) {
-    if (!files || files.length === 0) return;
+    if (busy || !files || files.length === 0) return;
     if (!siteId) {
       toast.error("Pick a site first");
       return;
     }
+    const isCurrent = captureSiteRequest();
     const f = files[0];
     const mime = f.type === "application/pdf" ? "application/pdf" : f.type === "image/png" ? "image/png" : "image/jpeg";
     setBusy(true);
     try {
       const b64 = await fileToBase64(f);
+      if (!isCurrent()) return;
       const res = await billOcr.mutateAsync({ siteId: Number(siteId), filename: f.name, contentBase64: b64, mime });
+      if (!isCurrent()) return;
       if (res.status === "manual_entry_required") {
         setBillManual({ reason: res.reason });
         toast.warning("Automatic bill parsing unavailable — enter the bill manually below.");
@@ -114,19 +127,26 @@ export default function Upload() {
         });
       }
     } catch (e) {
+      if (!isCurrent()) return;
       setBillManual({ reason: e instanceof Error ? e.message : "Parsing failed" });
       toast.warning("Bill parsing failed — manual entry enabled.");
     } finally {
-      setBusy(false);
-      if (billRef.current) billRef.current.value = "";
+      if (isCurrent()) {
+        setBusy(false);
+        if (billRef.current) billRef.current.value = "";
+      }
     }
   }
 
   async function saveManualBill() {
+    if (busy || !siteId) return;
+    const isCurrent = captureSiteRequest();
+    setBusy(true);
     try {
       // bills key on a meter; use (or lazily rely on server default) first electric meter of the site
       const meters = await utils.sites.meters.fetch({ siteId: Number(siteId) });
-      const meter = meters.find((m) => m.commodity === "electric") ?? meters[0];
+      if (!isCurrent()) return;
+      const meter = meters.find((m) => m.commodity === "electric" && m.meterRole === "main") ?? meters.find((m) => m.meterRole !== "virtual_total");
       if (!meter) {
         toast.error("This site has no meter yet — upload an interval file first, or create the site via the wizard.");
         return;
@@ -140,11 +160,15 @@ export default function Upload() {
         totalCostUsd: Number(manualBill.totalCost),
         billedDemandKw: manualBill.billedDemandKw ? Number(manualBill.billedDemandKw) : undefined,
       });
+      if (!isCurrent()) return;
       toast.success("Bill saved");
       setBillManual(null);
       setManualBill({ periodStart: "", periodEnd: "", totalUsage: "", totalCost: "", billedDemandKw: "" });
     } catch (e) {
+      if (!isCurrent()) return;
       toast.error(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      if (isCurrent()) setBusy(false);
     }
   }
 
@@ -157,11 +181,31 @@ export default function Upload() {
       <div className="mt-4">
         <DisclaimerBanner />
       </div>
+      <div className="mt-6 inline-flex rounded-md border p-0.5" role="group" aria-label="Upload mode">
+        {([["single", "One site"], ["bulk", "Many sites (bulk setup)"]] as const).map(([m, label]) => (
+          <button
+            key={m}
+            type="button"
+            aria-pressed={mode === m}
+            data-testid={`upload-mode-${m}`}
+            className={`rounded px-3 py-1.5 text-sm transition-colors ${mode === m ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+            onClick={() => setMode(m)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {mode === "bulk" ? (
+        <div className="mt-4">
+          <BulkImportPanel />
+        </div>
+      ) : (
+      <>
 
       <div className="mt-6 grid gap-4 md:grid-cols-[240px_1fr]">
         <div>
           <Label>Target site</Label>
-          <Select value={siteId} onValueChange={setSiteId}>
+          <Select disabled={busy} value={siteId} onValueChange={(value) => setActiveSite(Number(value))}>
             <SelectTrigger className="mt-1">
               <SelectValue placeholder="Select site…" />
             </SelectTrigger>
@@ -173,6 +217,17 @@ export default function Upload() {
               ))}
             </SelectContent>
           </Select>
+          <Label htmlFor="single-clock-basis" className="mt-3 block">Interval timestamps mark the</Label>
+          <Select disabled={busy} value={clockBasis} onValueChange={(v) => setClockBasis(v === "end" ? "end" : "start")}>
+            <SelectTrigger id="single-clock-basis" className="mt-1" aria-label="Source interval timestamp convention (single upload)">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="start">Interval START (default)</SelectItem>
+              <SelectItem value="end">Interval END (common in utility exports)</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="mt-1 text-[11px] text-muted-foreground">Local clock is the site's meter timezone. Check your file's header — e.g. a 00:15 reading that covers 00:00–00:15 is END-labeled.</p>
           {(sites.data ?? []).length === 0 && !sites.isLoading && (
             <p className="mt-2 text-xs text-muted-foreground">
               No sites yet — <Link href="/app/sites" className="text-primary underline">create one</Link> first.
@@ -241,7 +296,7 @@ export default function Upload() {
               <Input id="b-demand" type="number" value={manualBill.billedDemandKw} onChange={(e) => setManualBill({ ...manualBill, billedDemandKw: e.target.value })} />
             </div>
             <div className="sm:col-span-5 flex gap-2">
-              <Button onClick={saveManualBill} disabled={!manualBill.periodStart || !manualBill.periodEnd || !manualBill.totalUsage || !manualBill.totalCost || billCreate.isPending}>
+              <Button onClick={saveManualBill} disabled={busy || !manualBill.periodStart || !manualBill.periodEnd || !manualBill.totalUsage || !manualBill.totalCost || billCreate.isPending}>
                 Save bill
               </Button>
               <Button variant="ghost" onClick={() => setBillManual(null)}>
@@ -329,6 +384,8 @@ export default function Upload() {
           )}
         </CardContent>
       </Card>
+      </>
+      )}
     </div>
   );
 }

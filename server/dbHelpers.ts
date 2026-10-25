@@ -40,6 +40,7 @@ import {
   templateTasks,
   siteMembers,
   productionSeries,
+  recommendationStates,
 } from "../drizzle/schema";
 import type { Alert } from "../drizzle/schema";
 
@@ -167,13 +168,28 @@ export async function createSite(data: typeof sites.$inferInsert) {
 export async function updateSite(
   siteId: number,
   userId: number,
-  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "buildingType" | "sqft" | "vintage" | "climateZone" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields" | "tenure" | "hasSolar" | "awayMode" | "awayStart" | "awayEnd" | "pvDetectionStatus" | "pvDetectedAt" | "netMeteringBasis" | "occupancyChangedAt" | "leaseType" | "servicesProfile">>,
+  patch: Partial<Pick<typeof sites.$inferInsert, "name" | "address" | "city" | "state" | "zip" | "lat" | "lng" | "buildingType" | "sqft" | "vintage" | "climateZone" | "egridSubregion" | "occupancyHours" | "utilityName" | "attrSource" | "refinedFields" | "tenure" | "hasSolar" | "awayMode" | "awayStart" | "awayEnd" | "pvDetectionStatus" | "pvDetectedAt" | "netMeteringBasis" | "occupancyChangedAt" | "leaseType" | "servicesProfile">>,
 ) {
   // GAP-L: attribute updates are ACTS — owner or facility_manager may write;
   // read_only members (and strangers) are rejected inside assertSiteActor.
   await assertSiteActor(siteId, userId);
   const db = await requireDb();
-  await db.update(sites).set(patch).where(eq(sites.id, siteId));
+  // R1-1 (Oct 2026): any change to address/city/state/ZIP goes through the
+  // location-revision path so old coordinates, geometry and live analysis can
+  // never survive as "current" for a different place. Other attribute patches
+  // (services profile, away mode, PV gate…) are written directly.
+  const [before] = await db.select().from(sites).where(eq(sites.id, siteId)).limit(1);
+  if (!before) throw new TenancyError();
+  const normalize = (v: unknown) => (typeof v === "string" ? v.trim() || null : null);
+  const locationChanged = (["address", "city", "state", "zip"] as const).some(
+    (key) => Object.prototype.hasOwnProperty.call(patch, key) && normalize(patch[key]) !== normalize(before[key]),
+  );
+  if (locationChanged) {
+    const { saveLocationEdit } = await import("./geometryCacheDb");
+    await saveLocationEdit(before, { ...patch, lat: null, lng: null }, true);
+  } else {
+    await db.update(sites).set(patch).where(eq(sites.id, siteId));
+  }
 }
 
 /** Full site removal with cascade: meters → intervals, plus all derived data.
@@ -196,6 +212,7 @@ export async function deleteSite(siteId: number, userId: number) {
   }
   await db.delete(siteGeometry).where(eq(siteGeometry.siteId, siteId));
   await db.delete(siteGroupMembers).where(eq(siteGroupMembers.siteId, siteId));
+  await db.delete(recommendationStates).where(eq(recommendationStates.siteId, siteId));
   await db.delete(measureImplementations).where(eq(measureImplementations.siteId, siteId));
   await db.delete(planBaskets).where(eq(planBaskets.siteId, siteId));
   await db.delete(alerts).where(eq(alerts.siteId, siteId));
@@ -230,6 +247,7 @@ export async function deleteAllUserData(userId: number) {
   await db.delete(billReconciliations).where(eq(billReconciliations.userId, userId));
   await db.delete(planBaskets).where(eq(planBaskets.userId, userId));
   await db.delete(alerts).where(eq(alerts.userId, userId));
+  await db.delete(recommendationStates).where(eq(recommendationStates.userId, userId));
   await db.delete(measureImplementations).where(eq(measureImplementations.userId, userId));
   await db.delete(auditLog).where(eq(auditLog.userId, userId));
   await db.insert(auditLog).values({
@@ -718,14 +736,15 @@ export async function deleteSiteGroup(groupId: number, userId: number) {
 
 /* ---------------- site geometry (v1.7 §2.9a) ---------------- */
 export async function getSiteGeometry(siteId: number, userId: number) {
-  await assertSiteOwner(siteId, userId);
-  const db = await requireDb();
-  const rows = await db.select().from(siteGeometry).where(eq(siteGeometry.siteId, siteId)).limit(1);
-  return rows[0] ?? null;
+  await assertSiteViewer(siteId, userId);
+  // R3-6: revision-safe reader — geometry confirmed for a previous location is
+  // never returned as the current building.
+  const { getCurrentGeometry } = await import("./geometryCacheDb");
+  return getCurrentGeometry(siteId);
 }
 
 export async function upsertSiteGeometry(siteId: number, userId: number, patch: Partial<typeof siteGeometry.$inferInsert>) {
-  await assertSiteOwner(siteId, userId);
+  await assertSiteActor(siteId, userId);
   const db = await requireDb();
   const existing = await db.select({ id: siteGeometry.id }).from(siteGeometry).where(eq(siteGeometry.siteId, siteId)).limit(1);
   if (existing.length > 0) {
@@ -775,7 +794,16 @@ export async function getLatestAnalysis(siteId: number, userId: number) {
 
 export async function saveBaseline(data: typeof baselines.$inferInsert) {
   const db = await requireDb();
-  const res = await db.insert(baselines).values(data);
+  // Disclosure text must never fail an analysis: clamp to the column widths
+  // (the full label is also retained in params where callers include it).
+  const clamp = (v: string | null | undefined, n: number) => (v != null && v.length > n ? `${v.slice(0, n - 1)}…` : v);
+  const safe = {
+    ...data,
+    confidenceLabel: clamp(data.confidenceLabel, 512) as string,
+    weatherBasis: clamp(data.weatherBasis, 64) as string,
+    source: clamp(data.source, 64) as string,
+  };
+  const res = await db.insert(baselines).values(safe);
   return Number((res as unknown as [{ insertId: number }])[0].insertId);
 }
 
@@ -880,11 +908,22 @@ export async function deleteMeasureImplementation(id: number, userId: number) {
 /** Sum of verified savings across all of a user's implementations (home-feed greeting). */
 export async function totalVerifiedSavings(userId: number): Promise<number> {
   const db = await requireDb();
+  // R4 #2 (interim): only attributable implementations (pinned pre-change
+  // baseline + sole measure on the site) contribute — whole-site deltas are
+  // never credited once per measure.
   const rows = await db
-    .select({ s: sql<number>`COALESCE(SUM(${measureImplementations.verifiedSavingsUsd}), 0)` })
+    .select({
+      id: measureImplementations.id,
+      siteId: measureImplementations.siteId,
+      status: measureImplementations.status,
+      verifiedSavingsUsd: measureImplementations.verifiedSavingsUsd,
+      baselineId: measureImplementations.baselineId,
+      analysisMeterId: measureImplementations.analysisMeterId,
+    })
     .from(measureImplementations)
     .where(eq(measureImplementations.userId, userId));
-  return Number(rows[0]?.s ?? 0);
+  const { attributableVerifiedUsd } = await import("./proofAttribution");
+  return attributableVerifiedUsd(rows);
 }
 
 export async function saveScenario(data: typeof scenarios.$inferInsert) {

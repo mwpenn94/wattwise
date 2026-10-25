@@ -150,11 +150,18 @@ export async function seedTariffs(db: Db) {
   if (await alreadySeeded(db, "tariffs")) return 0;
   let n = 0;
   for (const t of SEED_TARIFFS) {
-    const existing = await db
-      .select({ id: tariffs.id })
-      .from(tariffs)
-      .where(and(eq(tariffs.utilityName, t.utilityName), eq(tariffs.name, t.name)))
-      .limit(1);
+    // Prefer the externally stable URDB ID. Schedule names are labels and can
+    // change with a correction without creating a new rate/meter assignment.
+    const byUrdbId = t.urdbId
+      ? await db.select({ id: tariffs.id }).from(tariffs).where(eq(tariffs.urdbId, t.urdbId)).limit(1)
+      : [];
+    const existing = byUrdbId.length > 0
+      ? byUrdbId
+      : await db
+          .select({ id: tariffs.id })
+          .from(tariffs)
+          .where(and(eq(tariffs.utilityName, t.utilityName), eq(tariffs.name, t.name)))
+          .limit(1);
     if (existing.length === 0) {
       await db.insert(tariffs).values({
         urdbId: t.urdbId,
@@ -168,7 +175,7 @@ export async function seedTariffs(db: Db) {
         structure: t.structure,
         freshness: t.freshness,
         effectiveDate: new Date(t.effectiveDate),
-        source: "urdb_snapshot_modeled",
+        source: t.source ?? "urdb_snapshot_modeled",
         sourceVersion: SEED_VERSION,
         // CURR-2: filed rows are verified against their official source at
         // modeling time — stamp the clock so currency tracking starts now.
@@ -181,6 +188,8 @@ export async function seedTariffs(db: Db) {
         .update(tariffs)
         .set({
           urdbId: t.urdbId,
+          utilityName: t.utilityName,
+          name: t.name,
           sector: t.sector,
           commodity: t.commodity,
           state: t.state,
@@ -189,7 +198,9 @@ export async function seedTariffs(db: Db) {
           structure: t.structure,
           freshness: t.freshness,
           effectiveDate: new Date(t.effectiveDate),
+          source: t.source ?? "urdb_snapshot_modeled",
           sourceVersion: SEED_VERSION,
+          ...(t.freshness === "verified" ? { lastVerifiedAt: Date.now() } : {}),
         })
         .where(eq(tariffs.id, existing[0].id));
     }

@@ -55,7 +55,33 @@ export interface LocalParts {
   dow: number; // 0=Sun
   monthKey: string; // "YYYY-MM"
 }
+/**
+ * Perf (Oct 2026): formatToParts costs ~5–20 µs and the tariff engine calls
+ * localParts several times per interval per tariff, so a 35,040-point year on
+ * 18 tariffs spent seconds in Intl. Every IANA offset (and every DST switch) is
+ * a multiple of 15 minutes, so local year/month/day/hour/weekday are constant
+ * within any 15-minute UTC window — caching per (tz, window) is exact, not an
+ * approximation. Bounded per tz; cached objects are frozen (callers only read).
+ */
+const LOCAL_PARTS_BUCKET_MS = 15 * 60_000;
+const LOCAL_PARTS_CACHE_MAX = 250_000;
+const localPartsCache = new Map<string, Map<number, LocalParts>>();
 export function localParts(tsMs: number, tz: string): LocalParts {
+  if (!Number.isFinite(tsMs)) return localPartsUncached(tsMs, tz);
+  let byTz = localPartsCache.get(tz);
+  if (!byTz) {
+    byTz = new Map();
+    localPartsCache.set(tz, byTz);
+  }
+  const bucket = Math.floor(tsMs / LOCAL_PARTS_BUCKET_MS);
+  const hit = byTz.get(bucket);
+  if (hit) return hit;
+  const v = Object.freeze(localPartsUncached(bucket * LOCAL_PARTS_BUCKET_MS, tz)) as LocalParts;
+  if (byTz.size >= LOCAL_PARTS_CACHE_MAX) byTz.clear();
+  byTz.set(bucket, v);
+  return v;
+}
+function localPartsUncached(tsMs: number, tz: string): LocalParts {
   try {
     const parts = dtfFor(tz).formatToParts(tsMs);
     let year = 0,
@@ -132,6 +158,8 @@ export interface TouPeriod {
   hourStart: number; // 0-23 inclusive
   hourEnd: number; // exclusive, e.g. 20 = until 8pm
   ratePerUnit: number; // $/kWh
+  /** Named holidays treated as off-peak under the filed TOU schedule. */
+  holidayExclusions?: Array<"memorial_day" | "independence_day" | "labor_day" | "thanksgiving" | "christmas_day" | "new_years_day">;
 }
 
 export interface DemandCharge {
@@ -154,6 +182,8 @@ export interface RatchetClause {
   lookbackMonths: number;
   ratchetPct: number; // 0.9 = 90%
   applicablePeriod: "all" | "summer";
+  /** UNS uses preceding billed demand; omitted preserves legacy measured semantics. */
+  determinant?: "measured" | "billed";
 }
 
 export interface CpCharge {
@@ -172,19 +202,58 @@ export interface ExportRateStructure {
   notes?: string;
 }
 
+/** Progressive monthly usage block. When present, blocks replace flat/TOU
+ * import-energy charges and are applied to each billing month's total imports. */
+export interface EnergyBlock {
+  /** Inclusive cumulative monthly kWh ceiling; null means all remaining kWh. */
+  upToKwh: number | null;
+  ratePerUnit: number;
+}
+
+/** Date-versioned rider; rate units follow basis (default: USD/imported kWh). */
+export interface TariffRider {
+  label: string;
+  ratePerUnit: number;
+  basis?: "import_kwh" | "billing_demand_kw";
+  monthlyCapUsd?: number;
+  renewableClassAverageUsd?: number;
+  /** Inclusive ISO calendar-date validity window. */
+  validFrom?: string;
+  validTo?: string;
+  source?: string;
+}
+
 export interface TariffStructure {
   fixedMonthly: number;
   energy: TouPeriod[];
   demand: DemandCharge[];
+  energyBlocks?: EnergyBlock[];
+  riders?: TariffRider[];
+  /** Labels requiring a verified rate version in every priced month. */
+  requiredRiderLabels?: string[];
+  /** Historical pricing is not a projection beyond this source-verification date. */
+  verifiedThrough?: string;
+  billingCaveat?: string;
+  migrationAtConsecutiveMonthlyKwh?: { kwh: number; months: number };
+  switchRequiresConfirmation?: boolean;
+  primaryVoltageDemandCreditPct?: number;
+  /** Minimum monthly billing-demand determinant, if the filed tariff states one. */
+  demandMinKw?: number;
   ratchet?: RatchetClause;
   cp?: CpCharge;
   exportRate?: ExportRateStructure;
   minBill?: number;
+  /** Optional applicability condition kept in tariff JSON to avoid schema churn. */
+  schoolOnly?: boolean;
+  /** Source/caveat disclosure rendered by pricing callers alongside tariff output. */
+  notes?: string[];
 }
 
 /* ---------- Analysis result shapes ---------- */
 export interface CostBreakdown {
   energy: number;
+  /** Individually surfaced rider charges, whose sum is included in total. */
+  riders?: Array<{ label: string; amount: number }>;
   demand: number;
   fixed: number;
   cp: number | null; // null = omitted (no interval data)
@@ -421,9 +490,13 @@ export interface QuickAddressParse {
 
 export function parseQuickAddress(freeText: string): QuickAddressParse {
   const raw = freeText.trim().replace(/\s+/g, " ");
-  // ZIP: last 5-digit (optionally ZIP+4) group in the string.
-  const zipMatches = raw.match(/\b(\d{5})(?:-\d{4})?\b(?!.*\b\d{5}\b)/);
-  const zip = zipMatches ? zipMatches[1] : null;
+  // ZIP: last 5-digit (optionally ZIP+4) group in the string — but never a
+  // leading house number ("16500 N Pierce Ferry Rd, Dolan Springs, AZ").
+  let zip: string | null = null;
+  for (const zm of Array.from(raw.matchAll(/\b(\d{5})(?:-\d{4})?\b/g))) {
+    const isLeadingHouseNumber = zm.index === 0 && /^\d{5}\s+[A-Za-z]/.test(raw);
+    if (!isLeadingHouseNumber) zip = zm[1];
+  }
   // State: 2-letter token that is a real USPS code, preferring the one
   // immediately before the ZIP, else the last standalone match.
   let state: string | null = null;
@@ -436,7 +509,7 @@ export function parseQuickAddress(freeText: string): QuickAddressParse {
   }
   if (candidates.length > 0) {
     if (zip != null) {
-      const zipIdx = raw.indexOf(zip);
+      const zipIdx = raw.lastIndexOf(zip);
       const before = candidates.filter((c) => c.index < zipIdx);
       state = (before.length > 0 ? before[before.length - 1] : candidates[candidates.length - 1]).code;
     } else {

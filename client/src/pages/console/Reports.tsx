@@ -6,7 +6,7 @@
  * disclaimer and a live verification link so forwarded PDFs are never
  * silently stale.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -16,6 +16,7 @@ import { FileText, BadgeCheck, FlaskConical, Printer, Download, Link2 } from "lu
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import MvPanel from "@/components/MvPanel";
+import { useActiveSite, useSiteRequestGuard } from "@/hooks/useActiveSite";
 
 type Kind = "energy_plan" | "verified_savings" | "practitioner";
 
@@ -64,15 +65,23 @@ export default function Reports() {
   // every report button disabled for the admin owner (tier=free in the row).
   const usageQ = trpc.account.usage.useQuery(undefined, { enabled: !!user });
   const tier = usageQ.data?.tier ?? (user as { tier?: string } | null)?.tier ?? "free";
-  const sitesQ = trpc.sites.list.useQuery();
-  const [siteId, setSiteId] = useState<number | null>(null);
-  const activeSiteId = siteId ?? sitesQ.data?.[0]?.id ?? null;
+  const { activeSiteId, sites: sitesQ, setActiveSite } = useActiveSite();
+  const captureSiteRequest = useSiteRequestGuard(activeSiteId);
   const [printKind, setPrintKind] = useState<Kind | null>(null);
   const [printPayload, setPrintPayload] = useState<{ token: string; data: ReportData } | null>(null);
+  useEffect(() => {
+    setPrintKind(null);
+    setPrintPayload(null);
+  }, [activeSiteId]);
 
-  const generate = trpc.reports.generate.useMutation({
-    onSuccess: (res, vars) => {
-      if (vars.kind === "practitioner" && res.csv) {
+  const generate = trpc.reports.generate.useMutation();
+  async function generateReport(kind: Kind) {
+    if (activeSiteId == null || generate.isPending) return;
+    const isCurrent = captureSiteRequest();
+    try {
+      const res = await generate.mutateAsync({ siteId: activeSiteId, kind });
+      if (!isCurrent()) return;
+      if (kind === "practitioner" && res.csv) {
         const blob = new Blob([res.csv], { type: "text/csv" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -81,14 +90,15 @@ export default function Reports() {
         a.click();
         URL.revokeObjectURL(url);
         toast.success("Practitioner CSV downloaded", { description: `Verify link: /verify/${res.token}` });
-      } else if (vars.kind !== "site_insights") {
-        setPrintKind(vars.kind);
-        setPrintPayload({ token: res.token, data: res.data as ReportData });
-        setTimeout(() => window.print(), 350);
+      } else {
+        setPrintKind(kind);
+        setPrintPayload({ token: res.token, data: structuredClone(res.data) as ReportData });
+        setTimeout(() => { if (isCurrent()) window.print(); }, 350);
       }
-    },
-    onError: (e) => toast.error(e.message),
-  });
+    } catch (error) {
+      if (isCurrent()) toast.error(error instanceof Error ? error.message : "Report generation failed");
+    }
+  }
 
   type ReportData = NonNullable<typeof generate.data>["data"];
 
@@ -110,7 +120,7 @@ export default function Reports() {
 
         <div className="flex items-center gap-3">
           <span className="text-sm text-muted-foreground">Site</span>
-          <Select value={activeSiteId != null ? String(activeSiteId) : undefined} onValueChange={(v) => setSiteId(Number(v))}>
+          <Select disabled={generate.isPending} value={activeSiteId != null ? String(activeSiteId) : undefined} onValueChange={(v) => setActiveSite(Number(v))}>
             <SelectTrigger className="w-64"><SelectValue placeholder="Choose a site" /></SelectTrigger>
             <SelectContent>
               {(sitesQ.data ?? []).map((s) => (
@@ -139,7 +149,7 @@ export default function Reports() {
                   <Button
                     className="w-full"
                     disabled={!allowed || activeSiteId == null || generate.isPending}
-                    onClick={() => activeSiteId != null && generate.mutate({ siteId: activeSiteId, kind: k })}
+                    onClick={() => generateReport(k)}
                   >
                     {k === "practitioner" ? <Download className="h-4 w-4 mr-2" /> : <Printer className="h-4 w-4 mr-2" />}
                     {k === "practitioner" ? "Download CSV" : "Generate & print"}
@@ -160,7 +170,7 @@ export default function Reports() {
           practitioner CSV includes baseline fit statistics (CVRMSE, R², months used) when a weather-normalized
           baseline exists.
         </p>
-        {activeSiteId != null && <MvPanel siteId={activeSiteId} />}
+        {activeSiteId != null && <MvPanel key={activeSiteId} siteId={activeSiteId} />}
       </div>
 
       {/* print view */}

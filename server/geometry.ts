@@ -216,19 +216,11 @@ export function prismFallback(center: LatLng, gfaSqft: number | null, stories: n
 /* Overpass fetch                                                      */
 /* ------------------------------------------------------------------ */
 
-/**
- * Mirror health is volatile (re-verified Jul 19 2026): mail.ru throttles after
- * ~1 request/min then hangs; kumi.systems hard-429s from this runtime class;
- * overpass-api.de answers in ~2s with the Meterly UA (the old 406 was
- * browser-UA-specific). No single mirror can be trusted to stay healthy, so
- * they are RACED IN PARALLEL — first success wins — instead of walked
- * serially, which previously burned 8s per dead mirror and made resolves
- * "fail on addresses that worked before" once the lead mirror throttled.
- */
+/** The primary Overpass endpoint is the only currently healthy public mirror.
+ * The previously configured mail.ru and kumi mirrors advertise no capacity, so
+ * racing them only creates avoidable load and confusing telemetry. */
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
-  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
 ];
 
 const FETCH_UA = "Meterly/1.0 (building-footprint resolver; https://meterly.manus.space)";
@@ -241,23 +233,46 @@ interface OverpassElement {
 }
 
 /** Injectable fetcher for tests. */
-export type OverpassFetcher = (query: string) => Promise<{ elements: OverpassElement[] }>;
+export type OverpassFetcher = (query: string) => Promise<{ elements: OverpassElement[]; remark?: string }>;
 
-const OVERPASS_TIMEOUT_MS = 6000;
+/** Total upstream tail is max(Overpass 6s, concurrent Esri 8s), not 16s. */
+export const FOOTPRINT_RESOLVE_BUDGET_MS = 8_000;
+const OVERPASS_TIMEOUT_MS = 6_000;
+const ESRI_TIMEOUT_MS = FOOTPRINT_RESOLVE_BUDGET_MS;
 
 async function overpassFetchOne(ep: string, query: string): Promise<{ elements: OverpassElement[] }> {
-  const res = await fetch(ep, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": FETCH_UA,
-      Accept: "application/json",
-    },
-    body: `data=${encodeURIComponent(query)}`,
-    signal: AbortSignal.timeout(OVERPASS_TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`Overpass ${ep} HTTP ${res.status}`);
-  return (await res.json()) as { elements: OverpassElement[] };
+  const startedAt = Date.now();
+  let logged = false;
+  try {
+    const res = await fetch(ep, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": FETCH_UA,
+        Accept: "application/json",
+      },
+      body: `data=${encodeURIComponent(query)}`,
+      signal: AbortSignal.timeout(OVERPASS_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      logged = true;
+      console.info(`[geometry-provider] operation=osm endpoint=${new URL(ep).host} status=${res.status} latency_ms=${Date.now() - startedAt}`);
+      throw new Error(`Overpass ${ep} HTTP ${res.status}`);
+    }
+    const data = (await res.json()) as { elements: OverpassElement[] };
+    logged = true;
+    console.info(
+      `[geometry-provider] operation=osm endpoint=${new URL(ep).host} status=${res.status} latency_ms=${Date.now() - startedAt} candidates=${data.elements?.length ?? 0}`,
+    );
+    return data;
+  } catch (error) {
+    if (!logged) {
+      console.info(
+        `[geometry-provider] operation=osm endpoint=${new URL(ep).host} status=error latency_ms=${Date.now() - startedAt} error=${error instanceof Error ? error.name : "unknown"}`,
+      );
+    }
+    throw error;
+  }
 }
 
 /** Race all mirrors in parallel; first successful JSON wins. Total wall time
@@ -282,10 +297,12 @@ export async function fetchOsmFootprints(
 ): Promise<FootprintCandidate[]> {
   const q = `[out:json][timeout:10];way(around:60,${point.lat},${point.lng})["building"];out tags geom 8;`;
   const data = await fetcher(q);
+  if (data.remark || !Array.isArray(data.elements)) throw new Error("Overpass returned incomplete coverage");
   const candidates: FootprintCandidate[] = [];
   for (const el of data.elements ?? []) {
     if (el.type !== "way" || !el.geometry || el.geometry.length < 3) continue;
     const ring = el.geometry.map((g) => [g.lon, g.lat] as [number, number]);
+    if (!validRing(ring)) continue;
     const areaSqm = ringAreaSqm(ring);
     if (areaSqm < 10) continue; // sheds/noise
     const { centroid } = projectRing(ring);
@@ -326,15 +343,36 @@ interface EsriFeature {
 }
 
 /** Injectable fetcher for tests. */
-export type EsriFetcher = (url: string) => Promise<{ features?: EsriFeature[] }>;
+export type EsriFetcher = (url: string) => Promise<{ features?: EsriFeature[]; error?: { code?: number; message?: string } }>;
 
 async function defaultEsriFetch(url: string): Promise<{ features?: EsriFeature[] }> {
-  const res = await fetch(url, {
-    headers: { "User-Agent": FETCH_UA, Accept: "application/json" },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) throw new Error(`Esri footprints HTTP ${res.status}`);
-  return (await res.json()) as { features?: EsriFeature[] };
+  const startedAt = Date.now();
+  const endpoint = url.includes("USA_Structures") ? "usa_structures" : "msbfp2";
+  let logged = false;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": FETCH_UA, Accept: "application/json" },
+      signal: AbortSignal.timeout(ESRI_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      logged = true;
+      console.info(`[geometry-provider] operation=${endpoint} endpoint=${new URL(url).host} status=${res.status} latency_ms=${Date.now() - startedAt}`);
+      throw new Error(`Esri footprints HTTP ${res.status}`);
+    }
+    const data = (await res.json()) as { features?: EsriFeature[] };
+    logged = true;
+    console.info(
+      `[geometry-provider] operation=${endpoint} endpoint=${new URL(url).host} status=${res.status} latency_ms=${Date.now() - startedAt} candidates=${data.features?.length ?? 0}`,
+    );
+    return data;
+  } catch (error) {
+    if (!logged) {
+      console.info(
+        `[geometry-provider] operation=${endpoint} endpoint=${new URL(url).host} status=error latency_ms=${Date.now() - startedAt} error=${error instanceof Error ? error.name : "unknown"}`,
+      );
+    }
+    throw error;
+  }
 }
 
 function esriQueryParams(point: LatLng, outFields: string): URLSearchParams {
@@ -354,6 +392,11 @@ function esriQueryParams(point: LatLng, outFields: string): URLSearchParams {
   });
 }
 
+export function validRing(ring: [number, number][]): boolean {
+  return ring.length >= 3 && ring.every(([lng, lat]) =>
+    Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180);
+}
+
 function esriFeaturesToCandidates(
   features: EsriFeature[],
   point: LatLng,
@@ -364,6 +407,7 @@ function esriFeaturesToCandidates(
     const ring = f.geometry?.rings?.[0];
     if (!ring || ring.length < 3) continue;
     const typedRing = ring.map((p) => [p[0], p[1]] as [number, number]);
+    if (!validRing(typedRing)) continue;
     const areaSqm = ringAreaSqm(typedRing);
     if (areaSqm < 10) continue;
     const { centroid } = projectRing(typedRing);
@@ -389,26 +433,38 @@ function esriFeaturesToCandidates(
 }
 
 /**
- * Esri-family footprints, height-aware. Primary: FEMA USA Structures (HEIGHT
- * meters + occupancy class — the queryable sibling of the ArcGIS 3D Buildings
- * layer). Fallback: Microsoft US Building Footprints via MSBFP2 (footprints
- * only, no height — heightSource stays stories_estimate for those).
+ * Esri-family footprints, height-aware. Both public layers start immediately
+ * within one 8-second family budget; USA Structures remains the selection
+ * preference when both return candidates.
  */
-export async function fetchEsriFootprints(
+async function fetchEsriFootprintsWithHealth(
   point: LatLng,
   fetcher: EsriFetcher = defaultEsriFetch,
-): Promise<FootprintCandidate[]> {
-  try {
-    const params = esriQueryParams(point, "BUILD_ID,HEIGHT,PRIM_OCC,SQFEET");
-    const data = await fetcher(`${USA_STRUCTURES_URL}?${params.toString()}`);
-    const withHeights = esriFeaturesToCandidates(data.features ?? [], point, "usa_structures");
-    if (withHeights.length > 0) return withHeights;
-  } catch {
-    // fall through to MSBFP2 — footprints-only is better than nothing
-  }
-  const params = esriQueryParams(point, "OBJECTID");
-  const data = await fetcher(`${ESRI_MSBFP_URL}?${params.toString()}`);
-  return esriFeaturesToCandidates(data.features ?? [], point, "microsoft");
+): Promise<{ candidates: FootprintCandidate[]; failedLayers: string[] }> {
+  const usaUrl = `${USA_STRUCTURES_URL}?${esriQueryParams(point, "BUILD_ID,HEIGHT,PRIM_OCC,SQFEET").toString()}`;
+  const microsoftUrl = `${ESRI_MSBFP_URL}?${esriQueryParams(point, "OBJECTID").toString()}`;
+  const read = async (url: string, source: "usa_structures" | "microsoft") => {
+    const data = await fetcher(url);
+    if (data.error || !Array.isArray(data.features)) throw new Error(`Esri ${source} service error`);
+    return esriFeaturesToCandidates(data.features, point, source);
+  };
+  const [usa, microsoft] = await Promise.allSettled([
+    read(usaUrl, "usa_structures"),
+    read(microsoftUrl, "microsoft"),
+  ]);
+  return {
+    candidates: usa.status === "fulfilled" && usa.value.length > 0 ? usa.value
+      : microsoft.status === "fulfilled" ? microsoft.value : [],
+    failedLayers: [usa.status === "rejected" ? "usa_structures" : null,
+      microsoft.status === "rejected" ? "microsoft" : null].filter((s): s is string => s != null),
+  };
+}
+
+/** Compatibility wrapper for callers interested only in candidates. */
+export async function fetchEsriFootprints(point: LatLng, fetcher: EsriFetcher = defaultEsriFetch): Promise<FootprintCandidate[]> {
+  const result = await fetchEsriFootprintsWithHealth(point, fetcher);
+  if (result.failedLayers.length === 2) throw new Error("Both Esri footprint layers unavailable");
+  return result.candidates;
 }
 
 /* ------------------------------------------------------------------ */
@@ -423,6 +479,8 @@ export interface ResolvedFootprints {
   osmFailed: boolean;
   /** true when the Esri transport failed entirely (both services) */
   esriFailed: boolean;
+  /** Individual unavailable Esri layers, including partial-family failures. */
+  esriFailedLayers?: string[];
   /** true when this result came from the in-memory cache */
   cached: boolean;
 }
@@ -432,6 +490,8 @@ export interface ResolvedFootprints {
  * attempt) never re-hits throttled upstreams. Keyed to ~11m grid so tiny
  * pin jitter still hits. Bounded to 500 entries (FIFO eviction). */
 const RESOLVE_CACHE = new Map<string, { at: number; value: ResolvedFootprints }>();
+const ACTIVE_RESOLVES = new Map<string, { latest: number; count: number }>();
+let lastResolveVersion = 0;
 const RESOLVE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 /** GEO-BUG-1: degraded (single-source-fallback) results are held only briefly so both upstreams get retried soon. */
 const DEGRADED_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -444,6 +504,7 @@ function cacheKey(p: LatLng): string {
 /** test hook */
 export function _clearResolveCache(): void {
   RESOLVE_CACHE.clear();
+  ACTIVE_RESOLVES.clear();
 }
 
 /* NEXT-3 (Jul 21) — persistent DB cache layer. Autoscale cold starts wipe the
@@ -455,13 +516,26 @@ export function _clearResolveCache(): void {
  * read/write error never blocks a resolve. */
 export interface PersistentResolveCache {
   get(gridKey: string): Promise<{ provider: "osm" | "esri" | "none"; candidates: FootprintCandidate[]; resolvedAt: number } | null>;
-  put(gridKey: string, provider: "osm" | "esri" | "none", candidates: FootprintCandidate[]): Promise<void>;
+  put(gridKey: string, provider: "osm" | "esri", candidates: FootprintCandidate[], resolvedAt: number): Promise<void>;
 }
 let persistentCache: PersistentResolveCache | null = null;
 export function setPersistentResolveCache(c: PersistentResolveCache | null): void {
   persistentCache = c;
 }
 export const PERSISTENT_RESOLVE_TTL_MS = 180 * 24 * 60 * 60 * 1000; // 180 days
+
+export const CACHE_READ_BUDGET_MS = 250;
+async function readCacheWithinBudget(cache: PersistentResolveCache, key: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      cache.get(key),
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), CACHE_READ_BUDGET_MS); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /**
  * Resolve footprints by racing BOTH source families in parallel:
@@ -477,19 +551,31 @@ export async function resolveFootprints(
   point: LatLng,
   opts: { osmFetcher?: OverpassFetcher; esriFetcher?: EsriFetcher; skipCache?: boolean } = {},
 ): Promise<ResolvedFootprints> {
+  if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng) || Math.abs(point.lat) > 90 || Math.abs(point.lng) > 180) {
+    throw new Error("A valid building point is required");
+  }
   const key = cacheKey(point);
+  // Register before any asynchronous cache read, not only before provider work.
+  const version = lastResolveVersion = Math.max(Date.now(), lastResolveVersion + 1);
+  const active = ACTIVE_RESOLVES.get(key) ?? { latest: version, count: 0 };
+  active.latest = version;
+  active.count++;
+  ACTIVE_RESOLVES.set(key, active);
+  const isLatest = () => ACTIVE_RESOLVES.get(key) === active && active.latest === version;
+  try {
   if (!opts.skipCache) {
     const hit = RESOLVE_CACHE.get(key);
-    if (hit && Date.now() - hit.at < RESOLVE_CACHE_TTL_MS) {
+    if (hit && hit.value.candidates.length > 0 && Date.now() - hit.at < RESOLVE_CACHE_TTL_MS) {
       return { ...hit.value, cached: true };
     }
     // NEXT-3: persistent layer — survives cold starts. On hit, rehydrate the
     // in-memory map too so subsequent calls in this instance stay local.
     if (persistentCache) {
       try {
-        const row = await persistentCache.get(key);
-        if (row && Date.now() - row.resolvedAt < PERSISTENT_RESOLVE_TTL_MS) {
+        const row = await readCacheWithinBudget(persistentCache, key);
+        if (isLatest() && row && row.provider !== "none" && row.candidates.length > 0 && Date.now() - row.resolvedAt < PERSISTENT_RESOLVE_TTL_MS) {
           const value: ResolvedFootprints = { candidates: row.candidates, provider: row.provider, osmFailed: false, esriFailed: false, cached: false };
+          if (RESOLVE_CACHE.size >= RESOLVE_CACHE_MAX) RESOLVE_CACHE.delete(RESOLVE_CACHE.keys().next().value!);
           RESOLVE_CACHE.set(key, { at: row.resolvedAt, value });
           return { ...value, cached: true };
         }
@@ -502,13 +588,12 @@ export async function resolveFootprints(
   const osmP: Promise<FootprintCandidate[] | null> = fetchOsmFootprints(point, opts.osmFetcher ?? defaultOverpassFetch)
     .then((c) => c)
     .catch(() => null);
-  const esriP: Promise<FootprintCandidate[] | null> = (
-    opts.esriFetcher ? fetchEsriFootprints(point, opts.esriFetcher) : fetchEsriFootprints(point)
-  ).catch(() => null);
+  const esriP = fetchEsriFootprintsWithHealth(point, opts.esriFetcher);
 
-  const [osm, esri] = await Promise.all([osmP, esriP]);
+  const [osm, esriResult] = await Promise.all([osmP, esriP]);
+  const esri = esriResult.candidates;
   const osmFailed = osm === null;
-  const esriFailed = esri === null;
+  const esriFailed = esriResult.failedLayers.length === 2;
 
   let candidates: FootprintCandidate[] = [];
   let provider: ResolvedFootprints["provider"] = "none";
@@ -520,10 +605,10 @@ export async function resolveFootprints(
     provider = "esri";
   }
 
-  const value: ResolvedFootprints = { candidates, provider, osmFailed, esriFailed, cached: false };
-  // Cache successes AND confirmed empty-with-both-sources-reachable results
-  // (a genuinely unmapped building); never cache transport failures.
-  if (provider !== "none" || (!osmFailed && !esriFailed)) {
+  const value: ResolvedFootprints = { candidates, provider, osmFailed, esriFailed, esriFailedLayers: esriResult.failedLayers, cached: false };
+  // An empty result can be caused by replica lag, a stale point, or a temporary
+  // provider issue. Never cache it in memory or the 180-day durable layer.
+  if (provider !== "none" && candidates.length > 0 && isLatest()) {
     if (RESOLVE_CACHE.size >= RESOLVE_CACHE_MAX) {
       const oldest = RESOLVE_CACHE.keys().next().value;
       if (oldest != null) RESOLVE_CACHE.delete(oldest);
@@ -534,20 +619,24 @@ export async function resolveFootprints(
     // shadowing the correct OSM footprint on every later re-resolve. Degraded
     // results get a short in-memory hold only and NEVER reach the persistent
     // layer; the next resolve retries both upstreams.
-    const degraded = osmFailed || esriFailed;
+    const degraded = osmFailed || esriResult.failedLayers.length > 0;
     RESOLVE_CACHE.set(key, {
       at: degraded ? Date.now() - (RESOLVE_CACHE_TTL_MS - DEGRADED_CACHE_TTL_MS) : Date.now(),
       value,
     });
-    // NEXT-3: write-through to the persistent layer — full-success results
-    // only (never transport failures, never degraded fallbacks).
+    // Write through only full, non-empty successes; degraded candidates receive
+    // the short in-memory hold above and are never durable.
     if (persistentCache && !degraded) {
-      persistentCache.put(key, provider, candidates).catch(() => {
+      persistentCache.put(key, provider, candidates, version).catch(() => {
         /* fail-open */
       });
     }
   }
   return value;
+  } finally {
+    active.count--;
+    if (active.count === 0 && ACTIVE_RESOLVES.get(key) === active) ACTIVE_RESOLVES.delete(key);
+  }
 }
 
 /**

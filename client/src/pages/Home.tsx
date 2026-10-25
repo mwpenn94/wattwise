@@ -1,4 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
+import { formatSavingsRangeUsd } from "@shared/savingsRange";
 import { trpc } from "@/lib/trpc";
 import { startLogin } from "@/const";
 import { Button } from "@/components/ui/button";
@@ -74,6 +75,7 @@ export default function Home() {
   // auth-gated; anonymous visitors see the standard cards untouched.
   const portfolio = trpc.entities.portfolio.useQuery(undefined, { enabled: isAuthenticated, staleTime: 60_000, retry: false });
   const personalOppUsd = portfolio.data?.totals.openOpportunityUsd ?? 0;
+  const personalOppRange = portfolio.data?.totals.openOpportunityRangeUsd ?? null;
   const personalTopSite = portfolio.data?.sites.reduce<{ name: string; usd: number } | null>((acc, s) => {
     const usd = s.topOpportunityUsd ?? 0;
     return acc == null || usd > acc.usd ? { name: s.name, usd } : acc;
@@ -98,7 +100,8 @@ export default function Home() {
         : `All quiet — the away watchdog is standing guard on ${awaySites.length} sites with nothing unusual to report.`;
     }
     const open = d.totals.openOpportunityUsd ?? 0;
-    if (open > 0) return `You still have ~$${Math.round(open).toLocaleString()}/yr in open opportunities across your sites.`;
+    if (open > 0 && d.totals.openOpportunityRangeUsd)
+      return `Your sites' next recommendations add up to ${formatSavingsRangeUsd(d.totals.openOpportunityRangeUsd)}/yr (standalone estimates, not a guarantee).`;
     const verified = d.totals.verifiedSavingsUsd ?? 0;
     if (verified > 0) return `Your implemented changes have $${Math.round(verified).toLocaleString()} in verified savings so far.`;
     return d.totals.siteCount > 0
@@ -305,9 +308,9 @@ export default function Home() {
                       {portfolio.data!.totals.siteCount === 1 ? "site" : "sites"} analyzed — everything below stays yours.
                     </p>
                   )}
-                  {isAuthenticated && t.name === "Plus" && personalOppUsd > 0 && (
+                  {isAuthenticated && t.name === "Plus" && personalOppUsd > 0 && personalOppRange && (
                     <p className="mt-2 rounded-md border border-primary/30 bg-primary/5 px-2 py-1.5 text-[11px] text-foreground">
-                      Your analysis found <strong>~${Math.round(personalOppUsd).toLocaleString()}/yr</strong> in open opportunities
+                      Your analysis found <strong>{formatSavingsRangeUsd(personalOppRange)}/yr</strong> in open opportunities (standalone estimates)
                       {personalTopSite && personalTopSite.usd > 0 ? <> — the biggest at {personalTopSite.name}</> : null}. Plus unlocks the full basket and reports for it.
                     </p>
                   )}

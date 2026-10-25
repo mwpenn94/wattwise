@@ -1,6 +1,7 @@
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
+import { addSavingsRanges, savingsRangeFromEstimate, type SavingsRangeUsd } from "@shared/savingsRange";
 import {
   FREE_TIER_MAX_SITES,
   FREE_TIER_MAX_UPLOADS_PER_MONTH,
@@ -40,6 +41,7 @@ import { resolveTerritoryUnified, partitionByTerritory } from "./serviceTerritor
 import { runBulkScreen } from "./bulkScreen";
 import { getDb } from "./db";
 import { runAnalysisPipeline } from "./analytics/pipeline";
+import { materializeVirtualTotal, pickSiteAnalysisMeter } from "./virtualTotal";
 import { archetypeBaseline, type BaselineFit } from "./analytics/baseline";
 import { assembleReportData, newReportToken, practitionerCsv, portfolioManagerCsv, assemblePortfolioVerified, type PortfolioExportRow } from "./reports";
 import { assembleWrapped } from "./wrapped";
@@ -70,7 +72,9 @@ import { createHeartbeatJob, deleteHeartbeatJob } from "./_core/heartbeat";
 import { buildDigest } from "./digest";
 import { storagePut } from "./storage";
 import { deriveFromAddress, cascadeProvenance, deriveUtilityTriple } from "./cascade";
-import { placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
+import { geocodeAddress, placeAutocomplete, resolvePlace, reverseGeocode } from "./places";
+import { makeRequest, type GeocodingResult } from "./_core/map";
+import { propertyRecordsForCounty } from "./propertyRecords";
 import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { reconcileBill } from "./billReconciliation";
 import { deriveBillVerifiedRate } from "./billCalibration";
@@ -93,6 +97,9 @@ import { runCommodityEfficiency } from "./commodityScenario";
 import { resolveAllCommodityServices } from "./commodityService";
 import { assessMv } from "./mv";
 import { VERTICAL_PACKS, addProductionPeriod, listProduction, deleteProductionPeriod } from "./verticals";
+import * as recommendations from "./recommendations";
+import { attributableVerifiedUsd, isAttributable, sanitizeProofRows } from "./proofAttribution";
+import * as bulkImport from "./bulkImport";
 
 /** GAP-D / AC16a: self-calibration on every real bill — fail-open so bill
  * ingest never breaks because the calibration couldn't run. */
@@ -125,6 +132,22 @@ function requireTier(current: Tier, needed: Tier, feature: string) {
 }
 
 const seeded = () => ensureSeeded().catch((e) => console.error("[Seed] failed:", e));
+
+function geocodeComponents(result: GeocodingResult) {
+  const match = result.results[0];
+  if (!match) throw new Error(`Address geocoding returned ${result.status || "no results"}`);
+  const component = (type: string, short = false) =>
+    match.address_components.find((item) => item.types.includes(type))?.[short ? "short_name" : "long_name"] ?? null;
+  return {
+    formattedAddress: match.formatted_address,
+    city: component("locality") ?? component("postal_town"),
+    state: component("administrative_area_level_1", true),
+    zip: component("postal_code"),
+    county: component("administrative_area_level_2"),
+    lat: match.geometry.location.lat,
+    lng: match.geometry.location.lng,
+  };
+}
 
 /* ---------- input schemas ---------- */
 const siteInput = z.object({
@@ -705,7 +728,7 @@ export const appRouter = router({
         await h.audit(ctx.user.id, "site_created", "site", String(id), { name: input.name ?? parse.raw.slice(0, 60), quickStart: true });
         // GAP-Q reveal moment: one address → candidate providers for all three
         // commodities. Candidates only — each carries its own honesty note.
-        const utilityTriple = deriveUtilityTriple(cascade.state.value, cascade.city.value);
+        const utilityTriple = deriveUtilityTriple(cascade.state.value, cascade.city.value, cascade.zip.value);
         // TEL1C-3 cascading identification: telecom joins the reveal as the
         // FOURTH utility class — resolved from the same address cascade, but
         // as a technology MIX (multiple overlapping providers/technologies
@@ -723,7 +746,7 @@ export const appRouter = router({
     utilityReveal: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
       const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
       return {
-        triple: deriveUtilityTriple(site.state, site.city),
+        triple: deriveUtilityTriple(site.state, site.city, site.zip),
         knownElectric: site.utilityName ?? null,
         // TEL1C-3: telecom market context rides the same reveal — the fourth
         // utility class, expressed as a technology mix rather than a provider.
@@ -887,8 +910,7 @@ export const appRouter = router({
           .map((k) => ({ field: k, updates: RECOMPUTE_DEPENDENTS[k] }));
         return { ok: true as const, updated: Object.keys(provided), recomputes };
       }),
-    /** Direct site edit: rename + core attributes. Distinct from `refine` (which
-     * runs the derivation cascade); this is a plain CRUD update for user control. */
+    /** Location edits retain user input but invalidate every prior point/geometry. */
     update: protectedProcedure
       .input(
         z.object({
@@ -896,6 +918,8 @@ export const appRouter = router({
           name: z.string().min(1).max(255).optional(),
           address: z.string().max(512).nullable().optional(),
           city: z.string().max(128).nullable().optional(),
+          state: z.string().max(8).nullable().optional(),
+          zip: z.string().max(16).nullable().optional(),
           occupancyHours: z.string().max(64).nullable().optional(),
           utilityName: z.string().max(255).nullable().optional(),
           /** v1.18: tenure + solar status are first-class, editable site facts */
@@ -907,10 +931,94 @@ export const appRouter = router({
         const { siteId, ...patch } = input;
         const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
         if (Object.keys(clean).length === 0) return { ok: true as const };
-        await h.updateSite(siteId, ctx.user.id, clean);
+        await h.assertSiteActor(siteId, ctx.user.id);
+        const { site } = await h.getSiteAsViewer(siteId, ctx.user.id);
+        const normalize = (v: unknown) => typeof v === "string" ? v.trim() || null : null;
+        const locationFields = ["address", "city", "state", "zip"] as const;
+        const locationChanged = locationFields.some((key) => key in clean && normalize(clean[key]) !== normalize(site[key]));
+        for (const key of locationFields) if (key in clean) clean[key] = normalize(clean[key]);
+        const nextAddress = normalize("address" in clean ? clean.address : site.address);
+        const priorRefined = Array.isArray(site.refinedFields) ? site.refinedFields as string[] : null;
+        const userOwnsUtility = "utilityName" in clean || (priorRefined != null
+          ? priorRefined.includes("utilityName") : site.utilityName != null && site.attrSource === "user_entered");
+        if ("utilityName" in clean && priorRefined && !priorRefined.includes("utilityName")) {
+          Object.assign(clean, { refinedFields: [...priorRefined, "utilityName"] });
+        }
+        let derived: Record<string, unknown> | null = null;
+        let geocodeFailed = false;
+        if (locationChanged) Object.assign(clean, { lat: null, lng: null });
+        if (locationChanged && nextAddress) {
+          try {
+            // A new full address may deliberately relocate; constrain it by its
+            // own parsed facts and explicitly supplied fields, never the old region.
+            const addressChanged = "address" in clean && normalize(clean.address) !== normalize(site.address);
+            const parsed = parseQuickAddress(nextAddress);
+            const relocating = addressChanged && (parsed.city != null || parsed.state != null || parsed.zip != null);
+            const expected = {
+              city: normalize("city" in clean ? clean.city : relocating ? parsed.city : site.city),
+              state: normalize("state" in clean ? clean.state : relocating ? parsed.state : site.state),
+              zip: normalize("zip" in clean ? clean.zip : relocating ? parsed.zip : site.zip),
+            };
+            const geocoded = await geocodeAddress([nextAddress, expected.city, expected.state, expected.zip].filter(Boolean).join(", "), expected);
+            if (geocoded.kind !== "precise") throw new Error("Address not precise");
+            const cascade = deriveFromAddress(geocoded.formattedAddress, {
+              city: geocoded.city,
+              state: geocoded.state,
+              zip: geocoded.zip,
+              utilityName: userOwnsUtility ? normalize("utilityName" in clean ? clean.utilityName : site.utilityName) : undefined,
+              placeVerified: true,
+            });
+            Object.assign(clean, {
+              address: geocoded.formattedAddress,
+              city: cascade.city.value,
+              state: cascade.state.value,
+              zip: cascade.zip.value,
+              lat: geocoded.lat,
+              lng: geocoded.lng,
+              climateZone: cascade.climateZone.value,
+              egridSubregion: cascade.egridSubregion.value,
+              ...(!userOwnsUtility ? { utilityName: cascade.utilityName.value } : {}),
+            });
+            derived = {
+              city: cascade.city.value,
+              state: cascade.state.value,
+              zip: cascade.zip.value,
+              lat: geocoded.lat,
+              lng: geocoded.lng,
+              climateZone: cascade.climateZone.value,
+              egridSubregion: cascade.egridSubregion.value,
+              utilityName: userOwnsUtility ? ("utilityName" in clean ? clean.utilityName : site.utilityName) : cascade.utilityName.value,
+            };
+          } catch (error) {
+            geocodeFailed = true;
+            // Keep the requested text, NEVER the prior pin or inferred region.
+            for (const key of ["city", "state", "zip"] as const) if (!(key in clean)) clean[key] = null;
+            Object.assign(clean, { climateZone: null, egridSubregion: null });
+          }
+        }
+        if (locationChanged && !nextAddress) Object.assign(clean, { climateZone: null, egridSubregion: null });
+        const { saveLocationEdit } = await import("./geometryCacheDb");
+        await saveLocationEdit(site, clean, locationChanged);
         await h.audit(ctx.user.id, "site_update", "site", String(siteId), { fields: Object.keys(clean) });
-        return { ok: true as const };
+        return { ok: true as const, locationChanged, geocodeFailed, derived };
       }),
+    /** Outbound-only public property-record links. CountyOffice is never fetched,
+     * cached, or embedded; it is only returned as a user-initiated deep link. */
+    propertyRecords: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
+      let county: string | null = null;
+      let state = site.state;
+      if (site.address?.trim()) {
+        try {
+          const geocoded = geocodeComponents(await makeRequest<GeocodingResult>("/maps/api/geocode/json", { address: site.address }));
+          county = geocoded.county;
+          state = geocoded.state ?? state;
+        } catch (error) {
+          console.warn(`[property_records] county geocoding failed for site ${input.siteId}:`, error);
+        }
+      }
+      return propertyRecordsForCounty(county, state);
+    }),
     /** v2.11 identity-confirm moment — one-tap "yes, that's it": the derived
      * profile was a QUESTION; answering yes upgrades attrSource so the
      * imputed/estimate chips resolve to confirmed, and downstream inference
@@ -932,7 +1040,8 @@ export const appRouter = router({
       .input(z.object({ siteId: z.number() }))
       .query(async ({ ctx, input }) => {
         const site = await h.getSite(input.siteId, ctx.user.id);
-        const geom = await h.getSiteGeometry(input.siteId, ctx.user.id);
+        const { getCurrentGeometry } = await import("./geometryCacheDb");
+        const geom = await getCurrentGeometry(input.siteId);
         const profileSqft = site.sqft ?? null;
         const profileSource =
           site.attrSource === "user_entered" || site.attrSource === "user_confirmed"
@@ -989,16 +1098,57 @@ export const appRouter = router({
      * flagged), prism fallback synthesized from GFA + stories. Candidates are
      * returned for tap-to-confirm — nothing is silently asserted. */
     geometryResolve: protectedProcedure
-      .input(z.object({ siteId: z.number() }))
+      .input(z.object({ siteId: z.number(), refresh: z.boolean().optional() }))
       .mutation(async ({ ctx, input }) => {
-        const site = await h.getSite(input.siteId, ctx.user.id);
-        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        await h.assertSiteActor(input.siteId, ctx.user.id);
+        let { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
+        const { saveRecoveredPoint, sameLocation } = await import("./geometryCacheDb");
+        let geocodedNow = false;
+        if (site.lat == null || site.lng == null) {
+          const address = site.address?.trim();
+          if (!address) {
+            return {
+              outcome: "missing_coordinates" as const,
+              locationRevision: site.locationRevision,
+              candidates: [] as ReturnType<typeof geo.deriveGeometry>[],
+              raw: [] as import("./geometry").FootprintCandidate[],
+              fallback: null,
+              note: "Add a street address or drop a precise pin before looking up a building footprint.",
+            };
+          }
+          const geocoded = await geocodeAddress([address, site.city, site.state, site.zip].filter(Boolean).join(", "),
+            { city: site.city, state: site.state, zip: site.zip });
+          if (geocoded.kind !== "precise") {
+            return {
+              outcome: "address_not_precise" as const,
+              locationRevision: site.locationRevision,
+              candidates: [] as ReturnType<typeof geo.deriveGeometry>[],
+              raw: [] as import("./geometry").FootprintCandidate[],
+              fallback: null,
+              note: "We couldn't place this address precisely — check the street address or drop a precise pin, then try again.",
+            };
+          }
+          const patch = {
+            lat: geocoded.lat,
+            lng: geocoded.lng,
+            ...(site.city == null && geocoded.city != null ? { city: geocoded.city } : {}),
+            ...(site.state == null && geocoded.state != null ? { state: geocoded.state } : {}),
+            ...(site.zip == null && geocoded.zip != null ? { zip: geocoded.zip } : {}),
+          };
+          if (!await saveRecoveredPoint(site, patch)) {
+            throw new TRPCError({ code: "CONFLICT", message: "The site location changed during lookup. Retry footprint lookup." });
+          }
+          site = { ...site, ...patch };
+          geocodedNow = true;
+        }
         if (site.lat == null || site.lng == null) {
           return {
+            outcome: "missing_coordinates" as const,
+            locationRevision: site.locationRevision,
             candidates: [] as ReturnType<typeof geo.deriveGeometry>[],
             raw: [] as import("./geometry").FootprintCandidate[],
             fallback: null,
-            note: "This site has no coordinates yet — confirm the address (or drop a pin) first, then geometry can be resolved.",
+            note: "Add a street address or drop a precise pin before looking up a building footprint.",
           };
         }
         const point = { lat: site.lat, lng: site.lng };
@@ -1007,8 +1157,13 @@ export const appRouter = router({
         // per-source budget, first family with candidates wins (OSM preferred
         // for tags/ODbL handling). Results are cached ~6h per point so retries
         // and re-opens never depend on upstream throttling. Prism last.
-        const resolved = await geo.resolveFootprints(point);
+        const resolved = await geo.resolveFootprints(point, { skipCache: input.refresh === true });
+        const { site: currentSite } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
+        if (!sameLocation(currentSite, site)) {
+          throw new TRPCError({ code: "CONFLICT", message: "The site location changed during lookup. Retry footprint lookup." });
+        }
         const found = resolved.candidates;
+        const degraded = resolved.osmFailed || resolved.esriFailed || !!resolved.esriFailedLayers?.length;
         let sourceNote = "";
         if (resolved.provider === "osm") {
           sourceNote = "OpenStreetMap building footprints near your point (ODbL).";
@@ -1020,13 +1175,15 @@ export const appRouter = router({
           sourceNote = resolved.osmFailed
             ? `OpenStreetMap was unreachable, so these footprints come from ${dsName}.`
             : `No OSM building here — these footprints come from ${dsName}.`;
-        } else if (resolved.osmFailed && resolved.esriFailed) {
+        } else if (degraded) {
           sourceNote =
-            "Both footprint sources are unreachable right now — showing a prism estimate from your floor area instead. You can also trace the building yourself below.";
+            "Footprint coverage is temporarily incomplete because a map source is unavailable. Retry, use the labeled prism estimate, or trace your building manually.";
         } else {
           sourceNote =
             "No mapped building found within ~60 m in OpenStreetMap or the federal footprint datasets — you can trace it yourself below.";
         }
+        if (resolved.esriFailedLayers?.length) sourceNote += ` Unavailable layers: ${resolved.esriFailedLayers.join(", ")}; retry to check complete coverage.`;
+        if (geocodedNow) sourceNote = `We located this address for the lookup. ${sourceNote}`;
         if (resolved.cached && found.length > 0) sourceNote += " (cached result)";
         const prism = geo.prismFallback(point, site.sqft ?? null, null);
         await h.audit(ctx.user.id, "geometry_resolved", "site", String(input.siteId), {
@@ -1036,8 +1193,12 @@ export const appRouter = router({
           cached: resolved.cached,
           osmFailed: resolved.osmFailed,
           esriFailed: resolved.esriFailed,
+          esriFailedLayers: resolved.esriFailedLayers,
         });
         return {
+          outcome: found.length > 0 ? ("ok" as const) : degraded ? ("provider_error" as const) : ("no_footprint_found" as const),
+          locationRevision: site.locationRevision,
+          providerHealth: { osmFailed: resolved.osmFailed, esriFailed: resolved.esriFailed, esriFailedLayers: resolved.esriFailedLayers ?? [] },
           candidates: found.map((c) => ({ ...geo.deriveGeometry(c), ring: c.ring, osmId: c.osmId, distanceM: c.distanceM, areaSqft: c.areaSqft, source: c.source })),
           fallback: { ...geo.deriveGeometry(prism), ring: prism.ring, areaSqft: prism.areaSqft, prism: true as const },
           note: sourceNote,
@@ -1050,7 +1211,8 @@ export const appRouter = router({
       .input(
         z.object({
           siteId: z.number(),
-          ring: z.array(z.tuple([z.number(), z.number()])).min(3).max(120),
+          ring: z.array(z.tuple([z.number().min(-180).max(180), z.number().min(-90).max(90)])).min(3).max(120),
+          locationRevision: z.number().int().nonnegative().optional(),
           source: z.enum(["osm", "microsoft", "usa_structures", "user_drawn", "prism"]),
           osmId: z.string().optional(),
           heightM: z.number().positive().max(500).nullable().optional(),
@@ -1060,6 +1222,7 @@ export const appRouter = router({
         }),
       )
       .mutation(async ({ ctx, input }) => {
+        await h.assertSiteActor(input.siteId, ctx.user.id);
         // GEO-BUG-2 (Jul 22): a user-drawn footprint is the strongest statement
         // of truth we have — never let a dataset candidate silently clobber it.
         // The client must send force:true (after an explicit "replace my drawn
@@ -1084,17 +1247,21 @@ export const appRouter = router({
           distanceM: 0,
         };
         const d = geo.deriveGeometry(cand);
+        if (!Number.isFinite(d.footprintSqft) || d.footprintSqft <= 0) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Trace a non-empty building footprint." });
+        }
         // usa_structures footprints are LiDAR/imagery-derived federal data —
         // between OSM (human-verified) and MSBFP (ML-only) in confidence.
         const confidence =
           input.source === "user_drawn" ? 0.95 : input.source === "osm" ? 0.8 : input.source === "usa_structures" ? 0.7 : 0.45;
-        await h.upsertSiteGeometry(input.siteId, ctx.user.id, {
+        const { confirmGeometryAtomic } = await import("./geometryCacheDb");
+        await confirmGeometryAtomic(input.siteId, {
           footprint: { type: "Polygon", coordinates: [cand.ring] },
-          footprintSource: input.source === "prism" ? undefined : input.source,
+          footprintSource: input.source === "prism" ? null : input.source,
           footprintSqft: d.footprintSqft,
           heightM: d.heightM,
           heightSource: d.heightSource,
-          stories: d.stories ?? undefined,
+          stories: d.stories ?? null,
           orientationDeg: d.orientationDeg,
           exposedWallAreaByOrientation: d.exposedWallAreaByOrientation,
           exposureScore: d.exposureScore,
@@ -1106,13 +1273,15 @@ export const appRouter = router({
             exposure: { source: "heuristic", confidence: 0.5 },
           },
           odblDerived: d.odblDerived,
-        });
+        }, { force: input.force === true, locationRevision: input.locationRevision });
         await h.audit(ctx.user.id, "geometry_confirmed", "site", String(input.siteId), { source: input.source, sqft: d.footprintSqft });
         return { ok: true as const, derived: d };
       }),
     /** GEO — read the stored geometry row (viewer-scoped like sites.get). */
     geometryGet: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
-      return h.getSiteGeometry(input.siteId, ctx.user.id);
+      await h.assertSiteViewer(input.siteId, ctx.user.id);
+      const { getCurrentGeometry } = await import("./geometryCacheDb");
+      return getCurrentGeometry(input.siteId);
     }),
     /** v1.19 §5 stage 4 — away mode as a promise: one toggle (with optional
      * dates) flips the product's voice. The watchdog itself runs inside the
@@ -1418,12 +1587,27 @@ export const appRouter = router({
               h.listOpportunities(s.id, ctx.user.id),
               h.listMeasureImplementations(s.id, ctx.user.id),
             ]);
+            // R4: the next recommendation honors lifecycle state (completed,
+            // dismissed, deferred) via the same queue the site view uses.
+            const queue = await recommendations.getSiteQueue(s.id, ctx.user.id).catch(() => null);
+            const nextItem = queue?.next[0] ?? queue?.active[0] ?? null;
             const implementedMeasures = new Set(impls.map((i) => i.measure));
             const openOpps = opps.filter((o) => !implementedMeasures.has(o.measure));
-            const topOpp = openOpps.reduce<{ title: string; savings: number } | null>((acc, o) => {
-              const s$ = o.estCostSavingsPerYr ?? 0;
-              return acc == null || s$ > acc.savings ? { title: o.title, savings: s$ } : acc;
-            }, null);
+            const topOpp = queue
+              ? nextItem
+                ? {
+                    title: nextItem.title,
+                    savings: nextItem.savingsRangeUsd ? (nextItem.savingsRangeUsd.low + nextItem.savingsRangeUsd.high) / 2 : 0,
+                    range: (nextItem.savingsRangeUsd ?? null) as SavingsRangeUsd | null,
+                    basis: `${nextItem.status === "open" ? "Next open recommendation" : "Already in your plan"} (same queue as the site view). ${nextItem.basis ?? ""}`.trim(),
+                  }
+                : null
+              : openOpps.reduce<{ title: string; savings: number; range: SavingsRangeUsd | null; basis: string } | null>((acc, o) => {
+                  const s$ = o.estCostSavingsPerYr ?? 0;
+                  return acc == null || s$ > acc.savings
+                    ? { title: o.title, savings: s$, range: savingsRangeFromEstimate(s$, (o as { confidence?: string | null }).confidence ?? "medium"), basis: "Largest open modeled opportunity (recommendation queue unavailable); standalone range, not additive." }
+                    : acc;
+                }, null);
             const anomaly = ins.find((i) => i.kind === "anomaly");
             const annualUsageKwh = m?.baseline?.normalizedAnnualUsage ?? null;
             return {
@@ -1444,7 +1628,7 @@ export const appRouter = router({
               // §3i-2 utility-exposure rollup input: which provider serves this site
               utilityName: s.utilityName ?? null,
               sqft: s.sqft ?? null,
-              meterCount: meterRows.length,
+              meterCount: meterRows.filter((meter) => meter.meterRole !== "virtual_total").length,
               analyzed: m != null,
               annualCostUsd: m?.currentCost?.breakdown?.total ?? null,
               demandCostUsd: m?.currentCost?.breakdown ? (m.currentCost.breakdown.demand ?? 0) + (m.currentCost.breakdown.cp ?? 0) : null,
@@ -1459,6 +1643,8 @@ export const appRouter = router({
               euiBasis: m?.baseline?.confidenceLabel ?? null,
               topOpportunityTitle: topOpp?.title ?? null,
               topOpportunityUsd: topOpp?.savings ?? null,
+              topOpportunityRange: topOpp?.range ?? null,
+              topOpportunityBasis: topOpp?.basis ?? null,
               hasAnomaly: anomaly != null,
               anomalyTitle: anomaly?.title ?? null,
               // CONF-1 (Jul 21): rate provenance for the confidence rollup —
@@ -1601,6 +1787,11 @@ export const appRouter = router({
             verifiedSavingsUsd,
             portfolioLoadFactor,
             openOpportunityUsd: siteRollups.reduce((a, r) => a + (r.topOpportunityUsd ?? 0), 0),
+            // Honesty Charter: the display figure is a RANGE of each site's
+            // next standalone recommendation — never an additive point promise.
+            openOpportunityRangeUsd: siteRollups.some((r) => r.topOpportunityRange)
+              ? addSavingsRanges(siteRollups.map((r) => r.topOpportunityRange))
+              : null,
             // TUX-5: all-services grand total — modeled utility cost + entered
             // telecom subscription spend, each also available separately so the
             // UI can label the two bases distinctly.
@@ -1631,6 +1822,44 @@ export const appRouter = router({
       }),
   }),
   /* ================= uploads / ingestion ================= */
+  /* BULK-1 (Oct 2026): multi-file / multi-sheet bulk setup. Files are only
+     transport — sheets group ACROSS files by physical address into sites, one
+     meter per service agreement; re-import is idempotent by service point. */
+  bulkImport: router({
+    stageFile: protectedProcedure
+      .input(z.object({ batchId: z.number().int().nullable().optional(), filename: z.string().min(1).max(500), contentBase64: z.string().max(70_000_000) }))
+      .mutation(({ ctx, input }) => bulkImport.stageFile(ctx.user.id, input)),
+    removeFile: protectedProcedure
+      .input(z.object({ batchId: z.number().int(), fileId: z.number().int() }))
+      .mutation(({ ctx, input }) => bulkImport.removeFile(ctx.user.id, input.batchId, input.fileId)),
+    preview: protectedProcedure
+      .input(
+        z.object({
+          batchId: z.number().int(),
+          planVersion: z.number().int().optional(),
+          timeZone: z.string().min(1).max(64).optional(),
+          timestampBasis: z.enum(["start", "end"]).optional(),
+          groupingMode: z.enum(["campus", "building"]).default("campus"),
+          stateHint: z.string().max(4).nullable().optional(),
+          overrides: z.array(z.object({ sheetId: z.number().int(), siteId: z.number().int().nullable(), groupKey: z.string().max(512).nullable().optional() })).max(2000).optional(),
+        }),
+      )
+      .mutation(({ ctx, input }) => bulkImport.preview(ctx.user, input)),
+    commit: protectedProcedure
+      .input(
+        z.object({
+          batchId: z.number().int(),
+          planVersion: z.number().int(),
+          clockConfirmed: z.boolean().optional(),
+          buildingType: z.string().max(64).nullable().optional(),
+          entityName: z.string().max(255).nullable().optional(),
+          runAnalysis: z.boolean().optional(),
+        }),
+      )
+      .mutation(({ ctx, input }) => bulkImport.commit(ctx.user, input)),
+    status: protectedProcedure.input(z.object({ batchId: z.number().int() })).query(({ ctx, input }) => bulkImport.status(ctx.user.id, input.batchId)),
+    list: protectedProcedure.query(({ ctx }) => bulkImport.listBatches(ctx.user.id)),
+  }),
   uploads: router({
     list: protectedProcedure.query(async ({ ctx }) => h.listUploads(ctx.user.id)),
     /** Back out a bad file: removes the upload row, every interval it ingested,
@@ -1657,6 +1886,8 @@ export const appRouter = router({
           // A payload that exhausts memory can't reach Buffer.from: Express has
           // already 413'd anything over 50mb on the wire.
           contentBase64: z.string().max(70_000_000),
+          timeZone: z.string().max(64).optional(),
+          timestampBasis: z.enum(["start", "end"]).optional(),
           commodityHint: z.enum(["electric", "gas", "water"]).optional(),
         }),
       )
@@ -1666,6 +1897,10 @@ export const appRouter = router({
         const site = await h.getSite(input.siteId, ctx.user.id);
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
+        const clockMeters = await h.listMeters(input.siteId, ctx.user.id);
+        const clockZones = Array.from(new Set(clockMeters.filter(m => m.meterRole !== "virtual_total").map(m => m.timezone)));
+        if (!input.timeZone && clockZones.length > 1) throw new TRPCError({ code: "BAD_REQUEST", message: "This site has multiple meter timezones; specify the source timezone." });
+        const sourceClock = { timeZone: input.timeZone ?? clockZones[0] ?? tzForState(site.state), timestampBasis: input.timestampBasis ?? "start", ambiguousTime: "reject" } as const;
         const buf = Buffer.from(input.contentBase64, "base64");
         const gate = preParseGate(buf, input.format);
         if (!gate.ok) throw new TRPCError({ code: "BAD_REQUEST", message: gate.reason ?? "File rejected" });
@@ -1753,8 +1988,8 @@ export const appRouter = router({
                   if (!xxe.ok) throw new Error(`"${base}": ${xxe.reason}`);
                 }
                 const parsed =
-                  m.route === "xlsx" ? parseExcelIntervals(m.bytes)
-                  : m.route === "csv" ? parseCsvIntervals(m.bytes.toString("utf8"), base)
+                  m.route === "xlsx" ? parseExcelIntervals(m.bytes, sourceClock)
+                  : m.route === "csv" ? parseCsvIntervals(m.bytes.toString("utf8"), base, sourceClock)
                   : parseEspiXml(m.bytes.toString("utf8"));
                 if (parsed.length === 0 || parsed.every((s) => s.points.length === 0)) {
                   memberNotes.push(`"${base}": no interval data recognized`);
@@ -1770,8 +2005,8 @@ export const appRouter = router({
               }
               return all;
             }
-            if (verifiedFormat === "xlsx") return parseExcelIntervals(buf);
-            if (verifiedFormat === "csv") return parseCsvIntervals(buf.toString("utf8"), input.filename);
+            if (verifiedFormat === "xlsx") return parseExcelIntervals(buf, sourceClock);
+            if (verifiedFormat === "csv") return parseCsvIntervals(buf.toString("utf8"), input.filename, sourceClock);
             return parseEspiXml(buf.toString("utf8"));
           }, `parse_${verifiedFormat}`);
                 } catch (e) {
@@ -1822,9 +2057,10 @@ export const appRouter = router({
                   label,
                   usageUnit: s.usageUnit,
                   demandUnit: s.demandUnit,
-                  // Cycle 3, passes 36/66: timezone derived from the site's
-                  // state, never hardcoded.
-                  timezone: tzForState(site.state),
+                  // R2 #2: the new meter records the SOURCE clock the file was
+                  // parsed with (site/meter timezone + START/END basis).
+                  timezone: sourceClock.timeZone,
+                  timestampBasis: sourceClock.timestampBasis,
                 },
                 ctx.user.id,
               );
@@ -2076,18 +2312,12 @@ export const appRouter = router({
       await seeded();
       const site = await h.getSite(input.siteId, ctx.user.id);
       if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+      // An implicit site analysis needs the campus physical total when two or
+      // more separately billed mains exist. Explicit meterId remains exactly a
+      // single-account drilldown and never gets substituted.
+      if (input.meterId == null) await materializeVirtualTotal(input.siteId, ctx.user.id);
       const meters = await h.listMeters(input.siteId, ctx.user.id);
-      // UNIT-1: multi-meter sites must analyze the right unit. Explicit meterId
-      // wins; otherwise prefer the MAIN electric meter over whatever row happens
-      // to sort first — meters[0] could be a gas/water row or a submeter, which
-      // would silently price the site on the wrong commodity ladder.
-      const meter = input.meterId
-        ? meters.find((m) => m.id === input.meterId) ?? null
-        : meters.find((m) => m.commodity === "electric" && m.meterRole === "main") ??
-          meters.find((m) => m.commodity === "electric" && m.meterRole !== "submeter") ??
-          meters.find((m) => m.meterRole === "main") ??
-          meters[0] ??
-          null;
+      const meter = input.meterId ? meters.find((m) => m.id === input.meterId) ?? null : pickSiteAnalysisMeter(meters);
       const tier = tierOf(ctx.user);
       const result = await runAnalysisPipeline(site, meter, ctx.user.id, tier);
       // AC5: instrumented free-tier cost cap
@@ -2158,11 +2388,33 @@ export const appRouter = router({
        auto-applied adjustor moves, acquisitions, flags) with utility labels,
        for the Dashboard activity card. Pure confirmations are excluded: the
        timeline shows movement, not heartbeat noise. */
-    rateChangeTimeline: protectedProcedure.input(z.object({ limit: z.number().int().min(1).max(50).optional() }).optional()).query(async ({ input }) => {
+    rateChangeTimeline: protectedProcedure.input(z.object({ limit: z.number().int().min(1).max(50).optional(), siteId: z.number().int().positive().optional() }).optional()).query(async ({ ctx, input }) => {
       const { recentVerifications, rateCurrencyStatus } = await import("./rateCurrency");
       const [history, sources] = await Promise.all([recentVerifications(200), rateCurrencyStatus()]);
       const bySourceKey = new Map(sources.map((s) => [s.sourceKey, s]));
-      const material = history.filter((v) => v.status === "changed" || v.status === "change_detected" || v.status === "source_moved");
+      let material = history.filter((v) => v.status === "changed" || v.status === "change_detected" || v.status === "source_moved");
+      if (input?.siteId != null) {
+        // Site-scoped view: only rate movements that can affect THIS site —
+        // its state, and for electric/gas/water its service territory.
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        const siteState = (site.state ?? "").toUpperCase();
+        const { resolveTerritoryUnified } = await import("./serviceTerritory");
+        const prefixes = new Map<string, string[]>();
+        for (const c of ["electric", "gas", "water"] as const) {
+          prefixes.set(c, (await resolveTerritoryUnified({ state: site.state, city: site.city, zip: site.zip }, c)).matchPrefixes);
+        }
+        material = material.filter((v) => {
+          const impact = v.impact as null | { perSite?: Array<{ siteId: number }> };
+          if (impact?.perSite?.some((p) => p.siteId === site.id)) return true;
+          const src = bySourceKey.get(v.sourceKey);
+          if (!src) return false;
+          if (src.state && siteState && src.state.toUpperCase() !== siteState) return false;
+          if (v.sourceKey.startsWith("docket-state-")) return true;
+          const pre = src.commodity ? prefixes.get(src.commodity) : undefined;
+          if (pre && pre.length > 0) return pre.some((p) => (src.utilityName ?? "").toLowerCase().includes(p));
+          return true;
+        });
+      }
       const events = material.slice(0, input?.limit ?? 15).map((v) => {
         const src = bySourceKey.get(v.sourceKey);
         const isAcquire = v.method === "agent_acquire";
@@ -2260,6 +2512,57 @@ export const appRouter = router({
     opportunities: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => h.listOpportunities(input.siteId, ctx.user.id)),
   }),
 
+  /* ================= recommendation lifecycle =================
+   * Opportunity rows are regenerated on every analysis; these procedures layer
+   * durable user progress over the latest ranked output so completed measures
+   * stay complete and the next actionable recommendation appears immediately. */
+  recommendations: router({
+    queue: protectedProcedure.input(z.object({ siteId: z.number() })).query(async ({ ctx, input }) => {
+      return recommendations.getSiteQueue(input.siteId, ctx.user.id);
+    }),
+    setState: protectedProcedure
+      .input(
+        z.object({
+          siteId: z.number(),
+          measure: z.string().min(1).max(128),
+          title: z.string().min(1).max(512),
+          status: z.enum(["planned", "in_progress", "completed", "deferred", "dismissed"]),
+          note: z.string().max(2000).nullable().optional(),
+          deferDays: z.number().int().min(1).max(3650).optional(),
+          implementedAt: z.number().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (input.implementedAt != null && input.implementedAt > Date.now() + 86_400_000) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Implementation date cannot be in the future" });
+        }
+        const result = await recommendations.setRecommendationState({ ...input, userId: ctx.user.id });
+        return { ok: true as const, ...result };
+      }),
+    reopen: protectedProcedure
+      .input(z.object({ siteId: z.number(), measure: z.string().min(1).max(128) }))
+      .mutation(async ({ ctx, input }) => {
+        const result = await recommendations.reopenRecommendation({ ...input, userId: ctx.user.id });
+        return result;
+      }),
+    portfolioPriorities: protectedProcedure
+      .input(z.object({ siteIds: z.array(z.number()).max(100).nullable().optional(), groupId: z.number().nullable().optional() }).optional())
+      .query(async ({ ctx, input }) => recommendations.portfolioPriorities({ userId: ctx.user.id, siteIds: input?.siteIds, groupId: input?.groupId })),
+    bulkSetState: protectedProcedure
+      .input(
+        z.object({
+          status: z.enum(["planned", "in_progress", "completed", "deferred", "dismissed"]),
+          items: z.array(z.object({ siteId: z.number(), measure: z.string().min(1).max(128), title: z.string().min(1).max(512) })).min(1).max(100),
+          note: z.string().max(2000).nullable().optional(),
+          deferDays: z.number().int().min(1).max(3650).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const results = await recommendations.setRecommendationStates(input.items.map(item => ({ ...item, userId: ctx.user.id, status: input.status, note: input.note, deferDays: input.deferDays })));
+        return { ok: true as const, results };
+      }),
+  }),
+
   /* ================= §3e prove-it loop ================= */
   proveIt: router({
     /** Mark a measure as implemented — the "I did this" action. */
@@ -2277,6 +2580,21 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         if (input.implementedAt > Date.now() + 86_400_000) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Implementation date cannot be in the future" });
+        }
+        // R4 #2: a measure from the current analysis goes through the
+        // recommendation lifecycle, which pins the pre-change baseline and
+        // analysis meter and keeps one implementation per episode.
+        const currentOpps = await h.listOpportunities(input.siteId, ctx.user.id);
+        if (currentOpps.some((o) => o.measure === input.measure)) {
+          const res = await recommendations.setRecommendationState({
+            userId: ctx.user.id,
+            siteId: input.siteId,
+            measure: input.measure,
+            title: input.title,
+            status: "completed",
+            implementedAt: input.implementedAt,
+          });
+          if (res.implementationId != null) return { id: res.implementationId };
         }
         const id = await h.createMeasureImplementation({
           userId: ctx.user.id,
@@ -2298,7 +2616,7 @@ export const appRouter = router({
 
     list: protectedProcedure
       .input(z.object({ siteId: z.number() }))
-      .query(async ({ ctx, input }) => h.listMeasureImplementations(input.siteId, ctx.user.id)),
+      .query(async ({ ctx, input }) => sanitizeProofRows(await h.listMeasureImplementations(input.siteId, ctx.user.id))),
 
     /** Total verified savings across all the user's implementations (greeting counter). */
     verifiedTotal: protectedProcedure.query(async ({ ctx }) => ({
@@ -2316,10 +2634,26 @@ export const appRouter = router({
       const site = await h.getSite(impl.siteId, ctx.user.id);
       if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
-      // main electric meter (aggregation physics — submeters would double-count)
+      // Site-level verification shares the analysis meter selection: a materialized
+      // campus total wins; physical submeters/generation never double-count.
+      await materializeVirtualTotal(impl.siteId, ctx.user.id);
       const siteMeters = await h.listMeters(impl.siteId, ctx.user.id);
-      const meter = siteMeters.find((m) => m.commodity === "electric" && m.meterRole === "main") ?? siteMeters.find((m) => m.commodity === "electric") ?? null;
-
+      const meter = pickSiteAnalysisMeter(siteMeters);
+      // R4 #2 (interim, fail-closed): verification needs a pinned pre-change
+      // baseline on the same analysis meter, and a site with several measures
+      // needs per-measure allocation that doesn't exist yet. Without both, no
+      // whole-site delta is scored or credited to this measure.
+      const siteImpls = await h.listMeasureImplementations(impl.siteId, ctx.user.id);
+      // (A site with no meter falls through to the awaiting-data result below,
+      // which credits no dollars.)
+      if (meter != null && (!isAttributable(impl, siteImpls) || impl.analysisMeterId !== meter.id)) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: siteImpls.length > 1
+            ? "Several measures share this site's metered savings. Per-measure allocation isn't available yet, so verification is withheld rather than credited to each measure."
+            : "This measure has no pinned pre-change baseline on the site's analysis meter, so savings can't be verified without risking a moving baseline.",
+        });
+      }
       const evaluatedAt = Date.now();
       // AC12 occupancy re-base: verdicts are attributed to the occupancy period
       // in effect at implementation time. If the site's occupancy changed AFTER
@@ -2376,7 +2710,14 @@ export const appRouter = router({
       // post-implementation actuals
       const points = await h.getIntervalPoints(meter.id, ctx.user.id, impl.implementedAt - 40 * 86_400_000);
       // counterfactual: latest fitted baseline coefficients + climate-zone normals
-      const baselineRow = await h.getLatestBaseline(impl.siteId, ctx.user.id);
+      // R4 #2: score against the PINNED pre-change baseline, never a refit.
+      const pinnedSnapshot = (impl.baselineSnapshot ?? null) as { params?: unknown; rSquared?: number | null; cvrmse?: number | null } | null;
+      const latestBaseline = await h.getLatestBaseline(impl.siteId, ctx.user.id);
+      const baselineRow = latestBaseline && latestBaseline.id === impl.baselineId
+        ? latestBaseline
+        : pinnedSnapshot?.params
+          ? ({ ...(latestBaseline ?? {}), id: impl.baselineId, params: pinnedSnapshot.params, rSquared: pinnedSnapshot.rSquared ?? null, cvrmse: pinnedSnapshot.cvrmse ?? null } as NonNullable<typeof latestBaseline>)
+          : null;
       const coeffs = (baselineRow?.params ?? null) as {
         baseloadPerDay: number;
         coolingSlope: number;
@@ -3372,7 +3713,7 @@ export const appRouter = router({
           annualCostUsd: metrics.currentCost?.total ?? null,
           euiKwhPerSqft: annualUsageKwh != null && s.sqft ? annualUsageKwh / s.sqft : null,
           euiBasis: params?.confidenceLabel ?? params?.confidence ?? null,
-          verifiedSavingsUsd: impls.reduce((a, i) => a + (i.verifiedSavingsUsd ?? 0), 0),
+          verifiedSavingsUsd: attributableVerifiedUsd(impls),
           analyzed: summary != null,
         });
       }
@@ -3513,19 +3854,19 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
     site.climateZone == null
       ? zoneInference.source === "us_median_fallback"
       : site.climateZone === "4A" && zoneInference.source === "us_median_fallback";
+  await materializeVirtualTotal(site.id, userId);
   const meters = await h.listMeters(site.id, userId);
-  // v1.7 §2.4a aggregation physics: site-level analysis reads MAIN-role meters only.
-  // A submeter's load is inside its parent's — naive inclusion double-counts; generation
-  // meters carry production, not consumption. virtual_total (when materialized) wins outright
-  // so site analytics reuse the single-meter path on the summed main series.
-  const virtualTotal = meters.find((m) => m.meterRole === "virtual_total" && m.commodity === "electric");
-  const mainElectric = meters.filter((m) => m.meterRole === "main" && m.commodity === "electric");
-  const meter =
-    virtualTotal ??
-    mainElectric[0] ??
-    meters.find((m) => m.commodity === "electric" && m.meterRole !== "submeter" && m.meterRole !== "generation") ??
-    meters.find((m) => m.meterRole !== "submeter" && m.meterRole !== "generation") ??
-    null;
+  const meter = pickSiteAnalysisMeter(meters);
+  // R4 #9 (Oct 2026, interim): a campus total aggregates several separately
+  // billed service agreements. Pricing a scenario on the summed load under one
+  // tariff would misstate cost and savings, so scenarios fail closed until
+  // per-agreement transforms/pricing exist.
+  if (meter?.meterRole === "virtual_total") {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "This campus has multiple separately billed service agreements. Scenario modeling needs per-agreement pricing, which isn't available yet — review each account's rate in Explore instead.",
+    });
+  }
 
   let hourly: number[] | null = null;
   let loadBasis = "archetype_scaled";

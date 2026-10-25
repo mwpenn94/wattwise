@@ -11,7 +11,7 @@
  * Empty of data ≠ empty of value: pre-upload the feed runs on the ladder
  * invite, an advisor's plan instead of zeros.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -25,29 +25,28 @@ import EnergyWrapped from "@/components/EnergyWrapped";
 import { MarkImplementedDialog, ProveItStatusChip } from "@/components/ProveIt";
 import QuickStart from "@/components/QuickStart";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Link, useLocation, useSearch } from "wouter";
+import { useActiveSite } from "@/hooks/useActiveSite";
+import { Link, useLocation } from "wouter";
+import { formatSavingsRangeUsd } from "@shared/savingsRange";
 
 export default function HomeFeed() {
   const { user } = useAuth();
   const [, navigate] = useLocation();
-  const search = useSearch();
-  const sites = trpc.sites.list.useQuery();
-  const requestedSiteId = new URLSearchParams(search).get("site");
-  const requestedId = requestedSiteId ? Number(requestedSiteId) : null;
-  const activeSiteId = (requestedId != null && sites.data?.some((s) => s.id === requestedId) ? requestedId : null) ?? (sites.data?.[0]?.id ?? null);
+  const { activeSiteId, activeSite, sites, setActiveSite } = useActiveSite();
 
   const verified = trpc.proveIt.verifiedTotal.useQuery(undefined, { enabled: (sites.data ?? []).length > 0 });
   const impls = trpc.proveIt.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const insights = trpc.insights.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const opps = trpc.insights.opportunities.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
+  const recommendationQueue = trpc.recommendations.queue.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const usage = trpc.account.usage.useQuery();
   const alerts = trpc.alerts.list.useQuery({ status: "open" }, { enabled: (sites.data ?? []).length > 0 });
 
   const [markTarget, setMarkTarget] = useState<{ id?: number; measure: string; title: string; expectedSavingsUsd: number | null } | null>(null);
+  useEffect(() => setMarkTarget(null), [activeSiteId]);
 
   /* ---------- v1.19 away mode: one toggle flips the product's voice ---------- */
   const utils = trpc.useUtils();
-  const activeSite = (sites.data ?? []).find((s) => s.id === activeSiteId) ?? null;
   const isAway = Boolean((activeSite as { awayMode?: boolean } | null)?.awayMode);
   const setAway = trpc.sites.setAway.useMutation({
     onSuccess: async (_d, vars) => {
@@ -61,13 +60,9 @@ export default function HomeFeed() {
   ) ?? null;
 
   /* ---------- greeting number: verified first, projected fallback ---------- */
-  const projectedTotal = useMemo(
-    () => (opps.data ?? []).reduce((s, o) => s + (o.estCostSavingsPerYr ?? 0), 0),
-    [opps.data],
-  );
+  const projectedRange = recommendationQueue.data?.progress.projectedRangeUsd;
   const verifiedTotal = verified.data?.totalUsd ?? 0;
-  const greetingUsd = verifiedTotal > 0 ? verifiedTotal : projectedTotal;
-  const greetingKind: "verified" | "projected" | null = verifiedTotal > 0 ? "verified" : projectedTotal > 0 ? "projected" : null;
+  const greetingKind: "verified" | "projected" | null = verifiedTotal > 0 ? "verified" : (projectedRange?.high ?? 0) > 0 ? "projected" : null;
   const firstName = (user?.name ?? "").split(" ")[0] || "there";
 
   /* ---------- the three stories ---------- */
@@ -80,7 +75,9 @@ export default function HomeFeed() {
     narrative.find((i) => !["intake_assumptions", "data_coverage"].includes(i.kind)) ??
     narrative[0] ??
     null;
-  const topOpp = (opps.data ?? [])[0] ?? null;
+  // R4: "next" = first OPEN (unplanned) item; fall back to the active list
+  // only when everything open is already in the plan.
+  const topOpp = recommendationQueue.data?.next[0] ?? recommendationQueue.data?.active[0] ?? null;
   const hasAnalysis = narrative.length > 0 || (opps.data ?? []).length > 0;
 
   if (sites.isLoading) {
@@ -127,10 +124,10 @@ export default function HomeFeed() {
           {greetingKind ? (
             <p className="mt-1 font-display text-3xl font-bold tracking-tight">
               <span className={greetingKind === "verified" ? "text-emerald-500" : "text-primary"}>
-                ${Math.round(greetingUsd).toLocaleString()}
+                {greetingKind === "verified" ? `$${Math.round(verifiedTotal).toLocaleString()}` : formatSavingsRangeUsd(projectedRange)}
               </span>{" "}
               <span className="text-lg font-semibold text-muted-foreground">
-                {greetingKind === "verified" ? "verified savings so far" : "per year identified for you"}
+                {greetingKind === "verified" ? "verified savings so far" : "per year open for you"}
               </span>
               <span
                 className={`ml-2 inline-block rounded-full border px-2 py-0.5 align-middle font-mono text-[10px] uppercase tracking-wider ${
@@ -148,7 +145,7 @@ export default function HomeFeed() {
         </div>
         <div className="flex items-center gap-2">
           {(sites.data ?? []).length > 1 && (
-            <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={(value) => navigate(`/app?site=${encodeURIComponent(value)}`)}>
+            <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={(value) => setActiveSite(Number(value))}>
               <SelectTrigger className="w-44">
                 <SelectValue placeholder="Site…" />
               </SelectTrigger>
@@ -161,7 +158,7 @@ export default function HomeFeed() {
               </SelectContent>
             </Select>
           )}
-          {activeSiteId != null && <EnergyWrapped siteId={activeSiteId} />}
+          {activeSiteId != null && <EnergyWrapped key={activeSiteId} siteId={activeSiteId} />}
           <Link href={`/app/explore${activeSiteId != null ? `?site=${activeSiteId}` : ""}`}>
             <Button variant="outline" className="gap-1.5">
               <Compass className="h-4 w-4" /> Explore
@@ -189,7 +186,7 @@ export default function HomeFeed() {
       )}
 
       {/* ---------- Ask Meterly ---------- */}
-      <AskWattwise siteId={activeSiteId} tier={usage.data?.tier ?? "free"} />
+      <AskWattwise key={`ask:${activeSiteId}`} siteId={activeSiteId} tier={usage.data?.tier ?? "free"} />
 
       {/* ---------- away mode: the watchdog card replaces the feed's voice ---------- */}
       {isAway && (
@@ -296,14 +293,13 @@ export default function HomeFeed() {
             <StoryLabel icon={<Lightbulb className="h-3.5 w-3.5" />} text="Your next move" />
             <div className="mt-1.5">
               <InsightCard
-                rank={topOpp.rank}
+                rank={topOpp.rank ?? undefined}
                 title={topOpp.title}
-                dollars={topOpp.estCostSavingsPerYr}
-                framing="Save"
-                headlineFallback={`No dollar figure yet (needs a priced rate)`}
+                dollars={null}
+                headlineFallback={topOpp.savingsRangeUsd ? `Save ${formatSavingsRangeUsd(topOpp.savingsRangeUsd)}/yr` : "No dollar figure yet (needs a priced rate)"}
                 why={topOpp.description ?? ""}
                 confidence={chipFromConfidence(topOpp.confidence)}
-                extraChips={topOpp.paybackBandYears ? [`payback ${topOpp.paybackBandYears}`] : []}
+                extraChips={[...(topOpp.paybackBandYears ? [`payback ${topOpp.paybackBandYears}`] : []), topOpp.status !== "open" ? "in your plan" : ""] .filter(Boolean)}
                 action={{
                   label: "Model this in Scenarios",
                   onClick: () => navigate(`/app/scenarios?site=${activeSiteId}&measure=${topOpp.measure}`),
@@ -311,9 +307,9 @@ export default function HomeFeed() {
                 secondaryAction={{
                   label: "I did this",
                   onClick: () =>
-                    setMarkTarget({ id: topOpp.id, measure: topOpp.measure, title: topOpp.title, expectedSavingsUsd: topOpp.estCostSavingsPerYr ?? null }),
+                    setMarkTarget({ id: topOpp.id, measure: topOpp.measure, title: topOpp.title, expectedSavingsUsd: topOpp.savingsRangeUsd ? (topOpp.savingsRangeUsd.low + topOpp.savingsRangeUsd.high) / 2 : null }),
                 }}
-                provenance={["Your #1 ranked opportunity by estimated annual dollar impact — the full ranked list lives on Explore."]}
+                provenance={[topOpp.basis, "Your next recommendation reflects progress already recorded — the full ranked list lives on Explore."]}
               />
             </div>
           </section>
@@ -321,7 +317,7 @@ export default function HomeFeed() {
       </div>
 
       {activeSiteId != null && (
-        <MarkImplementedDialog open={markTarget != null} onOpenChange={(v) => !v && setMarkTarget(null)} siteId={activeSiteId} opportunity={markTarget} />
+        <MarkImplementedDialog key={`mark:${activeSiteId}`} open={markTarget != null} onOpenChange={(v) => !v && setMarkTarget(null)} siteId={activeSiteId} opportunity={markTarget} />
       )}
     </div>
   );

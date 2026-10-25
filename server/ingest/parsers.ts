@@ -10,7 +10,6 @@ import {
   Row,
   airIsSummaryRow,
   airIsBlankRow,
-  dateFromValue,
   findHeader,
   numberValue,
   parseCSV,
@@ -19,7 +18,7 @@ import {
 import { rejectXxe, scrubCell } from "./hardening";
 import { inferColumns } from "./columnInference";
 
-export const PARSER_VERSION = "BUILD-010.3-ww1";
+export const PARSER_VERSION = "BUILD-010.3-clock2";
 
 export interface ParsedMeterSeries {
   /** sheet name or channel identifier — one meter per sheet/UsagePoint */
@@ -57,34 +56,90 @@ function extractFooterTotals(summaryRows: string[]): { totalUsage?: number; maxD
 }
 
 /* ---------------- time parsing ---------------- */
-/** Combine a date cell and a time cell ("00:15", "12:00 AM", excel fraction). */
-function combineDateTime(dateCell: unknown, timeCell: unknown): number | null {
-  const d = dateFromValue(dateCell as never);
-  if (!d) return null;
-  let minutes = 0;
-  if (timeCell != null && timeCell !== "") {
-    if (typeof timeCell === "number" && timeCell >= 0 && timeCell < 1.0001) {
-      minutes = Math.round(timeCell * 24 * 60);
+export interface IntervalClock {
+  timeZone: string;
+  timestampBasis: "start" | "end";
+  ambiguousTime?: "reject";
+}
+// Legacy pure-parser callers have a deterministic UTC default. All ingestion
+// entry points supply the confirmed/source or existing-meter clock explicitly.
+const DEFAULT_CLOCK: IntervalClock = { timeZone: "UTC", timestampBasis: "start", ambiguousTime: "reject" };
+const zoneFormatters = new Map<string, Intl.DateTimeFormat>();
+const zoneDayOffsets = new Map<string, number[]>();
+function formatter(zone: string) {
+  let f = zoneFormatters.get(zone);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+    if (zoneFormatters.size >= 128) zoneFormatters.clear();
+    zoneFormatters.set(zone, f);
+  }
+  return f;
+}
+function wallAt(ts: number, zone: string) {
+  const p = Object.fromEntries(formatter(zone).formatToParts(ts).map(p => [p.type, p.value]));
+  return Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second));
+}
+/** Intl uses the runtime's IANA tzdata, never the host default timezone.
+ * Enumerate the offsets surrounding the civil day and validate every candidate:
+ * zero matches = spring gap; two matches = fall fold. Both fail closed. */
+function civilToInstant(wall: number, zone: string): number {
+  const day = Math.floor(wall / 86_400_000);
+  const key = `${zone}:${day}`;
+  let offsets = zoneDayOffsets.get(key);
+  if (!offsets) {
+    offsets = Array.from(new Set([-36, -24, -12, 0, 12, 24, 36].map(h => {
+      const t = day * 86_400_000 + h * 3_600_000;
+      return wallAt(t, zone) - t;
+    })));
+    if (zoneDayOffsets.size > 4096) zoneDayOffsets.clear();
+    zoneDayOffsets.set(key, offsets);
+  }
+  const ms = ((wall % 1000) + 1000) % 1000;
+  const candidates = offsets.map(o => wall - o).filter(t => wallAt(t, zone) + ms === wall);
+  if (candidates.length !== 1) throw new Error(`${candidates.length ? "Ambiguous" : "Nonexistent"} DST wall-clock time ${new Date(wall).toISOString()} in ${zone}; supply explicit UTC offsets.`);
+  return candidates[0];
+}
+/** Parse compact dates, Excel serials, US/ISO civil strings and explicit ISO
+ * offsets. 24:00 rolls into the next civil day before timezone resolution. */
+export function parseIntervalInstant(dateCell: unknown, timeCell: unknown, clock: IntervalClock = DEFAULT_CLOCK): number | null {
+  if (dateCell == null || dateCell === "") return null;
+  formatter(clock.timeZone); // validate even an offset-only source's metadata
+  if (dateCell instanceof Date) return Number.isFinite(dateCell.getTime()) ? dateCell.getTime() : null;
+  const raw = String(dateCell).trim();
+  const explicit = /[T ]\d{1,2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  if (explicit) { const t = Date.parse(raw); return Number.isFinite(t) ? t : null; }
+  let y: number, mo: number, d: number, hh = 0, mm = 0, ss = 0, ms = 0;
+  let tail = "";
+  const compact = raw.match(/^(\d{4})(\d{2})(\d{2})$/);
+  const iso = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](.*))?$/);
+  const us = raw.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})(?:\s+(.*))?$/);
+  if (compact || iso) { const m = (compact ?? iso)!; y = +m[1]; mo = +m[2]; d = +m[3]; tail = m[4] ?? ""; }
+  else if (us) { y = +us[3]; mo = +us[1]; d = +us[2]; tail = us[4] ?? ""; }
+  else if (typeof dateCell === "number" && dateCell > 0 && dateCell < 2958466) {
+    const c = XLSX.SSF.parse_date_code(dateCell);
+    if (!c) return null;
+    y = c.y; mo = c.m; d = c.d; hh = c.H; mm = c.M; ss = c.S; ms = Math.round((c.u ?? 0) * 1000);
+  } else return null;
+  const day = Date.UTC(y, mo - 1, d);
+  const check = new Date(day);
+  if (check.getUTCFullYear() !== y || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return null;
+  const time = timeCell != null && timeCell !== "" ? timeCell : tail;
+  if (time !== "") {
+    if (typeof time === "number" && time >= 0 && time <= 1) {
+      const total = Math.round(time * 86_400_000); hh = Math.floor(total / 3_600_000); mm = Math.floor(total / 60_000) % 60; ss = Math.floor(total / 1000) % 60; ms = total % 1000;
     } else {
-      const s = String(timeCell).trim();
-      const m = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?$/i);
-      if (m) {
-        let hh = parseInt(m[1], 10);
-        const mm = parseInt(m[2], 10);
-        const ap = m[4]?.toLowerCase();
-        if (ap === "pm" && hh < 12) hh += 12;
-        if (ap === "am" && hh === 12) hh = 0;
-        minutes = hh * 60 + mm;
-      } else {
-        const t = dateFromValue(s);
-        if (t) minutes = t.getHours() * 60 + t.getMinutes();
+      const m = String(time).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?\s*([ap]m)?(?:\s*(Z|[+-]\d{2}:?\d{2}))?$/i);
+      if (!m) throw new Error(`Malformed interval time: ${String(time).slice(0, 80)}`);
+      hh = +m[1]; mm = +m[2]; ss = +(m[3] ?? 0); ms = +(m[4] ?? "0").padEnd(3, "0");
+      if (m[5]) { if (hh < 1 || hh > 12) throw new Error("Invalid 12-hour interval time"); hh = hh % 12 + (m[5].toLowerCase() === "pm" ? 12 : 0); }
+      if (hh > 24 || mm > 59 || ss > 59 || (hh === 24 && (mm || ss || ms))) throw new Error("Invalid interval time (only 24:00 is a valid rollover)");
+      if (m[6]) {
+        const wall = new Date(day + hh * 3_600_000 + mm * 60_000 + ss * 1000 + ms).toISOString().replace(/Z$/, m[6]);
+        const instant = Date.parse(wall); if (!Number.isFinite(instant)) throw new Error("Invalid explicit interval offset"); return instant;
       }
     }
-  } else if (d.getHours() !== 0 || d.getMinutes() !== 0) {
-    return d.getTime();
   }
-  const base = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  return base + minutes * 60_000;
+  return civilToInstant(day + hh * 3_600_000 + mm * 60_000 + ss * 1000 + ms, clock.timeZone);
 }
 
 /** Infer interval duration (minutes) from consecutive timestamps (mode). */
@@ -112,7 +167,7 @@ function inferDurationMin(tss: number[]): number {
  * rows by meter value and emit one series per meter. Otherwise delegate to
  * the single-series path unchanged.
  */
-function tableToSeriesMulti(name: string, rows: Row[]): ParsedMeterSeries[] {
+function tableToSeriesMulti(name: string, rows: Row[], clock: IntervalClock): ParsedMeterSeries[] {
   const probe = rowsToFile(name, rows);
   const meterCol = findHeader(probe.headers, [/^meter\s*(#|number|id)?$/i], [/read/i]);
   if (meterCol) {
@@ -130,17 +185,17 @@ function tableToSeriesMulti(name: string, rows: Row[]): ParsedMeterSeries[] {
           ...headerRows,
           ...rows.slice(probe.headerRowIndex + 1).filter((r) => String(r?.[meterIdx] ?? "").trim() === mv),
         ];
-        const s = tableToSeries(`${name} · meter ${mv}`, subset);
+        const s = tableToSeries(`${name} · meter ${mv}`, subset, clock);
         if (s) out.push(s);
       }
       if (out.length > 0) return out;
     }
   }
-  const single = tableToSeries(name, rows);
+  const single = tableToSeries(name, rows, clock);
   return single ? [single] : [];
 }
 
-function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
+function tableToSeries(name: string, rows: Row[], clock: IntervalClock): ParsedMeterSeries | null {
   const table = rowsToFile(name, rows);
   if (table.data.length < 3) return null;
   const headers = table.headers;
@@ -264,9 +319,7 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
         continue;
       }
     }
-    const ts = dtColFinal
-      ? (dateFromValue(r[dtColFinal] as never)?.getTime() ?? null)
-      : combineDateTime(r[dateColFinal!], timeColFinal ? r[timeColFinal] : null);
+    const ts = parseIntervalInstant(r[dtColFinal ?? dateColFinal!], dtColFinal ? null : timeColFinal ? r[timeColFinal] : null, clock);
     if (ts == null || !Number.isFinite(ts)) {
       skipped++;
       continue;
@@ -283,7 +336,7 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
   if (points.length < 3) return null;
   points.sort((a, b) => a.ts - b.ts);
   const dur = inferDurationMin(points.map((p) => p.ts));
-  for (const p of points) p.durationMin = dur;
+  for (const p of points) { p.durationMin = dur; if (clock.timestampBasis === "end") p.ts -= dur * 60_000; }
 
   const footerTotals = extractFooterTotals(table.summaryRows);
   const ingestedUsageSum = points.reduce((a, p) => a + p.usage, 0);
@@ -295,7 +348,7 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
     if (p.demand != null && (ingestedMaxDemand == null || p.demand > ingestedMaxDemand)) ingestedMaxDemand = p.demand;
   }
 
-  const notes: string[] = [...inferenceNotes];
+  const notes: string[] = [...inferenceNotes, `Source clock: ${clock.timeZone}; ${clock.timestampBasis}-labeled intervals stored as UTC starts. Explicit offsets preserved; unresolved DST folds/gaps rejected.`];
   if (receivedRows > 0) {
     notes.push(`${receivedRows} "Received" (export) rows excluded from consumption — net-metering export is not usage`);
   }
@@ -312,6 +365,8 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
     } else {
       notes.push(`Usage sum matches workbook Total= footer within ${Math.abs(footerUsageDeltaPct).toFixed(4)}%`);
     }
+  } else {
+    notes.push("No workbook Total= footer available; usage sum has not been independently reconciled.");
   }
   if (footerTotals.maxDemand !== undefined && ingestedMaxDemand != null) {
     footerMaxDelta = ingestedMaxDemand - footerTotals.maxDemand;
@@ -342,7 +397,7 @@ function tableToSeries(name: string, rows: Row[]): ParsedMeterSeries | null {
 }
 
 /* ---------------- Excel (D3: every sheet; D11: raw floats) ---------------- */
-export function parseExcelIntervals(buf: Buffer): ParsedMeterSeries[] {
+export function parseExcelIntervals(buf: Buffer, clock: IntervalClock = DEFAULT_CLOCK): ParsedMeterSeries[] {
   const wb = XLSX.read(buf, { type: "buffer", cellDates: false });
   const out: ParsedMeterSeries[] = [];
   for (const sheetName of wb.SheetNames) {
@@ -352,16 +407,26 @@ export function parseExcelIntervals(buf: Buffer): ParsedMeterSeries[] {
     const rows = XLSX.utils.sheet_to_json<Row>(ws, { header: 1, raw: true, defval: "" });
     if (!rows || rows.length < 4) continue;
     const scrubbed = rows.map((r) => r.map((c) => (typeof c === "string" ? scrubCell(c) : c)));
-    out.push(...tableToSeriesMulti(sheetName, scrubbed));
+    out.push(...tableToSeriesMulti(sheetName, scrubbed, clock));
   }
   return out;
 }
 
+/**
+ * BULK-1: parse ONE worksheet's raw rows with exactly the same scrub +
+ * table->series logic parseExcelIntervals applies per sheet. The bulk importer
+ * reads one sheet at a time (bounded memory) and calls this per sheet.
+ */
+export function parseSheetRows(sheetName: string, rows: unknown[][], clock: IntervalClock = DEFAULT_CLOCK): ParsedMeterSeries[] {
+  if (!rows || rows.length < 4) return [];
+  const scrubbed = (rows as Row[]).map((r) => r.map((c) => (typeof c === "string" ? scrubCell(c) : c)));
+  return tableToSeriesMulti(sheetName, scrubbed, clock);
+}
 /* ---------------- CSV (BUILD-010.3 parseCSV) ---------------- */
-export function parseCsvIntervals(text: string, filename: string): ParsedMeterSeries[] {
+export function parseCsvIntervals(text: string, filename: string, clock: IntervalClock = DEFAULT_CLOCK): ParsedMeterSeries[] {
   const rows = parseCSV(text).map((r) => r.map((c) => scrubCell(c)));
   if (rows.length < 4) return [];
-  return tableToSeriesMulti(filename.replace(/\.[^.]+$/, ""), rows as Row[]);
+  return tableToSeriesMulti(filename.replace(/\.[^.]+$/, ""), rows as Row[], clock);
 }
 
 /* ---------------- ESPI Green Button XML ---------------- */

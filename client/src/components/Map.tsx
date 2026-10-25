@@ -76,8 +76,7 @@
 
 /// <reference types="@types/google.maps" />
 
-import { useEffect, useRef } from "react";
-import { usePersistFn } from "@/hooks/usePersistFn";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 declare global {
@@ -92,21 +91,29 @@ const FORGE_BASE_URL =
   "https://forge.butterfly-effect.dev";
 const MAPS_PROXY_URL = `${FORGE_BASE_URL}/v1/maps/proxy`;
 
-function loadMapScript() {
-  return new Promise(resolve => {
+let mapScriptPromise: Promise<void> | null = null;
+export function loadMapScript(): Promise<void> {
+  if (window.google?.maps?.Map) return Promise.resolve();
+  if (mapScriptPromise) return mapScriptPromise;
+  mapScriptPromise = new Promise<void>((resolve, reject) => {
     const script = document.createElement("script");
+    const finish = (error?: Error) => {
+      clearTimeout(timeout);
+      script.onload = null;
+      script.onerror = null;
+      script.remove();
+      if (error) reject(error);
+      else resolve();
+    };
+    const timeout = setTimeout(() => finish(new Error("Map loading timed out")), 15000);
     script.src = `${MAPS_PROXY_URL}/maps/api/js?key=${API_KEY}&v=weekly&libraries=marker,places,geocoding,geometry`;
     script.async = true;
     script.crossOrigin = "anonymous";
-    script.onload = () => {
-      resolve(null);
-      script.remove(); // Clean up immediately
-    };
-    script.onerror = () => {
-      console.error("Failed to load Google Maps script");
-    };
+    script.onload = () => finish(window.google?.maps?.Map ? undefined : new Error("Map service unavailable"));
+    script.onerror = () => finish(new Error("Map service could not load for this origin"));
     document.head.appendChild(script);
   });
+  return mapScriptPromise;
 }
 
 interface MapViewProps {
@@ -124,32 +131,44 @@ export function MapView({
 }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<google.maps.Map | null>(null);
-
-  const init = usePersistFn(async () => {
-    await loadMapScript();
-    if (!mapContainer.current) {
-      console.error("Map container not found");
-      return;
-    }
-    map.current = new window.google.maps.Map(mapContainer.current, {
-      zoom: initialZoom,
-      center: initialCenter,
-      mapTypeControl: true,
-      fullscreenControl: true,
-      zoomControl: true,
-      streetViewControl: true,
-      mapId: "DEMO_MAP_ID",
-    });
-    if (onMapReady) {
-      onMapReady(map.current);
-    }
-  });
+  const [status, setStatus] = useState<"loading" | "ready" | "unavailable">("loading");
+  const onReady = useRef(onMapReady);
+  onReady.current = onMapReady;
 
   useEffect(() => {
-    init();
-  }, [init]);
+    let cancelled = false;
+    setStatus("loading");
+    void loadMapScript().then(() => {
+      if (cancelled || !mapContainer.current) return;
+      map.current = new window.google.maps.Map(mapContainer.current, {
+        zoom: initialZoom,
+        center: { lat: initialCenter.lat, lng: initialCenter.lng },
+        mapTypeControl: true,
+        fullscreenControl: true,
+        zoomControl: true,
+        streetViewControl: true,
+        mapId: "DEMO_MAP_ID",
+      });
+      onReady.current?.(map.current);
+      setStatus("ready");
+    }).catch(() => {
+      if (!cancelled) setStatus("unavailable");
+    });
+    return () => {
+      cancelled = true;
+      if (map.current) window.google?.maps.event.clearInstanceListeners(map.current);
+      map.current = null;
+    };
+  }, [initialCenter.lat, initialCenter.lng, initialZoom]);
 
   return (
-    <div ref={mapContainer} className={cn("w-full h-[500px]", className)} />
+    <div className={cn("relative w-full h-[500px]", className)}>
+      <div ref={mapContainer} className="h-full w-full" />
+      {status !== "ready" && (
+        <div role="status" className="absolute inset-0 flex items-center justify-center rounded-md border bg-muted/40 p-6 text-center text-sm text-muted-foreground">
+          {status === "loading" ? "Loading map…" : "Map unavailable in this environment. You can still use the address and site details; try the map again from the published app."}
+        </div>
+      )}
+    </div>
   );
 }

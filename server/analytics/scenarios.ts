@@ -447,7 +447,9 @@ export function runScenario(
   const basePoints = hourlyToPoints(baselineHourly);
   const scenPoints = hourlyToPoints(hourly);
   const baseCost = costOnTariff(basePoints, structure);
-  const scenCost = costOnTariff(scenPoints, structure);
+  const scenCost = costOnTariff(scenPoints, structure, { hasSolar: input.kind === "solar" || input.kind === "solar_battery" });
+  if (baseCost.switchRecommendationAllowed === false || scenCost.switchRecommendationAllowed === false) throw new Error("Scenario savings withheld: incomplete tariff/account terms. Confirm riders, billing basis and renewable REST treatment before modeling financial savings.");
+  disclosures.push(...baseCost.disclosures);
   disclosures.push(...scenCost.disclosures.filter((d) => !baseCost.disclosures.includes(d)));
 
   const baseUsage = baselineHourly.reduce((a, b) => a + b, 0);

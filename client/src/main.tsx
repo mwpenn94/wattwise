@@ -10,6 +10,26 @@ import "./index.css";
 
 const queryClient = new QueryClient();
 
+// Tenant queries are keyed by resource, not identity. Drop them before a new
+// identity can consume the previous account's cached sites or pending results.
+let cachedIdentity: number | null | undefined;
+queryClient.getQueryCache().subscribe(event => {
+  if (event.type !== "updated" || event.action.type !== "success") return;
+  const path = event.query.queryKey[0];
+  if (!Array.isArray(path) || path.join(".") !== "auth.me") return;
+  const identity = (event.query.state.data as { id: number } | null)?.id ?? null;
+  if (cachedIdentity !== undefined && cachedIdentity !== identity) {
+    const tenantQueries = { predicate: (query: { queryKey: readonly unknown[] }) => {
+      const key = query.queryKey[0];
+      return !Array.isArray(key) || key.join(".") !== "auth.me";
+    } };
+    void queryClient.cancelQueries(tenantQueries);
+    queryClient.removeQueries(tenantQueries);
+    queryClient.getMutationCache().clear();
+  }
+  cachedIdentity = identity;
+});
+
 const redirectToLoginIfUnauthorized = (error: unknown) => {
   if (!(error instanceof TRPCClientError)) return;
   if (typeof window === "undefined") return;

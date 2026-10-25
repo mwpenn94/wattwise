@@ -38,6 +38,15 @@ async function startServer() {
   // global JSON parser and stays setup-blocked until test-mode secrets exist.
   app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
   // Configure body parser with larger size limit for file uploads
+  app.use("/api/trpc", (req, res, next) => {
+    if (req.path.includes("bulkImport.stageFile") && (req.path !== "/bulkImport.stageFile" || req.query.batch != null)) {
+      res.status(400).json({ error: "Bulk uploads require the dedicated non-batched transport." });
+      return;
+    }
+    next();
+  });
+  // 50 MiB decoded requires 66.67 MiB base64 plus JSON overhead.
+  app.use("/api/trpc/bulkImport.stageFile", express.json({ limit: "68mb" }));
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);

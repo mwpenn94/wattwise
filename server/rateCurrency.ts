@@ -117,10 +117,26 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     commodity: "electric",
     state: "AZ",
     sourceUrl: "https://www.uesaz.com/electric-rates/",
-    sourceLabel: "UNS Electric Statement of Rates (ACC Decision)",
-    governsUrdbIds: ["uns-erres", "uns-errest", "uns-lgs"],
+    sourceLabel: "UNS Electric commercial base-schedule index (not full-bill certification)",
+    governsUrdbIds: ["uns-egsgs", "uns-egmgs", "uns-egmgst", "uns-egmgsst", "uns-lgs"],
     adjustorCycle: "annual",
     verifyCadenceDays: 120,
+  },
+  {
+    sourceKey: "unse-az-ppfac",
+    utilityName: "UNS Electric (UniSource)", commodity: "electric", state: "AZ",
+    sourceUrl: "https://docs.uesaz.com/wp-content/uploads/701-Rider-1-PPFAC-Clean.pdf",
+    sourceLabel: "UNS Electric monthly PPFAC history — sheet 701-1",
+    governsUrdbIds: ["uns-egsgs", "uns-egmgs", "uns-egmgst", "uns-egmgsst", "uns-lgs"],
+    adjustorCycle: "none", verifyCadenceDays: 30,
+  },
+  {
+    sourceKey: "unse-az-riders",
+    utilityName: "UNS Electric (UniSource)", commodity: "electric", state: "AZ",
+    sourceUrl: "https://docs.uesaz.com/wp-content/uploads/801-UNSE-Statement-of-Charges.pdf",
+    sourceLabel: "UNS Electric Statement of Charges — sheets 801-1 to 801-3",
+    governsUrdbIds: ["uns-egsgs", "uns-egmgs", "uns-egmgst", "uns-egmgsst", "uns-lgs"],
+    adjustorCycle: "none", verifyCadenceDays: 30,
   },
   {
     sourceKey: "swgas-az-gas",
@@ -349,7 +365,7 @@ export async function registerRateSources(): Promise<{ inserted: number; updated
     // Stamp sourceUrl onto the governed tariff rows so UI disclosures can
     // link "verified against <source>" without a join at render time.
     // Docket sources govern nothing — skip the (empty inArray) stamp.
-    if (s.governsUrdbIds.length > 0) {
+    if (s.governsUrdbIds.length > 0 && !["unse-az-ppfac", "unse-az-riders"].includes(s.sourceKey)) {
       await db
         .update(tariffs)
         .set({ sourceUrl: s.sourceUrl })
@@ -685,15 +701,30 @@ export async function applyAgentFinding(f: AgentFinding, now = Date.now()): Prom
   const govern = urdbIdsOf(governAll);
   const governTiers = tierIdsOf(governAll);
 
+  // Date-versioned riders cannot be safely applied by the legacy flat-energy
+  // adjustor update schema. A change stays flagged until sourced versions are
+  // reviewed and seeded; confirming one document must not certify the others.
+  if (["unse-az-ppfac", "unse-az-riders"].includes(f.sourceKey) && f.status === "changed") {
+    await db.update(rateSources).set({ changeDetectedAt: now }).where(eq(rateSources.id, src.id));
+    if (govern.length) await db.update(tariffs).set({ verifyStatus: "change_detected" }).where(inArray(tariffs.urdbId, govern));
+    await db.insert(rateVerifications).values({ sourceKey: f.sourceKey, checkedAt: now, status: "changed",
+      evidence: f.evidence.slice(0, 1024), method: "agent_verify", applied: false });
+    return { sourceKey: f.sourceKey, action: "flagged_for_review", detail: "Date-versioned rider change requires official sheet/effective-period review and seed update; no base-energy mutation applied." };
+  }
   if (f.status === "confirmed") {
     await db
       .update(rateSources)
       .set({ lastVerifiedAt: now, changeDetectedAt: null, consecutiveFailures: 0 })
       .where(eq(rateSources.id, src.id));
     if (govern.length > 0) {
+      const siblingSources = f.sourceKey.startsWith("unse-az-")
+        ? (await db.select().from(rateSources)).filter((s) => s.sourceKey.startsWith("unse-az-")) : [];
+      const unresolvedSibling = siblingSources.some((s) => s.changeDetectedAt != null ||
+        s.lastVerifiedAt == null || now - s.lastVerifiedAt > effectiveCadenceDays(s) * DAY_MS);
       await db
         .update(tariffs)
-        .set({ verifyStatus: "current", lastVerifiedAt: now })
+        .set(unresolvedSibling ? { verifyStatus: siblingSources.some((s) => s.changeDetectedAt != null) ? "change_detected" : "due" }
+          : { verifyStatus: "current", lastVerifiedAt: now })
         .where(inArray(tariffs.urdbId, govern));
     }
     // TEL1C-2: benchmark confirmation re-stamps governed telecom tiers.

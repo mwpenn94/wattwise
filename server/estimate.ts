@@ -16,7 +16,7 @@
 import { deriveFromAddress, BUILDING_PRIORS } from "./cascade";
 import { archetypeBaseline } from "./analytics/baseline";
 import * as h from "./dbHelpers";
-import { costOnTariff, tariffEligible } from "./analytics/tariffEngine";
+import { costOnTariff, monthlyImportedKwh, tariffEligibilityTerms, tariffEligible } from "./analytics/tariffEngine";
 import type { TariffStructure } from "../shared/wattwise";
 import { buildAccuracyLadder } from "../shared/capabilityMatrix"; // accuracy ladder + cross-commodity gas teaser
 import { lookupTerritory } from "./serviceTerritories";
@@ -141,25 +141,29 @@ export async function computeAddressEstimate(input: {
   const sector = input.buildingType === "single_family" || input.buildingType === "multifamily" ? "residential" : "commercial";
   const allTariffs = state ? await h.listTariffs("electric", state) : [];
   const peakKw = Math.max(...ab.hourly);
+  const monthlyKwh = monthlyImportedKwh(points);
   const eligible = allTariffs.filter(
     (t) =>
       tariffEligible(
         // v1.18 applicability: an anonymous estimate assumes no solar and no
         // grandfathered status — closed and solar-only plans are excluded so the
         // public number is one the visitor could actually sign up for.
-        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin ?? null, peakKwMax: t.peakKwMax ?? null, closedToNew: t.closedToNew, techCondition: t.techCondition },
-        { sectorClass: sector, hasSolar: false },
+        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin ?? null, peakKwMax: t.peakKwMax ?? null, closedToNew: t.closedToNew, techCondition: t.techCondition, ...tariffEligibilityTerms(t.structure as TariffStructure) },
+        { sectorClass: sector, hasSolar: false, buildingType: input.buildingType, monthlyImportedKwh: monthlyKwh },
         peakKw,
       ).eligible,
   );
   let annualCost: number | null = null;
   let tariffName: string | null = null;
+  let tariffDisclosures: string[] = [];
   for (const t of eligible) {
     try {
-      const c = costOnTariff(points, t.structure as TariffStructure);
+      const c = costOnTariff(points, t.structure as TariffStructure, { hasSolar: false });
+      if (c.switchRecommendationAllowed === false) continue;
       if (annualCost == null || c.breakdown.total < annualCost) {
         annualCost = c.breakdown.total;
         tariffName = t.name;
+        tariffDisclosures = c.disclosures;
       }
     } catch {
       /* skip malformed structures — estimate must not 500 on one bad row */
@@ -313,7 +317,7 @@ export async function computeAddressEstimate(input: {
       tariff: {
         name: tariffName,
         note: tariffName
-          ? "Cheapest eligible seeded rate for your area — your actual rate may differ"
+          ? `Candidate seeded rate — utility and eligibility confirmation required; your actual rate may differ. ${tariffDisclosures.join(" ")}`
           : (noTariffPriceNote ?? "No seeded tariff matched; priced at a national blended rate"),
       },
       loadBasis: "archetype_scaled",

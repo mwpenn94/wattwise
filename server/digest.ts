@@ -37,10 +37,9 @@ export async function buildDigest(userId: number): Promise<DigestContent | null>
     // cumulative verified savings from the prove-it ledger
     try {
       const impls = await h.listMeasureImplementations(site.id, userId);
-      for (const impl of impls) {
-        const v = Number((impl as { verifiedSavingsUsd?: unknown }).verifiedSavingsUsd ?? 0);
-        if (Number.isFinite(v) && v > 0) verifiedUsd += v;
-      }
+      // R4 #2: attributable verified dollars only.
+      const { attributableVerifiedUsd } = await import("./proofAttribution");
+      verifiedUsd += attributableVerifiedUsd(impls);
     } catch {
       /* site without implementations — fine */
     }

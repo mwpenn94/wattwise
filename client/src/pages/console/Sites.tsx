@@ -31,6 +31,7 @@ import { Link, useLocation } from "wouter";
 import { ProvChip } from "@/components/Honesty";
 import QuickStart from "@/components/QuickStart";
 import OperatingHoursPanel from "@/components/OperatingHoursPanel";
+import { siteHref, useActiveSite } from "@/hooks/useActiveSite";
 
 const BUILDING_TYPES = [
   ["single_family", "Single-family home"],
@@ -49,16 +50,17 @@ const BUILDING_TYPES = [
 export default function Sites() {
   const utils = trpc.useUtils();
   const [, navigate] = useLocation();
-  const sites = trpc.sites.list.useQuery();
+  const { activeSiteId, sites: selectableSites, ownedSites: sites, setActiveSite } = useActiveSite();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", city: "", state: "AZ", zip: "", buildingType: "", sqft: "", vintage: "", utilityName: "", tenure: "own", hasSolar: false });
 
   const create = trpc.sites.create.useMutation({
-    onSuccess: async () => {
+    onSuccess: async (created) => {
       toast.success("Site created");
       setOpen(false);
       setForm({ name: "", city: "", state: "AZ", zip: "", buildingType: "", sqft: "", vintage: "", utilityName: "", tenure: "own", hasSolar: false });
       await utils.sites.list.invalidate();
+      navigate(`/app?site=${created.id}`);
     },
     onError: (e) => toast.error(e.message),
   });
@@ -179,11 +181,22 @@ export default function Sites() {
         </Dialog>
       </div>
 
+      <div className="mt-4 flex items-center gap-3">
+        <Label>Active site</Label>
+        <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={(value) => setActiveSite(Number(value))}>
+          <SelectTrigger className="w-72" aria-label="Active site"><SelectValue placeholder="Select site…" /></SelectTrigger>
+          <SelectContent>
+            {(selectableSites.data ?? []).map((site) => <SelectItem key={site.id} value={String(site.id)}>{site.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <span className="text-xs text-muted-foreground">All sites are listed below.</span>
+      </div>
+
       <div className="mt-6">
         <QuickStart compact />
       </div>
 
-      <EntityManager />
+      <EntityManager activeSiteId={activeSiteId} />
 
       <div className="mt-6 grid gap-4 md:grid-cols-2">
         {sites.isLoading && (
@@ -351,7 +364,7 @@ function SharePanel({ siteId, open, onClose }: { siteId: number; open: boolean; 
 /** Gap-9: optional organizational layer — group sites under a household/company/
  *  property owner. Nothing is required: sites work fine unattached, and deleting
  *  a group detaches its sites without deleting any data. */
-function EntityManager() {
+function EntityManager({ activeSiteId }: { activeSiteId: number | null }) {
   const utils = trpc.useUtils();
   const entities = trpc.entities.list.useQuery();
   const [name, setName] = useState("");
@@ -383,7 +396,7 @@ function EntityManager() {
         <p className="text-xs text-muted-foreground">
           Optional: group sites under a household, company, or property owner — one owner can hold many sites, each with
           many meters. Combined figures live on the{" "}
-          <a href="/app/portfolio" className="text-primary underline">
+          <a href={siteHref("/app/portfolio", activeSiteId)} className="text-primary underline">
             Portfolio
           </a>{" "}
           page.
@@ -481,10 +494,27 @@ function SiteActions({ site }: { site: { id: number; name: string; address?: str
   });
 
   const update = trpc.sites.update.useMutation({
-    onSuccess: async () => {
-      toast.success("Site updated");
+    onSuccess: async (result) => {
+      if (result.geocodeFailed) {
+        toast.warning("Site updated, but we could not verify the new address", {
+          description: "The previous map pin and location-derived figures were retired. Fix the address (or locate the building on the map), then rerun analysis.",
+        });
+      } else if (result.locationChanged) {
+        toast.success("Site location updated", {
+          description: "Location-dependent figures will update on the next analysis. Re-resolve the footprint if this is a different building.",
+        });
+      } else {
+        toast.success("Site updated");
+      }
       setEditOpen(false);
-      await utils.sites.list.invalidate();
+      await Promise.all([
+        utils.sites.list.invalidate(),
+        utils.sites.get.invalidate({ siteId: site.id }),
+        utils.sites.propertyRecords.invalidate({ siteId: site.id }),
+        utils.analysis.latest.invalidate({ siteId: site.id }),
+        utils.insights.list.invalidate({ siteId: site.id }),
+        utils.insights.opportunities.invalidate({ siteId: site.id }),
+      ]);
     },
     onError: (e) => toast.error(e.message),
   });
@@ -754,7 +784,7 @@ function SiteTelecom({ siteId }: { siteId: number }) {
             <Wifi className="h-3 w-3 text-primary" /> {s.provider} · {s.serviceType.replace(/_/g, " ")} · ${Math.round(s.monthlyCostUsd ?? 0)}/mo
           </span>
         ))}
-        <Link href="/app/explore" className="font-mono text-[10px] text-primary hover:underline">
+        <Link href={`/app/explore?site=${siteId}`} className="font-mono text-[10px] text-primary hover:underline">
           manage →
         </Link>
       </div>

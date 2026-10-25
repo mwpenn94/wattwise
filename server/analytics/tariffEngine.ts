@@ -182,9 +182,12 @@ export function computeDemandAnalytics(points: IntervalPoint[], cpTopN = 4, cpSe
 /* ---------------- ratchet sub-module (Cycle 4 finding 5) ---------------- */
 export function applyRatchet(
   monthlyPeaks: Array<{ month: string; peakKw: number; peakTs: number }>,
-  ratchet: { lookbackMonths: number; ratchetPct: number; applicablePeriod: "all" | "summer" } | undefined,
+  ratchet: TariffStructure["ratchet"],
+  opts: { demandMinKw?: number; contractCapacityKw?: number; priorBilledDemand?: Array<{ month: string; billedDemandKw: number }> } = {},
 ): MonthlyDemandDetail[] {
   const out: MonthlyDemandDetail[] = [];
+  const monthIndex = (s: string) => { const [y, m] = s.split("-").map(Number); return y * 12 + m - 1; };
+  monthlyPeaks = [...monthlyPeaks].sort((a, b) => a.month.localeCompare(b.month));
   for (let i = 0; i < monthlyPeaks.length; i++) {
     const m = monthlyPeaks[i];
     let billed = m.peakKw;
@@ -208,15 +211,26 @@ export function applyRatchet(
       // applying the floor IN non-summer months is also correct. All currently
       // seeded tariffs use applicablePeriod "all", so this branch is dormant
       // with seed data; it is covered by a dedicated unit test.
-      const lookStart = Math.max(0, i - ratchet.lookbackMonths);
       let lookPeak = 0;
-      for (let j = lookStart; j <= i; j++) {
+      for (let j = 0; j <= i; j++) {
         const mm = monthlyPeaks[j];
+        const distance = monthIndex(m.month) - monthIndex(mm.month);
+        if (ratchet.determinant === "billed") {
+          if (distance > ratchet.lookbackMonths || distance === 0) continue;
+        } else if (j < Math.max(0, i - ratchet.lookbackMonths)) continue;
         if (ratchet.applicablePeriod === "summer") {
           const mon = parseInt(mm.month.split("-")[1], 10);
           if (mon < 5 || mon > 10) continue;
         }
-        if (mm.peakKw > lookPeak) lookPeak = mm.peakKw;
+        lookPeak = Math.max(lookPeak, ratchet.determinant === "billed" ? out[j].billedDemandKw : mm.peakKw);
+      }
+      if (ratchet.determinant === "billed") for (const prior of opts.priorBilledDemand ?? []) {
+        const distance = monthIndex(m.month) - monthIndex(prior.month);
+        const mon = Number(prior.month.slice(5));
+        if (distance > 0 && distance <= ratchet.lookbackMonths &&
+          (ratchet.applicablePeriod === "all" || (mon >= 5 && mon <= 10))) {
+          lookPeak = Math.max(lookPeak, prior.billedDemandKw);
+        }
       }
       const floor = ratchet.ratchetPct * lookPeak;
       if (floor > billed) {
@@ -224,6 +238,7 @@ export function applyRatchet(
         applied = true;
       }
     }
+    billed = Math.max(billed, opts.demandMinKw ?? 0, opts.contractCapacityKw ?? 0);
     out.push({ month: m.month, actualPeakKw: m.peakKw, billedDemandKw: billed, ratchetApplied: applied, peakTimestamp: m.peakTs });
   }
   return out;
@@ -239,6 +254,36 @@ function hourSpan(hourStart: number, hourEnd: number): number {
   return span === 0 ? 24 : span;
 }
 
+function isTouHoliday(holiday: string, year: number, month: number, day: number): boolean {
+  const candidate = Date.UTC(year, month - 1, day);
+  if (holiday === "memorial_day") {
+    const lastDay = new Date(Date.UTC(year, 5, 0)).getUTCDate();
+    const lastDow = new Date(Date.UTC(year, 4, lastDay)).getUTCDay();
+    return candidate === Date.UTC(year, 4, lastDay - ((lastDow + 6) % 7));
+  }
+  if (holiday === "labor_day") {
+    const firstDow = new Date(Date.UTC(year, 8, 1)).getUTCDay();
+    return candidate === Date.UTC(year, 8, 1 + ((8 - firstDow) % 7));
+  }
+  if (holiday === "thanksgiving") {
+    const firstDow = new Date(Date.UTC(year, 10, 1)).getUTCDay();
+    return candidate === Date.UTC(year, 10, 1 + ((11 - firstDow) % 7) + 21);
+  }
+  const fixed: Record<string, [number, number]> = {
+    independence_day: [7, 4],
+    christmas_day: [12, 25],
+    new_years_day: [1, 1],
+  };
+  const date = fixed[holiday];
+  if (!date) return false;
+  return [year - 1, year, year + 1].some((holidayYear) => {
+    const actual = Date.UTC(holidayYear, date[0] - 1, date[1]);
+    const dow = new Date(actual).getUTCDay();
+    const observed = actual + (dow === 6 ? -1 : dow === 0 ? 1 : 0) * 86_400_000;
+    return candidate === actual || candidate === observed;
+  });
+}
+
 function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFlag?: { used: boolean }): number {
   // Batch-40 (pass 1746) invariant: pricing NEVER consults eligibility. State/
   // sector/size eligibility (tariffEligible) gates tariff SELECTION upstream;
@@ -248,7 +293,7 @@ function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFla
   // applied" is literally true. The widest-coverage fallback below applies
   // only to HOURS no defined period covers (a period-definition gap, disclosed
   // via touFallback.used), never to eligibility mismatches.
-  const { month, dow, hour } = localParts(ts, tz);
+  const { year, month, day, dow, hour } = localParts(ts, tz);
   // Most-specific matching period wins regardless of array order (deliverable
   // convergence cycle 1, pass 2): specificity = narrower month set + narrower
   // day set + narrower hour window. Ties fall back to earlier array position.
@@ -257,6 +302,7 @@ function touRate(structure: TariffStructure, ts: number, tz: string, fallbackFla
     const p = structure.energy[i];
     if (!p.months.includes(month)) continue;
     if (!p.daysOfWeek.includes(dow)) continue;
+    if (p.holidayExclusions?.some((holiday) => isTouHoliday(holiday, year, month, day))) continue;
     // Overnight-safe TOU period membership (Cycle 9, consistent with hourSpan
     // and demandWindowMatch): a 22→02 period matches hours 22,23,0,1.
     const inPeriod =
@@ -314,8 +360,38 @@ function demandWindowMatch(dc: { hourStart?: number; hourEnd?: number; daysOfWee
 export interface CostResult {
   breakdown: CostBreakdown;
   monthlyDetails: MonthlyDemandDetail[];
-  monthlyCosts: Array<{ month: string; energy: number; demand: number; fixed: number; cp: number; total: number; exportCredit: number }>;
+  monthlyCosts: Array<{ month: string; energy: number; riders: number; demand: number; fixed: number; cp: number; total: number; exportCredit: number }>;
   disclosures: string[];
+  pricingStatus?: "modeled" | "modeled_subtotal" | "incomplete_rider_coverage";
+  missingRiderCoverage?: Array<{ month: string; labels: string[] }>;
+  switchRecommendationAllowed?: boolean;
+  rateCodeResolution?: { match: "exact" | "family_inferred"; disclosure: string };
+  coverage?: { firstTs: number | null; lastTs: number | null; calendarMonths: string[]; partialMonths: string[]; basis: "calendar_month" };
+  /** Conditional totals, NOT a statistical savings confidence interval. */
+  restConditionalTotal?: { usage: number; renewableClassAverage: number };
+}
+
+function monthlyBlockCharge(kwh: number, blocks: NonNullable<TariffStructure["energyBlocks"]>): number {
+  let remaining = Math.max(0, kwh);
+  let priorCeiling = 0;
+  let charge = 0;
+  for (const block of blocks) {
+    if (remaining <= 0) break;
+    const blockKwh = block.upToKwh == null ? remaining : Math.max(0, Math.min(remaining, block.upToKwh - priorCeiling));
+    charge += blockKwh * block.ratePerUnit;
+    remaining -= blockKwh;
+    if (block.upToKwh != null) priorCeiling = block.upToKwh;
+  }
+  return charge;
+}
+
+function monthWithinRiderWindow(month: string, validFrom?: string, validTo?: string): boolean {
+  const monthStart = `${month}-01`;
+  const [year, mon] = month.split("-").map(Number);
+  const monthEnd = new Date(Date.UTC(year, mon, 0)).toISOString().slice(0, 10);
+  // Billing-month riders apply when their inclusive date window overlaps any
+  // part of the month (for example, an Oct 1 effective rider applies to Oct).
+  return (!validFrom || monthEnd >= validFrom) && (!validTo || monthStart <= validTo);
 }
 
 /**
@@ -323,7 +399,19 @@ export interface CostResult {
  * ratchet, CP proxy, export credits. Points may include negative usage
  * (net metering export intervals).
  */
-export function costOnTariff(points: IntervalPoint[], structure: TariffStructure, opts?: { cpTopNOverride?: number; tz?: string }): CostResult {
+export interface TariffPricingOptions {
+  cpTopNOverride?: number;
+  tz?: string;
+  contractCapacityKw?: number;
+  priorBilledDemand?: Array<{ month: string; billedDemandKw: number }>;
+  primaryVoltage?: boolean;
+  hasSolar?: boolean;
+  restTreatment?: "usage" | "renewable_class_average" | "unknown";
+  /** Re-resolved by the account caller; never infer the bill code from a tariff FK. */
+  rateCodeResolution?: { match: "exact" | "family_inferred"; disclosure: string } | null;
+}
+
+export function costOnTariff(points: IntervalPoint[], structure: TariffStructure, opts?: TariffPricingOptions): CostResult {
   const tz = opts?.tz ?? DEFAULT_TZ;
   const disclosures: string[] = [];
   const touFallback = { used: false };
@@ -335,6 +423,16 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     byMonth.set(mk, arr);
   }
   const months = Array.from(byMonth.keys()).sort();
+  const missingRiderCoverage = months.flatMap((month) => {
+    const labels = (structure.requiredRiderLabels ?? []).filter((label) =>
+      !(structure.riders ?? []).some((r) => r.label === label && monthWithinRiderWindow(month, r.validFrom, r.validTo)));
+    if (structure.verifiedThrough && month > structure.verifiedThrough.slice(0, 7)) labels.push("unverified future rate period");
+    return labels.length ? [{ month, labels }] : [];
+  });
+  const restTreatment = opts?.restTreatment ?? (opts?.hasSolar === false ? "usage" : "unknown");
+  const hasRenewableRest = structure.riders?.some((r) => r.renewableClassAverageUsd != null) ?? false;
+  let restUsageTotal = 0;
+  let restFlatTotal = 0;
 
   // Monthly peaks per demand-charge window
   const monthlyPeaksAll: Array<{ month: string; peakKw: number; peakTs: number }> = [];
@@ -351,7 +449,10 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     }
     monthlyPeaksAll.push({ month: mk, peakKw: pk, peakTs: pkTs });
   }
-  const monthlyDetails = applyRatchet(monthlyPeaksAll, structure.ratchet);
+  const monthlyDetails = applyRatchet(monthlyPeaksAll, structure.ratchet, {
+    demandMinKw: structure.demandMinKw, contractCapacityKw: opts?.contractCapacityKw,
+    priorBilledDemand: opts?.priorBilledDemand,
+  });
   const detailByMonth = new Map(monthlyDetails.map((m) => [m.month, m]));
   // Batch-46 (pass 2052): hoist the CP $/kW-month determinant ABOVE the monthly
   // loop so the minimum-bill floor sees the month's FULL charges. Previously the
@@ -375,6 +476,7 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
   }
   let energyTotal = 0;
   let minBillTotal = 0; // Batch-40 (pass 1742): explicit minimum-bill uplift component
+  const riderTotals = new Map<string, number>();
   let demandTotal = 0;
   let fixedTotal = 0;
   let exportTotal = 0;
@@ -383,10 +485,12 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
   for (const mk of months) {
     const pts = byMonth.get(mk)!;
     let mEnergy = 0;
+    let mImportedKwh = 0;
     let mExport = 0;
     for (const p of pts) {
       if (p.usage >= 0) {
-        mEnergy += p.usage * touRate(structure, p.ts, tz, touFallback);
+        mImportedKwh += p.usage;
+        if (!structure.energyBlocks?.length) mEnergy += p.usage * touRate(structure, p.ts, tz, touFallback);
       } else {
         // Cycle 5: export asymmetry — credit at export rate only
         const er = structure.exportRate;
@@ -398,6 +502,22 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
           mExport += -p.usage * er.ratePerKwh;
         }
       }
+    }
+    if (structure.energyBlocks?.length) mEnergy = monthlyBlockCharge(mImportedKwh, structure.energyBlocks);
+    let mRiders = 0;
+    for (const rider of structure.riders ?? []) {
+      if (!monthWithinRiderWindow(mk, rider.validFrom, rider.validTo)) continue;
+      const base = rider.basis === "billing_demand_kw" ? detailByMonth.get(mk)!.billedDemandKw : mImportedKwh;
+      const uncapped = base * rider.ratePerUnit;
+      const usageAmount = rider.monthlyCapUsd != null && uncapped > 0 ? Math.min(uncapped, rider.monthlyCapUsd) : uncapped;
+      const amount = restTreatment === "renewable_class_average" && rider.renewableClassAverageUsd != null
+        ? rider.renewableClassAverageUsd : usageAmount;
+      if (rider.renewableClassAverageUsd != null) {
+        restUsageTotal += usageAmount;
+        restFlatTotal += rider.renewableClassAverageUsd;
+      }
+      mRiders += amount;
+      riderTotals.set(rider.label, (riderTotals.get(rider.label) ?? 0) + amount);
     }
     // Demand charges: each charge computes its OWN windowed peak (windowPeak is
     // local per-charge, so anytime and windowed charges never clobber each other).
@@ -441,11 +561,14 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       mDemand += windowPeak * dc.ratePerKw;
     }
     groupPeaks.forEach((g) => { mDemand += g.peak * g.ratePerKw; });
+    if (opts?.primaryVoltage === true && structure.primaryVoltageDemandCreditPct != null) {
+      mDemand *= 1 - structure.primaryVoltageDemandCreditPct;
+    }
     const mFixed = structure.fixedMonthly;
     // Minimum bill applies to charges BEFORE export credits (cycle 1, pass 12):
     // export credits reduce the bill after the minimum floor is established,
     // so exporters are not silently stripped of credit value by the floor.
-    let mCharges = mEnergy + mDemand + mFixed;
+    let mCharges = mEnergy + mRiders + mDemand + mFixed;
     // Batch-40 (pass 1742): the minimum-bill uplift is tracked as an EXPLICIT
     // component instead of being folded invisibly into the monthly total. The
     // old code raised monthly totals to the floor while breakdown.energy/
@@ -473,7 +596,7 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     // Batch-30 (pass 1072): cp starts 0 here; the CP fold below fills it so
     // Σ(monthly.demand) ≡ breakdown.demand and Σ(monthly.cp) ≡ breakdown.cp —
     // monthly rows and the aggregate breakdown use identical line semantics.
-    monthlyCosts.push({ month: mk, energy: mEnergy, demand: mDemand, fixed: mFixed, cp: 0, total: mTotal, exportCredit: mExport });
+    monthlyCosts.push({ month: mk, energy: mEnergy, riders: mRiders, demand: mDemand, fixed: mFixed, cp: 0, total: mTotal, exportCredit: mExport });
   }
 
   // CP proxy charge
@@ -590,6 +713,17 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       "Demand ratchet applied in one or more months — billed demand reflects the tariff's ratchet floor from prior-period peaks, not that month's actual peak.",
     );
   }
+  const demandMinKw = structure.demandMinKw;
+  if (demandMinKw != null && monthlyDetails.some((m) => m.actualPeakKw < demandMinKw)) {
+    disclosures.push(`A ${demandMinKw.toFixed(0)} kW minimum billing demand applies in months whose measured/ratcheted demand is lower.`);
+  }
+  if (structure.energyBlocks?.length) {
+    disclosures.push("Energy charges use the tariff's progressive monthly usage blocks, applied to total imported kWh in each billing month.");
+  }
+  if (riderTotals.size > 0) {
+    disclosures.push(`Applied date-versioned riders by calendar month: ${Array.from(riderTotals.keys()).join(", ")}. Energy riders use imported kWh; demand-based TCA uses billed kW. Filed caps and validity windows apply.`);
+  }
+  for (const note of structure.notes ?? []) disclosures.push(note);
   // Batch-16 (pass 272): scope this disclosure to types that actually credit at a
   // non-retail rate. net_metering_retail credits at full retail (disclosure would
   // mislead), and "zero" pays nothing ("credited at buyback rate" would be false).
@@ -604,10 +738,50 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       `A minimum-bill floor raised charges by $${minBillTotal.toFixed(2)} across the billed span — shown as a separate "minimum-bill adjustment" line so the energy/demand/fixed components still reflect actual metered charges.`,
     );
   }
-  const total = energyTotal + demandTotal + fixedTotal + (cp ?? 0) + minBillTotal - exportTotal;
+  const riders = Array.from(riderTotals, ([label, amount]) => ({ label, amount }));
+  const riderTotal = riders.reduce((sum, rider) => sum + rider.amount, 0);
+  const total = energyTotal + riderTotal + demandTotal + fixedTotal + (cp ?? 0) + minBillTotal - exportTotal;
+  const partialMonths = months.filter((month) => {
+    const [y, m] = month.split("-").map(Number);
+    const expectedMinutes = new Date(Date.UTC(y, m, 0)).getUTCDate() * 1440;
+    return byMonth.get(month)!.reduce((sum, p) => sum + Math.max(0, p.durationMin), 0) < expectedMinutes - 60;
+  });
+  if (structure.billingCaveat) disclosures.push(structure.billingCaveat);
+  if (missingRiderCoverage.length) disclosures.push(`Incomplete rider coverage: ${missingRiderCoverage.map((r) => `${r.month}: ${r.labels.join(", ")}`).join("; ")}. Only verified versions are included; missing charges are omitted, NOT assumed zero. Not a complete bill or a basis for a switch recommendation.`);
+  if (structure.ratchet?.determinant === "billed") {
+    disclosures.push("Demand ratchet uses the greatest preceding billed demand within 11 calendar months, including earlier modeled floors; gaps are not treated as adjacent months.");
+    if (opts?.contractCapacityKw == null) disclosures.push("Contract capacity is unknown: the filed class minimum is used, but a larger contractual floor would increase billed demand.");
+    const first = months[0];
+    const firstIndex = first ? Number(first.slice(0, 4)) * 12 + Number(first.slice(5)) - 1 : 0;
+    const priorMonths = new Set((opts?.priorBilledDemand ?? []).filter((p) => {
+      const distance = firstIndex - (Number(p.month.slice(0, 4)) * 12 + Number(p.month.slice(5)) - 1);
+      return distance > 0 && distance <= structure.ratchet!.lookbackMonths;
+    }).map((p) => p.month));
+    if (priorMonths.size < structure.ratchet.lookbackMonths) disclosures.push("Pre-upload billed-demand history is incomplete or unavailable; ratchets use available history only and may understate the first 11 months.");
+  }
+  if (structure.primaryVoltageDemandCreditPct != null) disclosures.push(opts?.primaryVoltage === true
+    ? "Confirmed primary-voltage service: 3% credit applied to the demand charge only (sheet 220-1)."
+    : "Secondary-voltage demand charge assumed; confirmed primary-voltage service qualifies for a 3% demand-charge credit (sheet 220-1).");
+  if (hasRenewableRest) disclosures.push(restTreatment === "renewable_class_average"
+    ? "REST uses the filed renewable class-average monthly charge, independent of imported kWh; incentive/interconnection eligibility must be confirmed (sheet 706, 801-2)."
+    : restTreatment === "usage"
+      ? "REST uses ordinary supplied-energy charges and the monthly cap; no qualifying renewable installation assumed."
+      : `REST treatment unconfirmed: subtotal assumes ordinary usage/cap. Renewable class-average treatment changes this covered-period subtotal by $${(restFlatTotal - restUsageTotal).toFixed(2)}; confirm incentive/interconnection dates before relying on solar savings.`);
+  if (opts?.rateCodeResolution?.match === "family_inferred") disclosures.push(opts.rateCodeResolution.disclosure);
+  if (structure.requiredRiderLabels?.length) disclosures.push(`Calendar-month modeled subtotal, not utility billing-cycle reproduction: ${months.length} touched month(s), each with a full fixed charge.${partialMonths.length ? ` Partial interval coverage: ${partialMonths.join(", ")}.` : ""} Not annualized; no seasonal extrapolation is implied.`);
   return {
+    pricingStatus: missingRiderCoverage.length ? "incomplete_rider_coverage" : structure.billingCaveat ? "modeled_subtotal" : "modeled",
+    missingRiderCoverage,
+    ...(opts?.rateCodeResolution ? { rateCodeResolution: opts.rateCodeResolution } : {}),
+    switchRecommendationAllowed: missingRiderCoverage.length === 0 && !structure.billingCaveat &&
+      !(hasRenewableRest && restTreatment === "unknown") && opts?.rateCodeResolution?.match !== "family_inferred",
+    coverage: { firstTs: points.length ? points.reduce((min, p) => Math.min(min, p.ts), Infinity) : null,
+      lastTs: points.length ? points.reduce((max, p) => Math.max(max, p.ts + p.durationMin * 60_000), -Infinity) : null,
+      calendarMonths: months, partialMonths, basis: "calendar_month" },
+    ...(hasRenewableRest && restTreatment === "unknown" ? { restConditionalTotal: { usage: total, renewableClassAverage: total - restUsageTotal + restFlatTotal } } : {}),
     breakdown: {
       energy: energyTotal,
+      ...(riders.length > 0 ? { riders } : {}),
       demand: demandTotal,
       // Batch-13 (pass 62, minor): `fixed` is fixedMonthly × months-with-data
       // (the covered span), not a calendar-year annualization — callers that
@@ -631,6 +805,22 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
 }
 
 /* ---------------- eligibility ---------------- */
+export function monthlyImportedKwh(points: IntervalPoint[], tz = DEFAULT_TZ): Array<{ month: string; kwh: number }> {
+  const totals = new Map<string, number>();
+  for (const p of points) {
+    const month = localParts(p.ts, tz).monthKey;
+    totals.set(month, (totals.get(month) ?? 0) + Math.max(0, p.usage));
+  }
+  return Array.from(totals, ([month, kwh]) => ({ month, kwh })).sort((a, b) => a.month.localeCompare(b.month));
+}
+
+/** Use this in every selection caller; tariff JSON conditions must not be dropped. */
+export function tariffEligibilityTerms(structure: TariffStructure) {
+  return { schoolOnly: structure.schoolOnly,
+    migrationAtConsecutiveMonthlyKwh: structure.migrationAtConsecutiveMonthlyKwh,
+    switchRequiresConfirmation: structure.switchRequiresConfirmation };
+}
+
 export function tariffEligible(
   t: {
     sector: string;
@@ -640,8 +830,12 @@ export function tariffEligible(
     /** v1.18 applicability conditions (optional — legacy callers omit them) */
     closedToNew?: boolean;
     techCondition?: "none" | "solar_only" | "non_solar_only";
+    schoolOnly?: boolean;
+    migrationAtConsecutiveMonthlyKwh?: { kwh: number; months: number };
+    switchRequiresConfirmation?: boolean;
   },
-  site: { sectorClass: string; hasSolar?: boolean; isCurrentBasis?: boolean },
+  site: { sectorClass: string; hasSolar?: boolean; buildingType?: string | null; isCurrentBasis?: boolean;
+    k12Confirmed?: boolean; switchTermsConfirmed?: boolean; monthlyImportedKwh?: Array<{ month: string; kwh: number }> },
   peakKw: number | null,
 ): { eligible: boolean; reason?: string } {
   // v1.18 §5 stage 7: applicability conditions beyond sector/size.
@@ -659,6 +853,25 @@ export function tariffEligible(
   }
   if (tech === "non_solar_only" && site.hasSolar) {
     return { eligible: false, reason: "Not open to solar customers — solar sites are restricted to solar price plans" };
+  }
+  if (t.schoolOnly && !site.isCurrentBasis && (site.buildingType !== "school" || site.k12Confirmed !== true)) {
+    return { eligible: false, reason: "K–12 school-only tariff — public/private K–12 status must be confirmed; building type alone is insufficient" };
+  }
+  const migration = t.migrationAtConsecutiveMonthlyKwh;
+  if (migration && !site.isCurrentBasis) {
+    if (!site.monthlyImportedKwh?.length) return { eligible: false, reason: "SGS migration eligibility requires monthly imported-kWh history" };
+    let consecutive = 0;
+    let previous = -Infinity;
+    for (const row of [...site.monthlyImportedKwh].sort((a, b) => a.month.localeCompare(b.month))) {
+      const [year, month] = row.month.split("-").map(Number);
+      const index = year * 12 + month - 1;
+      consecutive = row.kwh >= migration.kwh ? (index === previous + 1 ? consecutive + 1 : 1) : 0;
+      previous = index;
+      if (consecutive >= migration.months) return { eligible: false, reason: `SGS migration rule: at least ${migration.kwh.toLocaleString()} kWh in ${migration.months} consecutive calendar months requires MGS service (sheet 201)` };
+    }
+  }
+  if (t.switchRequiresConfirmation && !site.isCurrentBasis && !site.switchTermsConfirmed) {
+    return { eligible: false, reason: "Candidate alternative — eligibility confirmation required: utility approval, appropriate TOU meter where applicable, and once-per-rolling-12-month switch restriction have not been confirmed" };
   }
   // Cycle 3, pass 62: industrial sites must match industrial AND commercial
   // tariffs (industrial rates are a subset of C&I offerings).

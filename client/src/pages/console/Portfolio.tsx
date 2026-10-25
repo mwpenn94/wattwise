@@ -24,22 +24,71 @@ import { DisclaimerBanner } from "@/components/Honesty";
 import { MapView } from "@/components/Map";
 import { MapPin } from "lucide-react";
 import { Link, useLocation } from "wouter";
+import { formatSavingsRangeUsd } from "@shared/savingsRange";
+import { siteHref, useActiveSite } from "@/hooks/useActiveSite";
 
 export default function Portfolio() {
+  const { activeSiteId, sites: selectableSites, setActiveSite } = useActiveSite();
   // "all" = every site; "none" = ungrouped sites only; numeric = that entity
   const [filter, setFilter] = useState<string>("all");
   // §3i-2: additional group-by slice using site_groups tags ("g:<id>")
   const [groupFilter, setGroupFilter] = useState<string>("all");
+  const [priorityScope, setPriorityScope] = useState<"all" | "group" | "custom">("all");
+  const [priorityGroupId, setPriorityGroupId] = useState<string>("");
+  const [prioritySiteSelection, setPrioritySiteSelection] = useState<Set<number>>(new Set());
+  const [priorityItemSelection, setPriorityItemSelection] = useState<Set<string>>(new Set());
   const entityId = filter === "all" ? undefined : filter === "none" ? null : Number(filter);
   const portfolio = trpc.entities.portfolio.useQuery({ entityId });
   const groupsQ = trpc.sites.groups.useQuery();
   const entities = portfolio.data?.entities ?? [];
+  // One source of truth: the server rollup derives each site's next action
+  // from the same recommendation queue the site view uses (R4 #6).
   const allRows = portfolio.data?.sites ?? [];
   const activeGroup = groupFilter === "all" ? null : (groupsQ.data ?? []).find((g) => String(g.id) === groupFilter) ?? null;
   const rows = activeGroup ? allRows.filter((r) => activeGroup.siteIds.includes(r.siteId)) : allRows;
   const totals = portfolio.data?.totals;
   const rateConfidence = portfolio.data?.rateConfidence;
   const entitySubtotals = portfolio.data?.entitySubtotals ?? null;
+  const priorityQueryEnabled =
+    priorityScope === "all" ||
+    (priorityScope === "group" && priorityGroupId !== "") ||
+    (priorityScope === "custom" && prioritySiteSelection.size > 0);
+  const priorities = trpc.recommendations.portfolioPriorities.useQuery(
+    {
+      groupId: priorityScope === "group" && priorityGroupId !== "" ? Number(priorityGroupId) : null,
+      siteIds: priorityScope === "custom" && prioritySiteSelection.size > 0 ? Array.from(prioritySiteSelection) : null,
+    },
+    { enabled: priorityQueryEnabled },
+  );
+  const priorityUtils = trpc.useUtils();
+  const changePriority = trpc.recommendations.setState.useMutation({
+    onSuccess: async () => {
+      await Promise.all([
+        priorityUtils.recommendations.portfolioPriorities.invalidate(),
+        priorityUtils.recommendations.queue.invalidate(),
+        priorityUtils.entities.portfolio.invalidate(),
+      ]);
+      toast.success("Recommendation updated");
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const bulkPlan = trpc.recommendations.bulkSetState.useMutation({
+    onSuccess: async (_result, input) => {
+      setPriorityItemSelection(new Set());
+      await Promise.all([
+        priorityUtils.recommendations.portfolioPriorities.invalidate(),
+        priorityUtils.recommendations.queue.invalidate(),
+        priorityUtils.entities.portfolio.invalidate(),
+      ]);
+      toast.success(`${input.items.length} recommendation${input.items.length === 1 ? "" : "s"} added to plan`);
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  const reopenPriority = trpc.recommendations.reopen.useMutation({
+    onSuccess: async () => { await Promise.all([priorityUtils.recommendations.portfolioPriorities.invalidate(), priorityUtils.recommendations.queue.invalidate(), priorityUtils.entities.portfolio.invalidate()]); toast.success("Recommendation reopened"); },
+    onError: error => toast.error(error.message),
+  });
 
   // §3i-2 exception-first ranking: dollar opportunity + anomaly severity.
   // Anomalies get a large additive bump so a flagged site outranks a merely
@@ -59,8 +108,14 @@ export default function Portfolio() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <Select value={activeSiteId != null ? String(activeSiteId) : undefined} onValueChange={(value) => setActiveSite(Number(value))}>
+            <SelectTrigger className="w-64" aria-label="Active site (navigation context)"><SelectValue placeholder="Active site…" /></SelectTrigger>
+            <SelectContent>
+              {(selectableSites.data ?? []).map((site) => <SelectItem key={`active-${site.id}`} value={String(site.id)}>{site.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
           <Select value={filter} onValueChange={setFilter}>
-            <SelectTrigger className="w-52">
+            <SelectTrigger className="w-52" aria-label="Filter sites by owner">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -75,7 +130,7 @@ export default function Portfolio() {
           </Select>
           {(groupsQ.data ?? []).length > 0 && (
             <Select value={groupFilter} onValueChange={setGroupFilter}>
-              <SelectTrigger className="w-44">
+              <SelectTrigger className="w-44" aria-label="Filter sites by group">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -107,7 +162,7 @@ export default function Portfolio() {
           <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <TotalCard
               icon={<Wallet className="h-4 w-4" />}
-              label="Annual cost (modeled)"
+              label="Observed-period cost (modeled)"
               value={totals?.annualCostUsd != null ? fmtUsd(totals.annualCostUsd) : "—"}
               sub={
                 totals
@@ -115,7 +170,7 @@ export default function Portfolio() {
                       /* TUX-5: all-services line — modeled utility + entered telecom,
                          labeled distinctly so the two bases never blend. */
                       (totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd != null && ((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd ?? 0) > 0
-                        ? ` · +${fmtUsd((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd!)} connectivity (entered) = ${fmtUsd((totals as { allServicesAnnualUsd?: number | null }).allServicesAnnualUsd ?? 0)} all services`
+                        ? ` · Connectivity shown separately on its entered annual basis`
                         : ""
                     }`
                   : ""
@@ -123,9 +178,9 @@ export default function Portfolio() {
             />
             <TotalCard
               icon={<BadgeCheck className="h-4 w-4" />}
-              label="Verified savings"
-              value={totals?.verifiedSavingsUsd != null && totals.verifiedSavingsUsd > 0 ? fmtUsd(totals.verifiedSavingsUsd) : "$0"}
-              sub={totals?.verifiedSavingsUsd ? "measured vs weather-adjusted baseline" : "mark measures “I did this” to start verifying"}
+              label="Savings attribution"
+              value="Inconclusive"
+              sub="Amounts withheld until immutable baselines and unique site/month allocation are available."
             />
             <TotalCard
               icon={<Gauge className="h-4 w-4" />}
@@ -140,6 +195,136 @@ export default function Portfolio() {
               sub="eGRID annual averages"
             />
           </div>
+
+          <Card className="mt-4 border-border/70">
+            <CardHeader className="pb-2">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <CardTitle className="flex items-center gap-2 font-display text-base">
+                    <Zap className="h-4 w-4 text-primary" /> Portfolio priorities
+                  </CardTitle>
+                  <CardDescription>
+                    Standalone before-change screening estimates. Prioritize actions across sites; combined savings are not modeled.
+                  </CardDescription>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Select value={priorityScope} onValueChange={(value) => setPriorityScope(value as "all" | "group" | "custom")}>
+                    <SelectTrigger className="w-36" aria-label="Priority scope"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All sites</SelectItem>
+                      <SelectItem value="group">Saved group</SelectItem>
+                      <SelectItem value="custom">Custom sites</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {priorityScope === "group" && (
+                    <Select value={priorityGroupId} onValueChange={setPriorityGroupId}>
+                      <SelectTrigger className="w-48" aria-label="Priority group"><SelectValue placeholder="Choose group…" /></SelectTrigger>
+                      <SelectContent>
+                        {(groupsQ.data ?? []).map((group) => <SelectItem key={group.id} value={String(group.id)}>{group.name} ({group.siteIds.length})</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {priorityScope === "custom" && (
+                <div className="flex flex-wrap gap-x-4 gap-y-2 rounded-md border border-border/60 p-3 text-xs">
+                  {allRows.map((site) => (
+                    <label key={site.siteId} className="flex cursor-pointer items-center gap-1.5">
+                      <Checkbox
+                        checked={prioritySiteSelection.has(site.siteId)}
+                        onCheckedChange={(checked) => setPrioritySiteSelection((current) => {
+                          const next = new Set(current);
+                          if (checked === true) next.add(site.siteId); else next.delete(site.siteId);
+                          return next;
+                        })}
+                      />
+                      {site.name}
+                    </label>
+                  ))}
+                </div>
+              )}
+              {!priorityQueryEnabled ? (
+                <p className="py-4 text-center text-sm text-muted-foreground">Choose a saved group or at least one site to compare priorities.</p>
+              ) : priorities.isLoading ? (
+                <Skeleton className="h-40 w-full" />
+              ) : priorities.data ? (
+                <>
+                  <div className="grid gap-2 rounded-md border border-border/60 bg-muted/30 p-3 text-xs sm:grid-cols-4">
+                    <div><span className="font-medium">Progress</span><br />{priorities.data.progress.completed}/{priorities.data.progress.totalIdentified} complete ({priorities.data.progress.completionPct}%)</div>
+                    <div><span className="text-muted-foreground">In plan</span><br />{priorities.data.progress.planned + priorities.data.progress.inProgress} actions</div>
+                    <div><span className="text-muted-foreground">Combined savings</span><br />Withheld — interactions unmodeled</div>
+                    <div><span className="text-muted-foreground">Savings attribution</span><br />Inconclusive</div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{priorities.data.progress.savingsBasis}</p>
+                  <p className="text-xs text-muted-foreground">{priorities.data.progress.verificationBasis}</p>
+                  <p className="text-xs text-muted-foreground">Ranking: {priorities.data.rankingBasis}</p>
+                  {priorityItemSelection.size > 0 && (
+                    <div className="flex items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+                      <span>{priorityItemSelection.size} selected</span>
+                      <Button
+                        size="sm"
+                        disabled={bulkPlan.isPending}
+                        onClick={() => bulkPlan.mutate({
+                          status: "planned",
+                          items: priorities.data.items.filter((item) => priorityItemSelection.has(`${item.siteId}:${item.measure}`)).map((item) => ({ siteId: item.siteId, measure: item.measure, title: item.title })),
+                        })}
+                      >
+                        {bulkPlan.isPending ? "Adding…" : "Add selected to plan"}
+                      </Button>
+                    </div>
+                  )}
+                  {priorities.data.items.length === 0 ? (
+                    <p className="py-4 text-center text-sm text-muted-foreground">No active recommendations in this scope. Completed, deferred, and dismissed measures are retained in site progress.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="w-8" />
+                            <TableHead>Site</TableHead>
+                            <TableHead>Recommendation</TableHead>
+                            <TableHead className="text-right">Standalone range / yr</TableHead>
+                            <TableHead>Payback</TableHead>
+                            <TableHead>Confidence</TableHead>
+                            <TableHead>Status</TableHead>
+                            <TableHead className="text-right">Actions</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {priorities.data.items.map((item) => {
+                            const key = `${item.siteId}:${item.measure}`;
+                            return (
+                              <TableRow key={key}>
+                                <TableCell><Checkbox checked={priorityItemSelection.has(key)} onCheckedChange={(checked) => setPriorityItemSelection((current) => { const next = new Set(current); if (checked === true) next.add(key); else next.delete(key); return next; })} /></TableCell>
+                                <TableCell><Link href={`/app/explore?site=${item.siteId}`} className="font-medium text-primary hover:underline">{item.siteName}</Link></TableCell>
+                                <TableCell><span>{item.title}</span><details className="mt-0.5 text-[10px] text-muted-foreground"><summary className="cursor-pointer">Basis and all disclosures</summary><p>{item.basis}</p></details></TableCell>
+                                <TableCell className="text-right font-medium" title={item.basis}>{formatSavingsRangeUsd(item.savingsRangeUsd)}</TableCell>
+                                <TableCell className="text-xs">{item.paybackBandYears ?? "—"}</TableCell>
+                                <TableCell className="capitalize text-xs">{item.confidence}</TableCell>
+                                <TableCell><Badge variant="secondary" className="text-[10px]">{item.status === "planned" || item.status === "in_progress" ? "in plan" : "open"}</Badge></TableCell>
+                                <TableCell className="text-right"><div className="flex justify-end gap-1"><Button size="sm" variant="outline" disabled={changePriority.isPending} onClick={() => changePriority.mutate({ siteId: item.siteId, measure: item.measure, title: item.title, status: "planned" })}>Plan</Button><Button size="sm" disabled={changePriority.isPending} onClick={() => changePriority.mutate({ siteId: item.siteId, measure: item.measure, title: item.title, status: "in_progress" })}>Start</Button></div></TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
+                  {priorities.data.inactive.length > 0 && <details className="border-t pt-3 text-xs"><summary className="cursor-pointer">Completed, deferred, dismissed and needs review ({priorities.data.inactive.length})</summary><div className="mt-2 space-y-2">{priorities.data.inactive.map(item => <div key={`${item.siteId}:${item.measure}`} className="flex items-center justify-between gap-2"><span>{item.siteName} · {item.title} · {item.status.replace(/_/g, " ")}{item.deferUntil && item.status === "deferred" ? ` until ${new Date(item.deferUntil).toLocaleDateString()}` : ""}</span><Button size="sm" variant="ghost" disabled={reopenPriority.isPending} onClick={() => reopenPriority.mutate({siteId:item.siteId,measure:item.measure})}>Reopen</Button></div>)}</div></details>}
+                  {priorities.data.byMeasure.length > 0 && (
+                    <div className="border-t border-border/60 pt-3">
+                      <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">By measure</p>
+                      <div className="mt-2 grid gap-2 md:grid-cols-2">
+                        {priorities.data.byMeasure.map((measure) => <div key={measure.measure} className="rounded-md border border-border/60 p-2 text-xs"><span className="font-medium">{measure.title}</span> · {measure.sites.length} site{measure.sites.length === 1 ? "" : "s"}<span className="float-right text-muted-foreground">Combined amount withheld</span><p className="mt-1 text-[10px] text-muted-foreground">{measure.sites.map((site) => site.siteName).join(", ")}</p></div>)}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </CardContent>
+          </Card>
 
           {/* CONF-1 (Jul 21): rate-confidence rollup — how many sites' dollar
               figures stand on actual/verified pricing vs an imputed average,
@@ -166,7 +351,7 @@ export default function Portfolio() {
                       <tr className="border-b text-left text-xs text-muted-foreground">
                         <th className="py-1.5 pr-3 font-medium">Owner</th>
                         <th className="py-1.5 pr-3 font-medium">Sites</th>
-                        <th className="py-1.5 pr-3 font-medium">Annual cost (modeled)</th>
+                        <th className="py-1.5 pr-3 font-medium">Observed-period cost (modeled)</th>
                         <th className="py-1.5 pr-3 font-medium">Connectivity (entered)</th>
                         <th className="py-1.5 pr-3 font-medium">Annual usage</th>
                         <th className="py-1.5 font-medium">Open opportunity</th>
@@ -195,7 +380,7 @@ export default function Portfolio() {
                               : "—"}
                           </td>
                           <td className="py-1.5 pr-3 tabular-nums">{e.annualUsageKwh > 0 ? `${fmtNum(e.annualUsageKwh)} kWh` : "—"}</td>
-                          <td className="py-1.5 tabular-nums">{e.openOpportunityUsd > 0 ? fmtUsd(e.openOpportunityUsd) : "—"}</td>
+                          <td className="py-1.5 tabular-nums">{"Combined amount withheld"}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -253,7 +438,7 @@ export default function Portfolio() {
               {rows.length === 0 ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">
                   No sites match this filter —{" "}
-                  <Link href="/app/sites" className="text-primary underline">
+                  <Link href={siteHref("/app/sites", activeSiteId)} className="text-primary underline">
                     add or group sites
                   </Link>
                   .
@@ -265,7 +450,7 @@ export default function Portfolio() {
                       <TableHead>Site</TableHead>
                       <TableHead>Owner group</TableHead>
                       <TableHead className="text-right">Meters</TableHead>
-                      <TableHead className="text-right">Annual cost</TableHead>
+                      <TableHead className="text-right">Observed-period cost</TableHead>
                       <TableHead className="text-right">Connectivity</TableHead>
                       <TableHead className="text-right">Demand/CP $</TableHead>
                       <TableHead className="text-right">Peak kW</TableHead>
@@ -391,7 +576,7 @@ function RateConfidenceCard({
                 <li key={s.siteId} className="flex flex-wrap items-center justify-between gap-2 text-xs">
                   <span className="text-muted-foreground">
                     {s.name}
-                    {s.annualCostUsd != null ? ` · ${fmtUsd(s.annualCostUsd)}/yr modeled` : ""}
+                    {s.annualCostUsd != null ? ` · ${fmtUsd(s.annualCostUsd)} observed-period subtotal` : ""}
                   </span>
                   <Link href={`/app/upload?site=${s.siteId}`} className="font-medium text-primary underline underline-offset-2">
                     Calibrate with a bill →
@@ -457,9 +642,9 @@ function PortfolioVerifiedDialog({ open, onClose }: { open: boolean; onClose: ()
           <div>
             <div className="rounded-lg border border-border/70 bg-muted/40 p-4">
               <p className="text-xs uppercase tracking-wide text-muted-foreground">Cumulative verified savings</p>
-              <p className="mt-1 font-display text-3xl font-bold">{fmtUsd(data.data.verifiedTotalUsd)}</p>
+              <p className="mt-1 font-display text-3xl font-bold">Attribution inconclusive</p>
               <p className="mt-1 text-xs text-muted-foreground">
-                {data.data.analyzedCount}/{data.data.siteCount} sites analyzed · only measured post-implementation verdicts count — planned or estimated savings never enter this total.
+                {data.data.analyzedCount}/{data.data.siteCount} sites analyzed · historical amounts withheld: unique site/month allocation and immutable pre-change baselines are required.
               </p>
             </div>
             {data.data.perSite.length === 0 ? (
@@ -471,7 +656,7 @@ function PortfolioVerifiedDialog({ open, onClose }: { open: boolean; onClose: ()
                 <div key={s.siteId} className="mt-4">
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-semibold">{s.siteName}</p>
-                    <Badge variant="secondary" className="text-[10px]">{fmtUsd(s.verifiedSavingsUsd)} verified</Badge>
+                    <Badge variant="secondary" className="text-[10px]">Attribution inconclusive</Badge>
                   </div>
                   <Table className="mt-1.5">
                     <TableHeader>
@@ -487,9 +672,9 @@ function PortfolioVerifiedDialog({ open, onClose }: { open: boolean; onClose: ()
                       {s.verdicts.map((v, i) => (
                         <TableRow key={i}>
                           <TableCell className="text-xs">{v.measure.replace(/_/g, " ")}</TableCell>
-                          <TableCell className="text-xs">{v.status.replace(/_/g, " ")}</TableCell>
+                          <TableCell className="text-xs">{v.status === "awaiting_data" ? "awaiting data" : "inconclusive"}</TableCell>
                           <TableCell className="text-xs">{v.months}</TableCell>
-                          <TableCell className="text-right text-xs">{fmtUsd(v.verifiedSavingsUsd)}</TableCell>
+                          <TableCell className="text-right text-xs">{"Withheld"}</TableCell>
                           <TableCell className="text-xs">{v.chip}</TableCell>
                         </TableRow>
                       ))}
@@ -539,7 +724,7 @@ function PortfolioMap({
           <MapPin className="h-4 w-4 text-primary" /> Portfolio map
         </CardTitle>
         <p className="text-xs text-muted-foreground">
-          Pins sized by what you could save — red means an anomaly needs attention. Click a pin to open that site.
+          Pins colored by standalone screening midpoint (not additive savings) — red means an anomaly needs attention. Click a pin to open that site.
         </p>
       </CardHeader>
       <CardContent>
@@ -556,8 +741,8 @@ function PortfolioMap({
                 const dot = document.createElement("div");
                 const usd = r.topOpportunityUsd;
                 dot.style.cssText = `background:${colorFor(r)};color:#fff;border-radius:9999px;padding:4px 8px;font:600 11px/1.2 system-ui;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:pointer;white-space:nowrap`;
-                dot.textContent = usd != null && usd > 0 ? `${r.name} · $${Math.round(usd).toLocaleString()}/yr` : r.name;
-                dot.title = r.analyzed ? (usd != null && usd > 0 ? `Open opportunity ≈ $${Math.round(usd).toLocaleString()}/yr` : "Analyzed — no open opportunity sized yet") : "Not analyzed yet";
+                dot.textContent = r.name;
+                dot.title = r.analyzed ? (usd != null && usd > 0 ? "Standalone screening priority — see range and basis in the table" : "Analyzed — no open opportunity sized yet") : "Not analyzed yet";
                 const marker = new google.maps.marker.AdvancedMarkerElement({ map, position: pos, title: r.name, content: dot });
                 marker.addListener("click", () => {
                   window.location.href = `/app?site=${r.siteId}`;
@@ -713,6 +898,8 @@ type PortfolioRow = {
   connectivityUsdPerSqft?: number | null;
   topOpportunityTitle: string | null;
   topOpportunityUsd: number | null;
+  topOpportunityRange?: {low:number;high:number} | null;
+  topOpportunityBasis?: string | null;
   hasAnomaly: boolean;
   anomalyTitle: string | null;
 };
@@ -738,17 +925,18 @@ function ExceptionRow({ r, expanded }: { r: PortfolioRow; expanded?: boolean }) 
           )}
         </div>
         {r.topOpportunityUsd != null && r.topOpportunityUsd > 0 && (
-          <span className="font-display text-sm font-bold text-primary">{fmtUsd(r.topOpportunityUsd)}/yr open</span>
+          <span className="font-display text-sm font-bold text-primary">{formatSavingsRangeUsd(r.topOpportunityRange)}/yr standalone</span>
         )}
       </div>
       {expanded && (
         <div className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
           {r.hasAnomaly && r.anomalyTitle && <p className="text-amber-600 dark:text-amber-400">{r.anomalyTitle}</p>}
           {r.topOpportunityTitle ? (
-            <p>
+            <div>
               Biggest open opportunity: {r.topOpportunityTitle}
-              {r.topOpportunityUsd != null ? ` — est. ${fmtUsd(r.topOpportunityUsd)}/yr` : ""}
-            </p>
+              {r.topOpportunityRange ? ` — ${formatSavingsRangeUsd(r.topOpportunityRange)}/yr standalone` : ""}
+              {r.topOpportunityBasis && <details><summary className="cursor-pointer">Basis</summary>{r.topOpportunityBasis}</details>}
+            </div>
           ) : r.analyzed ? (
             <p>No open opportunities — everything found so far is marked implemented or none were material.</p>
           ) : (

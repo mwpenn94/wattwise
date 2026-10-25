@@ -12,7 +12,8 @@ import { getDb } from "../db";
 import { intervals } from "../../drizzle/schema";
 import type { ParsedMeterSeries } from "./parsers";
 
-type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type BaseDb = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type Db = Pick<BaseDb, "select" | "insert" | "update">;
 
 export interface WriteResult {
   inserted: number;
@@ -61,6 +62,7 @@ export async function writeIntervals(
   const supersededIds = new Set<number>();
   const rowsToInsert: Array<typeof intervals.$inferInsert> = [];
 
+  let overlapStart = 0;
   for (const p of series.points) {
     const key = `${p.ts}:${p.durationMin}`;
     const exact = exactKey.get(key);
@@ -86,9 +88,14 @@ export async function writeIntervals(
     }
     // Cycle 5: partial-overlap detection (different duration records covering this window)
     const pEnd = p.ts + p.durationMin * 60000;
-    const overlapping = others.filter(
-      (e) => e.durationMin !== p.durationMin && e.ts < pEnd && e.ts + e.durationMin * 60000 > p.ts && !supersededIds.has(e.id),
-    );
+    // Incoming points are sorted. Discard expired prefixes once rather than
+    // rescanning a year of records for each new point.
+    while (overlapStart < others.length && others[overlapStart].ts + others[overlapStart].durationMin * 60000 <= p.ts) overlapStart++;
+    const overlapping: typeof others = [];
+    for (let j = overlapStart; j < others.length && others[j].ts < pEnd; j++) {
+      const e = others[j];
+      if (e.durationMin !== p.durationMin && e.ts + e.durationMin * 60000 > p.ts && !supersededIds.has(e.id)) overlapping.push(e);
+    }
     if (overlapping.length > 0) {
       const maxExistingPrec = Math.max(...overlapping.map((o) => o.precedence));
       if (precedence >= maxExistingPrec) {

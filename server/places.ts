@@ -6,7 +6,8 @@
  * free-text regex guess. The old parse path remains as a disclosed fallback
  * for users who type free text and never pick a suggestion.
  */
-import { makeRequest } from "./_core/map";
+import { makeRequest, type GeocodingResult } from "./_core/map";
+import { ENV } from "./_core/env";
 
 export interface PlaceSuggestion {
   placeId: string;
@@ -123,6 +124,87 @@ export async function placeAutocomplete(query: string): Promise<PlaceSuggestion[
 function extractCity(components: Array<{ long_name: string; short_name: string; types: string[] }>): string | null {
   const byType = (t: string) => components.find((c) => c.types.includes(t));
   return byType("locality")?.long_name ?? byType("sublocality_level_1")?.long_name ?? byType("administrative_area_level_3")?.long_name ?? null;
+}
+
+export type AddressGeocode =
+  | { kind: "precise"; lat: number; lng: number; formattedAddress: string; city: string | null; state: string | null; zip: string | null }
+  | { kind: "not_precise" };
+
+/**
+ * Geocode a stored street address for an on-demand footprint lookup. A city,
+ * ZIP, route, or approximate locality result must never become a building pin.
+ */
+export const ADDRESS_GEOCODE_BUDGET_MS = 3_000;
+export async function geocodeAddress(
+  address: string,
+  expected: { city?: string | null; state?: string | null; zip?: string | null } = {},
+): Promise<AddressGeocode> {
+  const query = address.trim();
+  if (!query) return { kind: "not_precise" };
+  // The general Maps helper has no cancellation contract. This narrow request
+  // owns an abort controller through body consumption; no key or URL is logged.
+  if (!ENV.forgeApiUrl || !ENV.forgeApiKey) throw new Error("Address lookup is unavailable; retry or draw manually.");
+  const url = new URL(`${ENV.forgeApiUrl.replace(/\/+$/, "")}/v1/maps/proxy/maps/api/geocode/json`);
+  url.searchParams.set("key", ENV.forgeApiKey);
+  url.searchParams.set("address", query);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ADDRESS_GEOCODE_BUDGET_MS);
+  let response: GeocodingResult;
+  try {
+    const result = await fetch(url, { signal: controller.signal, headers: { Accept: "application/json" } });
+    if (!result.ok) throw new Error("Address lookup provider unavailable; retry or draw manually.");
+    response = await result.json();
+  } catch {
+    throw new Error(controller.signal.aborted
+      ? "Address lookup timed out; retry or locate the building on the map and draw manually."
+      : "Address lookup provider unavailable; retry or draw manually.");
+  } finally {
+    clearTimeout(timer);
+  }
+  if (response.status === "ZERO_RESULTS") return { kind: "not_precise" };
+  if (response.status !== "OK" || !response.results?.length) {
+    throw new Error(`Address geocoding failed (${response.status})`);
+  }
+  const result = response.results[0];
+  if (response.results.length !== 1 || (result as typeof result & { partial_match?: boolean }).partial_match) {
+    return { kind: "not_precise" };
+  }
+  const hasStreetLevelType = result.types?.some((type) => ["street_address", "premise", "subpremise"].includes(type));
+  // ROOFTOP / RANGE_INTERPOLATED are street-level. GEOMETRIC_CENTER is only
+  // building-level when the matched feature itself is a premise/subpremise
+  // (the parcel/building centroid) — never for a route, locality or region.
+  const isPremise = result.types?.some((type) => ["premise", "subpremise"].includes(type));
+  // A premise centroid is only trusted when its house number is the one asked for.
+  const askedNumber = query.match(/^\s*(\d+[A-Za-z]?)\b/)?.[1]?.toLowerCase() ?? null;
+  const matchedNumber = (result.address_components ?? []).find((c) => c.types.includes("street_number"))?.long_name?.toLowerCase() ?? null;
+  const premiseCentroidOk = result.geometry?.location_type === "GEOMETRIC_CENTER" && !!isPremise &&
+    askedNumber != null && matchedNumber === askedNumber;
+  const hasStreetLevelPrecision = ["ROOFTOP", "RANGE_INTERPOLATED"].includes(result.geometry?.location_type) || premiseCentroidOk;
+  const location = result.geometry?.location;
+  if (!hasStreetLevelType || !hasStreetLevelPrecision || !location ||
+      !Number.isFinite(location.lat) || !Number.isFinite(location.lng) ||
+      Math.abs(location.lat) > 90 || Math.abs(location.lng) > 180) {
+    return { kind: "not_precise" };
+  }
+  const components = result.address_components ?? [];
+  const state = components.find((component) => component.types.includes("administrative_area_level_1"))?.short_name ?? null;
+  const zip = components.find((component) => component.types.includes("postal_code"))?.long_name ?? null;
+  const city = extractCity(components);
+  const normalize = (v: string | null | undefined) => (v ?? "").trim().toLowerCase();
+  if ((expected.city?.trim() && normalize(expected.city) !== normalize(city)) ||
+      (expected.state?.trim() && normalize(expected.state) !== normalize(state)) ||
+      (expected.zip?.trim() && expected.zip.trim().slice(0, 5) !== zip?.slice(0, 5))) {
+    return { kind: "not_precise" };
+  }
+  return {
+    kind: "precise",
+    lat: location.lat,
+    lng: location.lng,
+    formattedAddress: result.formatted_address,
+    city,
+    state: state && /^[A-Z]{2}$/.test(state) ? state : null,
+    zip: zip && /^\d{5}/.test(zip) ? zip.slice(0, 5) : null,
+  };
 }
 
 /** Resolve a selected suggestion into verified address components. */

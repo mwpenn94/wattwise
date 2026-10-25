@@ -15,6 +15,7 @@
  */
 import * as h from "./dbHelpers";
 import { MODELED_ESTIMATES_DISCLAIMER } from "../shared/wattwise";
+import { creditableVerifiedUsd, sanitizeProofRows } from "./proofAttribution";
 
 /** Confidence chip per §3l print rule. */
 export type Chip = "Est." | "Good" | "Measured";
@@ -210,14 +211,16 @@ export async function assembleReportData(siteId: number, userId: number): Promis
     dataAsOf,
   };
 
-  // Prove-it verdict ledger.
-  const verdicts: VerdictRow[] = impls.map((i) => {
+  // Prove-it verdict ledger. R4 #2: unattributable whole-site credit is
+  // withheld (0, "Est.") rather than summed once per measure.
+  const verdicts: VerdictRow[] = sanitizeProofRows(impls).map((i) => {
     const v = (i.verdicts ?? []) as unknown[];
     return {
       measure: i.measure,
       implementedAt: i.implementedAt,
       status: i.status,
-      verifiedSavingsUsd: i.verifiedSavingsUsd ?? 0,
+      // Only status-verified, attributable dollars are reported as verified.
+      verifiedSavingsUsd: creditableVerifiedUsd(i),
       months: Array.isArray(v) ? v.length : 0,
       chip: i.status === "verified" ? "Measured" : "Est.",
     };
@@ -411,13 +414,13 @@ export async function assemblePortfolioVerified(userId: number): Promise<Portfol
     const analysis = await h.getLatestAnalysis(s.id, userId);
     if (analysis) analyzedCount += 1;
     if (impls.length === 0) continue;
-    const verdicts: VerdictRow[] = impls.map((i) => {
+    const verdicts: VerdictRow[] = sanitizeProofRows(impls).map((i) => {
       const v = (i.verdicts ?? []) as unknown[];
       return {
         measure: i.measure,
         implementedAt: i.implementedAt,
         status: i.status,
-        verifiedSavingsUsd: i.verifiedSavingsUsd ?? 0,
+        verifiedSavingsUsd: creditableVerifiedUsd(i),
         months: Array.isArray(v) ? v.length : 0,
         chip: i.status === "verified" ? ("Measured" as Chip) : ("Est." as Chip),
       };

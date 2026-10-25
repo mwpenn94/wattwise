@@ -4,7 +4,7 @@
  * Menu items are defined inside DashboardLayout.tsx.
  */
 import DashboardLayout from "@/components/DashboardLayout";
-import { Route, Switch } from "wouter";
+import { Route, Switch, useSearch } from "wouter";
 import Dashboard from "./console/Dashboard";
 import HomeFeed from "./console/HomeFeed";
 import Sites from "./console/Sites";
@@ -18,6 +18,11 @@ import Account from "./console/Account";
 import Reports from "./console/Reports";
 import ConvergencePanel from "./console/ConvergencePanel";
 
+function TelecomRedirect() {
+  const search = useSearch();
+  return <Redirect to={`/app/explore${search ? `?${search}` : ""}`} />;
+}
+
 export default function AppShell() {
   return (
     <DashboardLayout>
@@ -30,7 +35,7 @@ export default function AppShell() {
         <Route path="/app/wizard" component={Wizard} />
         <Route path="/app/scenarios" component={Scenarios} />
         <Route path="/app/tariffs" component={Tariffs} />
-        <Route path="/app/telecom">{() => <Redirect to="/app/explore" />}</Route>
+        <Route path="/app/telecom" component={TelecomRedirect} />
         <Route path="/app/reports" component={Reports} />
         <Route path="/app/convergence" component={ConvergencePanel} />
         <Route path="/app/account" component={Account} />

@@ -102,8 +102,9 @@ function CompassChip({ deg }: { deg: number }) {
   );
 }
 
-export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
+export default function SiteGeometryPanel({ siteId, canEdit = true }: { siteId: number; canEdit?: boolean }) {
   const utils = trpc.useUtils();
+  const siteQuery = trpc.sites.get.useQuery({ siteId });
   const stored = trpc.sites.geometryGet.useQuery({ siteId }, { staleTime: 30_000 });
   const resolve = trpc.sites.geometryResolve.useMutation();
   const confirm = trpc.sites.geometryConfirm.useMutation({
@@ -128,6 +129,10 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [fallback, setFallback] = useState<Candidate | null>(null);
   const [note, setNote] = useState<string>("");
+  const [outcome, setOutcome] = useState<"ok" | "missing_coordinates" | "address_not_precise" | "no_footprint_found" | "provider_error" | null>(null);
+  const [manualMode, setManualMode] = useState(false);
+  const [resolvedRevision, setResolvedRevision] = useState<number | undefined>();
+  const requestVersion = useRef(0);
   const [selected, setSelected] = useState<number | "prism" | null>(null);
   const [drawing, setDrawing] = useState(false);
   const [drawnRing, setDrawnRing] = useState<Ring>([]);
@@ -137,10 +142,13 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
   const drawMarkersRef = useRef<google.maps.Marker[]>([]);
   const drawPreviewRef = useRef<google.maps.Polygon | null>(null);
   const clickListenerRef = useRef<google.maps.MapsEventListener | null>(null);
-  const [mapReady, setMapReady] = useState(false);
+  const [mapReady, setMapReady] = useState<google.maps.Map | null>(null);
+  const [resolveStartedAt, setResolveStartedAt] = useState<number | null>(null);
+  const [resolveElapsedMs, setResolveElapsedMs] = useState(0);
   const drawnSqft = useMemo(() => ringAreaSqftClient(drawnRing), [drawnRing]);
 
-  const geom = stored.data;
+  const currentRevision = siteQuery.data?.locationRevision;
+  const geom = stored.data?.locationRevision === currentRevision ? stored.data : null;
   const hasStored = geom != null && geom.footprintSqft != null;
 
   const clearOverlays = () => {
@@ -154,6 +162,22 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     drawPreviewRef.current?.setMap(null);
     drawPreviewRef.current = null;
   };
+
+  useEffect(() => {
+    requestVersion.current++;
+    setCandidates([]); setFallback(null); setOutcome(null); setSelected(null);
+    setDrawing(false); setDrawnRing([]); setManualMode(false); setPendingReplace(null);
+    setResolveError(null); setResolvedRevision(undefined);
+    clearOverlays(); clearDrawArtifacts();
+    mapRef.current = null; setMapReady(null);
+    void utils.sites.geometryGet.invalidate({ siteId });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [siteId, currentRevision]);
+
+  useEffect(() => () => {
+    requestVersion.current++;
+    clearOverlays(); clearDrawArtifacts(); clickListenerRef.current?.remove();
+  }, []);
 
   const paintCandidates = (cands: Candidate[], fb: Candidate | null, sel: number | "prism" | null) => {
     if (!mapRef.current) return;
@@ -204,6 +228,17 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     if (mapReady) paintCandidates(candidates, fallback, selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady, candidates, fallback, selected, geom]);
+
+  useEffect(() => {
+    if (!resolve.isPending || resolveStartedAt == null) {
+      setResolveElapsedMs(0);
+      return;
+    }
+    const updateElapsed = () => setResolveElapsedMs(Date.now() - resolveStartedAt);
+    updateElapsed();
+    const interval = window.setInterval(updateElapsed, 250);
+    return () => window.clearInterval(interval);
+  }, [resolve.isPending, resolveStartedAt]);
 
   // Draw-your-own footprint: tap vertices; markers + a live preview polygon
   // track the ring. POI icons are disabled while drawing so taps near labeled
@@ -259,23 +294,36 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawing, drawnRing, mapReady]);
 
-  const startResolve = () => {
+  const startResolve = (refresh = false) => {
+    const version = ++requestVersion.current;
+    // Clear the old lookup immediately: failures must not resurrect its polygon.
+    setCandidates([]); setFallback(null); setSelected(null); setOutcome(null);
+    setDrawing(false); setDrawnRing([]); setPendingReplace(null); setManualMode(false);
+    clearOverlays(); clearDrawArtifacts();
+    mapRef.current = null; setMapReady(null);
     setResolveError(null);
+    setResolveStartedAt(Date.now());
     resolve.mutate(
-      { siteId },
+      { siteId, refresh },
       {
         onSuccess: (res) => {
+          if (version !== requestVersion.current) return;
           const cands = (res.candidates ?? []) as unknown as Candidate[];
           const fb = (res.fallback ?? null) as unknown as Candidate | null;
           setCandidates(cands);
           setFallback(fb);
           setNote(res.note);
+          setOutcome(res.outcome);
+          setResolvedRevision(res.locationRevision);
           setSelected(cands.length > 0 ? 0 : fb ? "prism" : null);
+          setResolveStartedAt(null);
         },
         onError: (e) => {
+          if (version !== requestVersion.current) return;
           // GEO-BUG-3: don't leave the widget blank on a failed lookup — show a
           // visible error state with a retry, and keep any stored geometry view.
           setResolveError(e.message || "Footprint lookup failed — the map sources may be busy.");
+          setResolveStartedAt(null);
         },
       },
     );
@@ -286,6 +334,7 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
     if (drawing && drawnRing.length >= 3) {
       confirm.mutate({
         siteId,
+        locationRevision: resolvedRevision ?? currentRevision,
         ring: drawnRing,
         source: "user_drawn",
         stories: drawnStories,
@@ -296,7 +345,7 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
       return;
     }
     if (selected === "prism" && fallback) {
-      confirm.mutate({ siteId, ring: fallback.ring, source: "prism", stories: fallback.stories ?? undefined });
+      confirm.mutate({ siteId, locationRevision: resolvedRevision ?? currentRevision, ring: fallback.ring, source: "prism", stories: fallback.stories ?? undefined });
       return;
     }
     if (typeof selected === "number" && candidates[selected]) {
@@ -307,6 +356,7 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
       const datasetHeight = c.heightSource === "footprint_dataset";
       confirm.mutate({
         siteId,
+        locationRevision: resolvedRevision ?? currentRevision,
         ring: c.ring,
         source: c.source ?? "osm",
         osmId: c.osmId,
@@ -335,6 +385,22 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
+        {siteQuery.data?.locationChangedAt && !hasStored && (
+          <p className="text-xs text-amber-700 dark:text-amber-400">Location changed. Previous geometry is not current; confirm a new footprint and rerun analysis. Any old hand drawing remains protected.</p>
+        )}
+        {canEdit && !resolve.isPending && (outcome || resolveError) && (
+          <Button size="sm" variant="outline" onClick={() => startResolve(true)}>
+            <RotateCcw className="h-3.5 w-3.5 mr-1" /> Retry footprint lookup
+          </Button>
+        )}
+        {canEdit && !resolve.isPending && !manualMode && (
+          <Button size="sm" variant="outline" onClick={() => {
+            setManualMode(true); setDrawing(true); setDrawnRing([]);
+            setResolvedRevision(currentRevision);
+          }}>
+            <Pencil className="h-3.5 w-3.5 mr-1" /> Locate on map and draw manually
+          </Button>
+        )}
         {hasStored && candidates.length === 0 && !resolve.isPending ? (
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <PrismView
@@ -356,35 +422,42 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
                 Source: {geom!.footprintSource === "user_drawn" ? "drawn by you — protected from auto-overwrite" : geom!.footprintSource ? geom!.footprintSource.replace(/_/g, " ") : "prism estimate"}
                 {geom!.odblDerived ? " · © OpenStreetMap contributors (ODbL)" : ""}
               </div>
-              <Button size="sm" variant="outline" onClick={startResolve} disabled={resolve.isPending}>
-                <RotateCcw className="h-3.5 w-3.5 mr-1" /> Re-resolve
-              </Button>
+              {canEdit && (
+                <Button size="sm" variant="outline" onClick={() => startResolve(true)} disabled={resolve.isPending}>
+                  <RotateCcw className="h-3.5 w-3.5 mr-1" /> Re-resolve
+                </Button>
+              )}
             </div>
           </div>
         ) : null}
 
-        {!hasStored && candidates.length === 0 && !resolve.isPending && !fallback ? (
-          <Button size="sm" onClick={startResolve}>
+        {canEdit && !hasStored && candidates.length === 0 && !resolve.isPending && !fallback && !outcome ? (
+          <Button size="sm" onClick={() => startResolve()}>
             <MapPinned className="h-4 w-4 mr-1.5" /> Find my building footprint
           </Button>
         ) : null}
 
         {resolve.isPending && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" /> Looking up mapped footprints near your site…
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>Locating your address and checking mapped footprints… {Math.max(1, Math.ceil(resolveElapsedMs / 1000))}s elapsed.</span>
           </div>
         )}
 
-        {resolveError && !resolve.isPending ? (
+        {canEdit && resolveError && !resolve.isPending ? (
           <div className="rounded-md border border-amber-300/50 bg-amber-500/10 p-2.5 text-xs space-y-1.5">
             <p className="text-amber-700 dark:text-amber-400">{resolveError}</p>
-            <Button size="sm" variant="outline" onClick={startResolve}>
-              <RotateCcw className="h-3.5 w-3.5 mr-1" /> Try again
-            </Button>
           </div>
         ) : null}
 
-        {pendingReplace ? (
+        {canEdit && outcome && !fallback && candidates.length === 0 && !resolve.isPending && !resolveError ? (
+          <div className="rounded-md border border-amber-300/50 bg-amber-500/10 p-2.5 text-xs space-y-2">
+            <p className="text-amber-700 dark:text-amber-400">{note}</p>
+            <p className="text-muted-foreground">Retry lookup, edit the site address, or locate the building on the map and trace it manually.</p>
+          </div>
+        ) : null}
+
+        {canEdit && pendingReplace ? (
           <div className="rounded-md border border-amber-300/50 bg-amber-500/10 p-2.5 text-xs space-y-1.5">
             <p className="text-amber-700 dark:text-amber-400">
               This site already has a footprint you drew yourself — it stays unless you explicitly replace it with this
@@ -406,19 +479,26 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
           </div>
         ) : null}
 
-        {(candidates.length > 0 || fallback) && !resolve.isPending ? (
+        {(candidates.length > 0 || fallback || manualMode) && !resolve.isPending ? (
           <div className="space-y-3">
             {note && <p className="text-xs text-muted-foreground">{note}</p>}
+            {outcome === "no_footprint_found" && (
+              <p className="text-xs text-muted-foreground">No footprint found in public datasets — confirm this estimate or trace the building manually.</p>
+            )}
             <MapView
               className="h-[260px] rounded-md overflow-hidden"
-              initialZoom={19}
+              initialCenter={!fallback && candidates.length === 0 ? { lat: 39.5, lng: -98.35 } : undefined}
+              initialZoom={!fallback && candidates.length === 0 ? 4 : 19}
               onMapReady={(m) => {
                 mapRef.current = m;
                 m.setMapTypeId("satellite");
-                setMapReady(true);
+                setMapReady(m);
               }}
             />
-            <div className="flex flex-wrap gap-1.5">
+            {manualMode && !fallback && candidates.length === 0 && (
+              <p className="text-xs text-muted-foreground">Overview only — no building pin has been inferred. Pan and zoom to your building before tracing its corners.</p>
+            )}
+            {canEdit && <div className="flex flex-wrap gap-1.5">
               {candidates.map((c, i) => (
                 <Button
                   key={c.osmId ?? i}
@@ -457,9 +537,9 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
               >
                 <Pencil className="h-3.5 w-3.5 mr-1" /> {drawing ? "Cancel drawing" : "Draw it myself"}
               </Button>
-            </div>
+            </div>}
 
-            {drawing && (
+            {canEdit && drawing && (
               <div className="space-y-2">
                 <p className="text-xs text-amber-600 dark:text-amber-400">
                   Tap the map to trace your building's corners — any shape works (L-shapes, wings, courtyards; up to 120
@@ -529,10 +609,12 @@ export default function SiteGeometryPanel({ siteId }: { siteId: number }) {
               </div>
             ) : null}
 
-            <Button size="sm" onClick={confirmSelected} disabled={confirm.isPending || (drawing ? drawnRing.length < 3 : selected == null)}>
-              {confirm.isPending ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
-              {drawing ? "Confirm drawn footprint" : "Confirm this footprint"}
-            </Button>
+            {canEdit && (
+              <Button size="sm" onClick={confirmSelected} disabled={confirm.isPending || currentRevision == null || (drawing ? drawnRing.length < 3 : selected == null)}>
+                {confirm.isPending ? <Loader2 className="h-4 w-4 mr-1.5 animate-spin" /> : null}
+                {drawing ? "Confirm drawn footprint" : selected === "prism" ? "Confirm prism estimate" : "Confirm this footprint"}
+              </Button>
+            )}
           </div>
         ) : null}
       </CardContent>

@@ -132,6 +132,17 @@ describe("persistent resolve cache", () => {
     expect(rows.size).toBe(0);
   });
 
+  it("never persists a reachable-but-empty provider-none result", async () => {
+    const { rows, cache } = fakeStore();
+    setPersistentResolveCache(cache);
+    await resolveFootprints(POINT, {
+      osmFetcher: async () => ({ elements: [] }),
+      esriFetcher: async () => ({ features: [] }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(rows.size).toBe(0);
+  });
+
   it("fails open when the persistent layer itself errors", async () => {
     setPersistentResolveCache({
       async get() {

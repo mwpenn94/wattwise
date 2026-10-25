@@ -4,11 +4,12 @@
  * opportunities, benchmark percentile card, emissions summary, and the
  * modeled-estimates disclaimer + provenance labels throughout.
  */
-import { useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { detectPersona, personaVocab } from "@/lib/persona";
 import AnalysisProgress from "@/components/AnalysisProgress";
 import DemandReview, { type DemandReviewData } from "@/components/DemandReview";
+import MeterRateReviewCard, { type MeterRateReviewData } from "@/components/MeterRateReviewCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -26,10 +27,14 @@ import { MarkImplementedDialog, ProveItSection } from "@/components/ProveIt";
 import RefineChips from "@/components/RefineChips";
 import SiteGeometryPanel from "@/components/SiteGeometryPanel";
 import UtilityServicesCard from "@/components/UtilityServicesCard";
-import { Link, useLocation, useSearch } from "wouter";
+import { siteHref, useActiveSite, useSiteRequestGuard } from "@/hooks/useActiveSite";
+import { Link } from "wouter";
 import { Printer } from "lucide-react";
 import SiteInsightsReport, { type InsightsPrintData } from "@/components/print/SiteInsightsReport";
 import { ProvenanceBadge, classifyBasis } from "@/components/ProvenanceBadge";
+import { formatSavingsRangeUsd } from "@shared/savingsRange";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { ProveItStatusChip } from "@/components/ProveIt";
 
 type Demand = {
   peakKw: number;
@@ -49,31 +54,30 @@ type Demand = {
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export default function Dashboard() {
-  const search = useSearch();
-  const [, navigate] = useLocation();
-  const urlSite = new URLSearchParams(search).get("site");
-  const sites = trpc.sites.list.useQuery();
-  const requestedSiteId = urlSite ? Number(urlSite) : null;
-  const activeSiteId = (requestedSiteId != null && sites.data?.some((s) => s.id === requestedSiteId) ? requestedSiteId : null) ?? (sites.data?.[0]?.id ?? null);
+  const { activeSiteId, activeSite, sites, setActiveSite } = useActiveSite();
+  const captureSiteRequest = useSiteRequestGuard(activeSiteId);
 
   const meters = trpc.sites.meters.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
-  // Commodity-aware meter selection: defaults to electric but every commodity
-  // on the site is switchable — gas/water meters are first-class, not hidden.
+  // Match site analysis: prefer derived coincident campus total, then MAIN.
+  // Every commodity and individual account remains available for drilldown.
   const [meterSel, setMeterSel] = useState<number | null>(null);
+  useEffect(() => {
+    setMeterSel(null);
+  }, [activeSiteId]);
   const meter =
     (meterSel != null ? meters.data?.find((m) => m.id === meterSel) : undefined) ??
-    meters.data?.find((m) => m.commodity === "electric") ??
+    meters.data?.find((m) => m.commodity === "electric" && m.meterRole === "virtual_total") ??
+    meters.data?.find((m) => m.commodity === "electric" && m.meterRole === "main") ??
+    meters.data?.find((m) => m.commodity === "electric" && !["submeter", "generation", "ev", "virtual_total"].includes(m.meterRole)) ??
+    meters.data?.find((m) => m.meterRole === "main") ??
+    meters.data?.find((m) => !["submeter", "generation", "ev", "virtual_total"].includes(m.meterRole)) ??
     meters.data?.[0];
-  const meterCommodities = useMemo(() => {
-    const seen = new Map<string, { id: number; commodity: string }>();
-    for (const m of meters.data ?? []) if (!seen.has(m.commodity)) seen.set(m.commodity, { id: m.id, commodity: m.commodity });
-    return Array.from(seen.values());
-  }, [meters.data]);
   const flowUnit = meter?.commodity === "gas" ? "therms/day" : meter?.commodity === "water" ? "gal/day" : "kW";
   const latest = trpc.analysis.latest.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const baseline = trpc.analysis.baseline.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const insights = trpc.insights.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const opps = trpc.insights.opportunities.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
+  const recommendationQueue = trpc.recommendations.queue.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   /* TELX-1: telecom findings join the savings feed (queried per active site) */
   const telecom = trpc.telecom.analyze.useQuery({ siteId: activeSiteId ?? undefined }, { enabled: activeSiteId != null });
   const stats = trpc.intervalsApi.stats.useQuery({ meterId: meter?.id ?? 0 }, { enabled: !!meter });
@@ -87,6 +91,10 @@ export default function Dashboard() {
         utils.analysis.baseline.invalidate(),
         utils.insights.list.invalidate(),
         utils.insights.opportunities.invalidate(),
+        utils.recommendations.queue.invalidate(),
+        utils.sites.meters.invalidate(),
+        utils.intervalsApi.stats.invalidate(),
+        utils.intervalsApi.window.invalidate(),
       ]);
     },
     onError: (e) => toast.error(e.message),
@@ -98,16 +106,30 @@ export default function Dashboard() {
   const [rangeDays, setRangeDays] = useState<30 | 90 | 365 | "all">(30);
   // §3e prove-it: which opportunity the "I did this" dialog is marking
   const [markTarget, setMarkTarget] = useState<{ id?: number; measure: string; title: string; expectedSavingsUsd: number | null } | null>(null);
+  const changeRecommendation = trpc.recommendations.setState.useMutation({
+    onSuccess: async (_result, input) => {
+      await Promise.all([utils.recommendations.queue.invalidate(), utils.recommendations.portfolioPriorities.invalidate(), utils.entities.portfolio.invalidate(), utils.proveIt.list.invalidate(), utils.proveIt.verifiedTotal.invalidate()]);
+      toast.success(input.status === "completed" ? "Marked complete — verification is ready for new data" : "Recommendation updated");
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const reopenRecommendation = trpc.recommendations.reopen.useMutation({
+    onSuccess: async () => {
+      await Promise.all([utils.recommendations.queue.invalidate(), utils.recommendations.portfolioPriorities.invalidate(), utils.entities.portfolio.invalidate(), utils.proveIt.list.invalidate()]);
+      toast.success("Recommendation reopened — its prove-it history is retained");
+    },
+    onError: (error) => toast.error(error.message),
+  });
   // PRINT (Jul 19) — print-grade Site Insights Report: generate a verify token,
   // render the static print view (hidden print:block), then window.print().
   const [printToken, setPrintToken] = useState<string | null>(null);
-  const genReport = trpc.reports.generate.useMutation({
-    onSuccess: (res) => {
-      setPrintToken(res.token);
-      setTimeout(() => window.print(), 400);
-    },
-    onError: (e) => toast.error(e.message),
-  });
+  const [printData, setPrintData] = useState<InsightsPrintData | null>(null);
+  useEffect(() => {
+    setMarkTarget(null);
+    setPrintToken(null);
+    setPrintData(null);
+  }, [activeSiteId]);
+  const genReport = trpc.reports.generate.useMutation();
   const windowRange = useMemo(() => {
     if (!stats.data?.maxTs) return null;
     const from = rangeDays === "all" ? (stats.data.minTs ?? 0) : stats.data.maxTs - rangeDays * 86_400_000;
@@ -136,7 +158,7 @@ export default function Dashboard() {
     demand?: Demand | null;
     benchmark?: { siteEui?: number | null; percentileBand?: string | null; source?: string | null } | null;
     emissions?: { annualCo2eLb?: number; subregion?: string; factorYear?: number; mapped?: boolean } | null;
-    currentCost?: { breakdown?: { energy: number; demand: number; fixed: number; total: number; cp?: number | null; minBillAdjustment?: number } } | null;
+    currentCost?: { disclosures?: string[]; pricingStatus?: string; breakdown?: { energy: number; demand: number; fixed: number; total: number; riders?: Array<{ label: string; amount: number }>; exportCredits?: number; cp?: number | null; minBillAdjustment?: number } } | null;
     /* TEL1C-4/TUX-2: connectivity subscription spend from the pipeline summary —
        user-entered dollars in the same cost picture as metered commodities. */
     telecomSpend?: { serviceCount: number; monthlyUsd: number; annualUsd: number; findingCount: number; savingsLoUsd: number; savingsHiUsd: number } | null;
@@ -153,6 +175,7 @@ export default function Dashboard() {
       attribution?: { level?: string; meterId?: number | null; meterLabel?: string | null; meterTariffAssigned?: boolean } | null;
     } | null;
     demandReview?: DemandReviewData | null;
+    meterRateReview?: MeterRateReviewData | null;
     tariffComparisons?: Array<{
       tariffName: string;
       utilityName: string;
@@ -233,8 +256,6 @@ export default function Dashboard() {
     );
   }
 
-  const activeSite = (sites.data ?? []).find((s) => s.id === activeSiteId) ?? null;
-
   /* §3g persona fork — detected from building type, never asked. Flips
      vocabulary (home/facility) and hero rotation: residential leads with the
      rate check (plan choice), commercial leads with the demand story (load
@@ -245,8 +266,8 @@ export default function Dashboard() {
 
   // PRINT (Jul 19) — assemble the print payload from the queries this page has
   // already loaded; the print view renders only after a verify token exists.
-  const printData: InsightsPrintData | null =
-    printToken != null && activeSite != null
+  const printCandidate: InsightsPrintData | null =
+    activeSite != null
       ? {
           site: {
             name: activeSite.name,
@@ -294,6 +315,21 @@ export default function Dashboard() {
         }
       : null;
 
+  async function preparePrint() {
+    if (activeSiteId == null || !printCandidate || genReport.isPending) return;
+    const isCurrent = captureSiteRequest();
+    const snapshot = structuredClone(printCandidate);
+    try {
+      const res = await genReport.mutateAsync({ siteId: activeSiteId, kind: "site_insights" });
+      if (!isCurrent()) return;
+      setPrintData(snapshot);
+      setPrintToken(res.token);
+      setTimeout(() => { if (isCurrent()) window.print(); }, 400);
+    } catch (error) {
+      if (isCurrent()) toast.error(error instanceof Error ? error.message : "Report generation failed");
+    }
+  }
+
   return (
     <div className="container max-w-6xl py-8">
       {/* print-grade report — the only content visible when printing */}
@@ -306,6 +342,12 @@ export default function Dashboard() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl font-bold tracking-tight">Explore</h1>
+          {activeSite && (
+            <div className="mt-1" data-testid="explore-site-context">
+              <p className="text-sm font-semibold">{activeSite.name}</p>
+              <p className="text-sm text-muted-foreground">{activeSite.address || [activeSite.city, activeSite.state, activeSite.zip].filter(Boolean).join(", ") || "Address not provided"}</p>
+            </div>
+          )}
           <p className="mt-1 text-sm text-muted-foreground">
             The full picture for your {vocab.building} — all modeled estimates.
             {persona === "commercial" ? " Facility voice: demand story first." : " Home voice: rate check first."}
@@ -313,10 +355,11 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-2">
           <Select
+            disabled={genReport.isPending}
             value={activeSiteId != null ? String(activeSiteId) : ""}
             onValueChange={(value) => {
               setMeterSel(null);
-              navigate(`/app/explore?site=${encodeURIComponent(value)}`);
+              setActiveSite(Number(value));
             }}
           >
             <SelectTrigger className="w-52">
@@ -335,7 +378,7 @@ export default function Dashboard() {
           </Button>
           <Button
             variant="outline"
-            onClick={() => activeSiteId != null && genReport.mutate({ siteId: activeSiteId, kind: "site_insights" })}
+            onClick={preparePrint}
             disabled={genReport.isPending || activeSiteId == null || latest.data == null}
             title={latest.data == null ? "Run an analysis first" : "Print-optimized report — use your browser's Save as PDF"}
           >
@@ -349,26 +392,28 @@ export default function Dashboard() {
       </div>
 
       {/* §3h: live pipeline narration while an analysis runs — real stages only */}
-      {activeSiteId != null && <AnalysisProgress siteId={activeSiteId} active={run.isPending} />}
+      {activeSiteId != null && <AnalysisProgress key={`analysis:${activeSiteId}`} siteId={activeSiteId} active={run.isPending} />}
 
       {/* Progressive participation: optional add-detail chips while quick-start
           placeholders remain in effect — each names what refining unlocks. */}
       {activeSite?.attrSource === "quick_start_defaults" && activeSiteId != null && (
-        <RefineChips siteId={activeSiteId} site={activeSite} onRefined={() => run.mutate({ siteId: activeSiteId })} />
+        <RefineChips key={`refine:${activeSiteId}`} siteId={activeSiteId} site={activeSite} onRefined={() => run.mutate({ siteId: activeSiteId })} />
       )}
 
       {/* GEO stage 2b: footprint resolve + tap-to-confirm + prism massing view */}
       {activeSiteId != null && (
         <div className="mt-4">
-          <SiteGeometryPanel siteId={activeSiteId} />
+          <SiteGeometryPanel key={activeSiteId} siteId={activeSiteId} canEdit={(activeSite as { myRole?: string } | null)?.myRole !== "read_only"} />
         </div>
       )}
+
+      {activeSiteId != null && <PropertyRecordsCard key={`records:${activeSiteId}`} siteId={activeSiteId} />}
 
       {/* SVC: per-commodity service applicability — what we analyze and why,
           with one-tap correction (all-electric, well water, off-grid). */}
       {activeSiteId != null && (
         <div className="mt-4">
-          <UtilityServicesCard siteId={activeSiteId} />
+          <UtilityServicesCard key={activeSiteId} siteId={activeSiteId} />
         </div>
       )}
 
@@ -482,7 +527,7 @@ export default function Dashboard() {
             Dollar figures are priced at {summary.ratePricing.basis ?? "an imputed rate"}. Add one real bill (total $ and
             usage) and the next analysis upgrades every figure to your bill-verified rate — automatically.
           </p>
-          <Link href="/app/upload">
+          <Link href={siteHref("/app/upload", activeSiteId)}>
             <Button size="sm" variant="outline" className="h-7 border-amber-500/40 text-xs">
               Calibrate with a bill
             </Button>
@@ -554,21 +599,18 @@ export default function Dashboard() {
             {meter?.commodity === "gas" ? "Gas usage" : meter?.commodity === "water" ? "Water usage" : "Interval demand"} — {rangeDays === "all" ? "full history" : `last ${rangeDays} days of data`}
           </CardTitle>
           <div className="flex flex-wrap items-center gap-1.5">
-            {meterCommodities.length > 1 &&
-              meterCommodities.map((mc) => (
-                <button
-                  key={mc.commodity}
-                  type="button"
-                  onClick={() => setMeterSel(mc.id)}
-                  className={`rounded border px-2 py-0.5 font-mono text-[10px] capitalize transition-colors ${
-                    meter?.commodity === mc.commodity
-                      ? "border-primary bg-primary/15 text-primary"
-                      : "border-border text-muted-foreground hover:border-primary/50"
-                  }`}
-                >
-                  {mc.commodity === "gas" ? "gas" : mc.commodity}
-                </button>
-              ))}
+            {meter && (
+              <Select value={String(meter.id)} onValueChange={(value) => setMeterSel(Number(value))}>
+                <SelectTrigger className="w-72 text-xs" aria-label="Chart meter"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(meters.data ?? []).map((m) => (
+                    <SelectItem key={m.id} value={String(m.id)}>
+                      {m.meterRole === "virtual_total" ? "Campus total (coincident)" : `${m.commodity} · ${m.meterRole === "main" ? "account" : m.meterRole}`} — {m.label ?? `Meter ${m.id}`} (#{m.id})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             {([30, 90, 365, "all"] as const).map((d) => (
               <button
                 key={String(d)}
@@ -583,14 +625,15 @@ export default function Dashboard() {
                 {d === "all" ? "All" : `${d}d`}
               </button>
             ))}
-            <ProvChip>measured</ProvChip>
+            <ProvChip>{meter?.meterRole === "virtual_total" ? "derived coincident campus total" : "measured meter"}</ProvChip>
             <ProvChip>peak-preserving decimation</ProvChip>
           </div>
         </CardHeader>
         <CardContent>
+          {meter && <p className="mb-3 text-xs text-muted-foreground">{meter.label ?? `Meter ${meter.id}`} · #{meter.id}. {meter.meterRole === "virtual_total" ? "Sum of aligned service-agreement readings; demand is coincident across campus." : "Meter drilldown only; site KPIs and analysis remain campus-wide."}</p>}
           {!meter ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              No meter on this site — <Link href="/app/upload" className="text-primary underline">upload interval data</Link>{" "}
+              No meter on this site — <Link href={siteHref("/app/upload", activeSiteId)} className="text-primary underline">upload interval data</Link>{" "}
               or use the <Link href="/app/wizard" className="text-primary underline">hypothetical wizard</Link>.
             </p>
           ) : win.isLoading ? (
@@ -859,16 +902,18 @@ export default function Dashboard() {
             {costInsight?.breakdown && (
               <div className="border-t border-border pt-3">
                 <p className="flex items-center gap-2 text-sm font-medium">
-                  Modeled annual cost on current rate
+                  Modeled covered-period cost subtotal
                   <ProvenanceBadge
                     tier={(summary?.ratePricing?.tier as never) ?? null}
-                    basis={summary?.ratePricing?.basis ?? "your tariff-priced cost basis (actual)"}
+                    basis={summary?.ratePricing?.basis ?? "modeled tariff basis — confirm actual account schedule"}
                   />
                 </p>
                 <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground sm:grid-cols-4">
                   <span>energy {fmtUsd(costInsight.breakdown.energy)}</span>
                   <span>demand {fmtUsd(costInsight.breakdown.demand)}</span>
                   <span>fixed {fmtUsd(costInsight.breakdown.fixed)}</span>
+                  {costInsight.breakdown.riders?.map((r, i) => <span key={`rider-${i}-${r.label}`}>{r.label} {fmtUsd(r.amount)}</span>)}
+                  {(costInsight.breakdown.exportCredits ?? 0) > 0 && <span>export credit −{fmtUsd(costInsight.breakdown.exportCredits ?? 0)}</span>}
                   {/* Batch-23 (pass 772): CP proxy charges are tracked separately from
                       windowed demand in the engine breakdown — omitting this line made
                       energy+demand+fixed visibly fall short of total for CP tariffs. */}
@@ -882,6 +927,7 @@ export default function Dashboard() {
                 </div>
                 <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
                   Modeled estimate on your interval data and the seeded rate structure — not a bill reproduction.
+                  {costInsight.disclosures?.map((d, i) => <span key={`disc-${i}`} className="block">{d}</span>)}
                 </p>
                 {/* TUX-2 (owner Jul 23): telecom spend joins the SAME cost picture —
                     one all-services view, not a separate widget. Subscription spend
@@ -897,9 +943,9 @@ export default function Dashboard() {
                             connectivity {fmtUsd(ts.annualUsd)} <span className="text-[10px]">({ts.serviceCount} service{ts.serviceCount === 1 ? "" : "s"})</span>
                           </span>
                           <span className="text-foreground sm:col-span-2">
-                            all services {fmtUsd(costInsight.breakdown.total + ts.annualUsd)}/yr
+                            Connectivity is annual subscription spend; the utility subtotal covers the stated observed period. Not added across unlike periods.
                           </span>
-                          <Link href="/app/explore" className="text-primary hover:underline">
+                          <Link href={`/app/explore?site=${activeSiteId}`} className="text-primary hover:underline">
                             manage →
                           </Link>
                         </div>
@@ -913,7 +959,7 @@ export default function Dashboard() {
                   <div className="mt-2 border-t border-dashed border-border pt-2">
                     <p className="text-[11px] leading-relaxed text-muted-foreground">
                       Connectivity is a utility too —{" "}
-                      <Link href="/app/explore" className="text-primary hover:underline">
+                      <Link href={`/app/explore?site=${activeSiteId}`} className="text-primary hover:underline">
                         add internet/mobile services
                       </Link>{" "}
                       to include subscription spend in this cost picture and get plan-vs-market findings.
@@ -946,6 +992,7 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       )}
+      <MeterRateReviewCard review={summary?.meterRateReview} />
 
       </div>{/* end §3g hero rotation container */}
 
@@ -1097,121 +1144,86 @@ export default function Dashboard() {
           <CardTitle className="flex items-center gap-2 font-display text-base">
             <Lightbulb className="h-4 w-4 text-primary" /> Ranked opportunities
           </CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Recommendations refresh as new data arrives — re-run analysis after changes to re-rank on your current situation.
+          </p>
         </CardHeader>
         <CardContent>
-          {oppRows.length === 0 && telecomFindings.length === 0 ? (
+          {recommendationQueue.isLoading ? (
+            <Skeleton className="h-36 w-full" />
+          ) : (recommendationQueue.data?.progress.totalIdentified ?? 0) === 0 ? (
             <p className="py-4 text-center text-sm text-muted-foreground">Run analysis to generate ranked measures.</p>
           ) : (
             <div className="space-y-3">
-              {/* UX v1.9 §2 card grammar: dollar headline → one-line why →
-                  confidence chip → one-tap action → provenance expander.
-                  kWh/kW/payback live below the fold, never as the headline. */}
-              {oppRows.map((o) => (
-                <InsightCard
-                  key={o.id}
-                  rank={o.rank}
-                  title={o.title}
-                  dollars={o.estCostSavingsPerYr}
-                  framing="Save"
-                  headlineFallback={`No dollar figure yet (needs a priced rate)`}
-                  why={o.description ?? ""}
-                  confidence={chipFromConfidence(o.confidence, o.disaggregationMethod === "nilmtk_1min_plus")}
-                  /* NEXT-2: rate-provenance tier chip from the strongest rate-bearing disclosure */
-                  rateBasis={
-                    (((o.provenance as Record<string, unknown> | null)?.disclosures as string[] | undefined) ?? []).find(
-                      (d) => classifyBasis(d) != null,
-                    ) ??
-                    (summary?.ratePricing?.isFallback === false ? "your tariff-priced cost basis (actual)" : null)
-                  }
-                  extraChips={[
-                    /* Parity fix (Jul 19): gas/water measures rank alongside electric —
-                       the commodity chip makes the cross-commodity feed legible. */
-                    ...((): string[] => {
-                      const com = (o.provenance as Record<string, unknown> | null)?.commodity as string | undefined;
-                      return com && com !== "electric" ? [com === "gas" ? "natural gas" : com] : [];
-                    })(),
-                    /* TUX-3: persisted telecom measures carry their finding kind as a
-                       chip (promo expiry / market delta / right-size), mirroring the
-                       live-query cards they replace. */
-                    ...(o.measure?.startsWith("telecom_")
-                      ? [o.measure.replace(/^telecom_/, "").replace(/_\d+$/, "").replace(/_/g, " ")]
-                      : []),
-                    ...(o.ratchetAware ? ["ratchet-aware"] : []),
-                    ...(o.disaggregationMethod ? [o.disaggregationMethod.replace(/_/g, " ")] : []),
-                  ]}
-                  metrics={[
-                    ...(o.estEnergySavingsPerYr != null
-                      ? [{ label: "energy", value: `${fmtNum(o.estEnergySavingsPerYr)} ${o.energyUnit ?? "kWh"}/yr` }]
-                      : []),
-                    ...(o.estDemandSavingsKw != null
-                      ? [{ label: "demand", value: `${fmtNum(o.estDemandSavingsKw)} kW post-ratchet` }]
-                      : []),
-                    ...(o.paybackBandYears ? [{ label: "payback", value: o.paybackBandYears }] : []),
-                  ]}
-                  action={
-                    /* TUX-3: telecom measures are contract actions (call/switch), not
-                       load scenarios — route to the Telecom page instead of Scenarios. */
-                    o.measure?.startsWith("telecom_")
-                      ? {
-                          label: "Review service",
-                          onClick: () => {
-                            window.location.href = `/app/explore`;
-                          },
-                        }
-                      : {
-                          label: "Model this in Scenarios",
-                          onClick: () => {
-                            window.location.href = `/app/scenarios?site=${activeSiteId}&measure=${o.measure}`;
-                          },
-                        }
-                  }
-                  secondaryAction={{
-                    label: "I did this",
-                    onClick: () =>
-                      setMarkTarget({ id: o.id, measure: o.measure, title: o.title, expectedSavingsUsd: o.estCostSavingsPerYr ?? null }),
-                  }}
-                  provenance={[
-                    `Measure: ${o.measure.replace(/_/g, " ")} · ranked #${o.rank} by estimated annual dollar impact.`,
-                    ...(((o.provenance as Record<string, unknown> | null)?.disclosures as string[] | undefined) ?? []),
-                    o.disaggregationMethod
-                      ? `End-use split method: ${o.disaggregationMethod.replace(/_/g, " ")}.`
-                      : "Savings band from archetype priors for this building type and climate.",
-                    "Modeled estimate — run the scenario to re-price a full year on your rate.",
-                  ]}
-                />
-              ))}
-              {/* TUX-3 (owner Jul 23): telecom findings rank INLINE with building
-                  measures — same feed, one list — instead of a separate sibling card
-                  the user had to scroll past. They are contract actions (call/switch),
-                  so the action routes to the Telecom page, not Scenarios; the chip
-                  keeps the cross-category feed legible, mirroring the gas/water chips. */}
-              {telecomFindings.map((f, i) => (
-                <InsightCard
-                  key={`tel-${i}`}
-                  title={f.title}
-                  dollars={f.estAnnualSavingsHi != null && f.estAnnualSavingsLo != null ? (f.estAnnualSavingsLo + f.estAnnualSavingsHi) / 2 : null}
-                  framing="Save"
-                  headlineFallback="Action window — no dollar estimate"
-                  why={f.body}
-                  confidence={chipFromConfidence(f.confidence, false)}
-                  extraChips={["telecom", f.kind.replace(/_/g, " ")]}
-                  metrics={
-                    f.estAnnualSavingsLo != null && f.estAnnualSavingsHi != null && f.estAnnualSavingsLo !== f.estAnnualSavingsHi
-                      ? [{ label: "range", value: `$${Math.round(f.estAnnualSavingsLo)}–$${Math.round(f.estAnnualSavingsHi)}/yr` }]
-                      : []
-                  }
-                  action={{
-                    label: "Review service",
-                    onClick: () => {
-                      window.location.href = `/app/explore`;
-                    },
-                  }}
-                  provenance={[
-                    "From the connectivity services you entered — published benchmark ranges, not negotiated quotes.",
-                    ...f.disclosures,
-                  ]}
-                />
-              ))}
+              {(() => {
+                const queue = recommendationQueue.data!;
+                const progress = queue.progress;
+                return (
+                  <>
+                    <div className="grid gap-2 rounded-md border border-border/70 bg-muted/30 p-3 text-xs sm:grid-cols-4">
+                      <div><span className="font-medium">Your progress</span><br />{progress.completed} of {progress.totalIdentified} completed ({progress.completionPct}%)</div>
+                      <div title={progress.verificationBasis}><span className="text-muted-foreground">Verified to date</span><br />{progress.verifiedSavingsUsd == null ? "Withheld — attribution pending" : fmtUsd(progress.verifiedSavingsUsd)}</div>
+                      <div><span className="text-muted-foreground">Committed / yr</span><br />{formatSavingsRangeUsd(progress.committedRangeUsd)}</div>
+                      <div><span className="text-muted-foreground">Open / yr</span><br />{formatSavingsRangeUsd(progress.projectedRangeUsd)}</div>
+                    </div>
+                    {queue.active.map((item) => (
+                      <div key={item.measure} className="rounded-md border border-border/70 bg-card p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="font-display text-xl font-bold text-primary">{formatSavingsRangeUsd(item.savingsRangeUsd)}<span className="ml-1 text-sm font-semibold text-muted-foreground">/yr</span></p>
+                            <p className="mt-1 text-sm font-semibold">{item.title}</p>
+                            {item.description && <p className="mt-1 text-sm text-muted-foreground">{item.description}</p>}
+                            <p className="mt-2 text-[11px] text-muted-foreground" title={item.basis}>Basis: {item.basis}</p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {item.status !== "open" && <Badge variant="outline" className="text-[10px]">{item.status === "planned" || item.status === "in_progress" ? "In your plan" : item.status}</Badge>}
+                            <Badge variant="secondary" className="text-[10px]">{item.commodity}</Badge>
+                            <Badge variant="secondary" className="text-[10px]">{item.confidence} confidence</Badge>
+                            {item.paybackBandYears && <Badge variant="secondary" className="text-[10px]">payback {item.paybackBandYears}</Badge>}
+                          </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {item.status !== "planned" && item.status !== "in_progress" && (
+                            <Button size="sm" variant="outline" disabled={changeRecommendation.isPending} onClick={() => changeRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure, title: item.title, status: "planned" })}>Add to plan</Button>
+                          )}
+                          {item.status !== "in_progress" && (
+                            <Button size="sm" variant="outline" disabled={changeRecommendation.isPending} onClick={() => changeRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure, title: item.title, status: "in_progress" })}>Start</Button>
+                          )}
+                          <Button size="sm" disabled={changeRecommendation.isPending} onClick={() => changeRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure, title: item.title, status: "completed" })}>Mark complete</Button>
+                          <Button size="sm" variant="ghost" disabled={changeRecommendation.isPending} onClick={() => changeRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure, title: item.title, status: "deferred", deferDays: 90 })}>Defer 90 days</Button>
+                          <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={changeRecommendation.isPending} onClick={() => changeRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure, title: item.title, status: "dismissed" })}>Not applicable</Button>
+                        </div>
+                      </div>
+                    ))}
+                    {queue.completed.length > 0 && (
+                      <Collapsible>
+                        <CollapsibleTrigger className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground">Completed ({queue.completed.length})</CollapsibleTrigger>
+                        <CollapsibleContent className="mt-2 space-y-2">
+                          {queue.completed.map((item) => (
+                            <div key={item.measure} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-2 text-xs">
+                              <div><span className="font-medium">{item.title}</span><span className="ml-2 text-muted-foreground">{formatSavingsRangeUsd(item.savingsRangeUsd)}/yr modeled range</span></div>
+                              <span className="flex items-center gap-2">{item.implementation ? <><ProveItStatusChip status={item.implementation.status} /><span className="text-muted-foreground">{item.implementation.verifiedSavingsUsd == null ? "savings attribution withheld" : `${fmtUsd(item.implementation.verifiedSavingsUsd)} verified`}</span></> : <span className="text-muted-foreground">Completion recorded</span>}<Button size="sm" variant="ghost" disabled={reopenRecommendation.isPending} onClick={() => reopenRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure })}>Reopen</Button></span>
+                            </div>
+                          ))}
+                        </CollapsibleContent>
+                      </Collapsible>
+                    )}
+                    {(queue.inactive.length > 0 || queue.needsReview.length > 0) && (
+                      <Collapsible>
+                        <CollapsibleTrigger className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground" data-testid="recs-inactive-trigger">Deferred, dismissed, or needs review ({queue.inactive.length + queue.needsReview.length})</CollapsibleTrigger>
+                        <CollapsibleContent className="mt-2 space-y-2">
+                          {[...queue.needsReview, ...queue.inactive].map((item) => (
+                            <div key={`inactive-${item.measure}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 px-3 py-2 text-xs">
+                              <div><span className="font-medium">{item.title}</span><span className="ml-2 text-muted-foreground">{queue.needsReview.includes(item) ? "no longer in the current analysis — review before acting" : item.status}</span></div>
+                              <Button size="sm" variant="ghost" disabled={reopenRecommendation.isPending} onClick={() => reopenRecommendation.mutate({ siteId: activeSiteId!, measure: item.measure })}>Reopen</Button>
+                            </div>
+                          ))}
+                        </CollapsibleContent>
+                      </Collapsible>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           )}
         </CardContent>
@@ -1255,9 +1267,10 @@ export default function Dashboard() {
       )}
 
       {/* §3e prove-it: verification ledger for implemented measures */}
-      {activeSiteId != null && <ProveItSection siteId={activeSiteId} />}
+      {activeSiteId != null && <ProveItSection key={`prove:${activeSiteId}`} siteId={activeSiteId} />}
       {activeSiteId != null && (
         <MarkImplementedDialog
+          key={`mark:${activeSiteId}`}
           open={markTarget != null}
           onOpenChange={(v) => !v && setMarkTarget(null)}
           siteId={activeSiteId}
@@ -1302,9 +1315,40 @@ export default function Dashboard() {
           autonomous currency engine (auto-applied adjustor moves, detected
           document changes, newly acquired utilities). Renders nothing when
           the engine has seen no movement. */}
-      <RateActivityCard />
+      <RateActivityCard siteId={activeSiteId} />
       </div>
     </div>
+  );
+}
+
+function PropertyRecordsCard({ siteId }: { siteId: number }) {
+  const records = trpc.sites.propertyRecords.useQuery({ siteId });
+  if (records.isLoading || (records.data?.links.length ?? 0) === 0) return null;
+  return (
+    <Card className="mt-4 border-border/70">
+      <CardHeader className="pb-2">
+        <CardTitle className="font-display text-base">Property records{records.data?.county ? ` · ${records.data.county} County${records.data.state ? `, ${records.data.state}` : ""}` : ""}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-wrap gap-2">
+          {records.data?.links.map((link) => (
+            <a
+              key={link.url}
+              href={link.url}
+              target="_blank"
+              rel="noreferrer"
+              title={link.note}
+              className="rounded-md border border-border px-2 py-1 text-xs text-primary hover:bg-muted"
+            >
+              {link.label}
+            </a>
+          ))}
+        </div>
+        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+          Official links open on county sites; CountyOffice is a third-party directory, not an official record source. Meterly does not import or store third-party property data. Paid property-data enrichment would require a licensed provider.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1312,8 +1356,8 @@ export default function Dashboard() {
  * rate-currency engine, so rate movements affecting analyses are visible
  * without visiting the Tariffs page. Hidden entirely when there are no
  * material events (a quiet engine is the normal state). */
-function RateActivityCard() {
-  const { data } = trpc.tariffs.rateChangeTimeline.useQuery({ limit: 8 }, { staleTime: 5 * 60 * 1000 });
+function RateActivityCard({ siteId }: { siteId: number | null }) {
+  const { data } = trpc.tariffs.rateChangeTimeline.useQuery({ limit: 8, siteId: siteId ?? undefined }, { staleTime: 5 * 60 * 1000 });
   if (!data || data.events.length === 0) return null;
   const kindMeta: Record<string, { label: string; cls: string }> = {
     auto_applied: { label: "auto-applied", cls: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
@@ -1327,7 +1371,7 @@ function RateActivityCard() {
       <CardHeader className="pb-2">
         <CardTitle className="font-display text-base">Rate activity</CardTitle>
         <p className="text-xs text-muted-foreground">
-          Movements caught by the autonomous rate-verification engine — every filed rate is monitored against its official source.
+          Movements caught by the autonomous rate-verification engine for this site's state and utilities — every filed rate is monitored against its official source.
         </p>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -1369,7 +1413,7 @@ function RateActivityCard() {
         {data.totalMaterial > data.events.length ? (
           <p className="text-xs text-muted-foreground">
             {data.totalMaterial - data.events.length} older event(s) — full history on the{" "}
-            <Link href="/app/tariffs" className="underline">Tariffs page</Link>.
+            <Link href={siteHref("/app/tariffs", siteId)} className="underline">Tariffs page</Link>.
           </p>
         ) : null}
       </CardContent>
@@ -1515,7 +1559,7 @@ function Heatmap({ grid }: { grid: number[][] }) {
             </div>
           ))}
           {grid.map((row, d) => (
-            <>
+            <Fragment key={d}>
               <div key={`d${d}`} className="pr-1 text-right font-mono text-[9px] leading-4 text-muted-foreground">
                 {DAYS[d]}
               </div>
@@ -1527,7 +1571,7 @@ function Heatmap({ grid }: { grid: number[][] }) {
                   style={{ background: `oklch(0.8 0.16 80 / ${intensity(v)})` }}
                 />
               ))}
-            </>
+            </Fragment>
           ))}
         </div>
       </div>

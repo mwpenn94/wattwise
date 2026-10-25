@@ -30,7 +30,7 @@ import {
   BaselineFit,
   MonthNormalRow,
 } from "./baseline";
-import { computeDemandAnalytics, costOnTariff, tariffEligible, DemandAnalytics, CostResult } from "./tariffEngine";
+import { computeDemandAnalytics, costOnTariff, tariffEligible, tariffEligibilityTerms, monthlyImportedKwh, DemandAnalytics, CostResult } from "./tariffEngine";
 import { computePeakAttribution } from "./attribution";
 import { benchmarkPercentile, rankOpportunities, OpportunityCandidate } from "./scenarios";
 import * as h from "../dbHelpers";
@@ -47,6 +47,10 @@ import { resolveCommodityService } from "../commodityService";
 import { deriveBillVerifiedRate } from "../billCalibration";
 import { resolveTerritoryUnified, partitionByTerritory } from "../serviceTerritory";
 import { effectiveSchedules } from "../operatingHours";
+import { isVirtualTotalMeter, requireAlignedCampusSeries } from "../virtualTotal";
+import { replaceRecommendationOpportunities } from "../recommendations";
+import { resolveRateCode } from "../rateCodes";
+import { perMeterRateReview, priceAccountsSeparately, type MeterRateReview, type AccountPricingComponent, sameAccountProvider } from "./multiMeter";
 import type { Site, Meter } from "../../drizzle/schema";
 
 /** Opportunity candidate as it flows through ranking/persistence — electric
@@ -63,6 +67,7 @@ export interface PipelineResult {
   baseline: BaselineFit | null;
   currentCost: CostResult | null;
   tariffComparisons: TariffComparison[];
+  meterRateReview: MeterRateReview | null;
   benchmark: { siteEui: number | null; percentileBand: string | null; betterThanMedian: boolean | null; source: string | null } | null;
   emissions: { annualCo2eLb: number; subregion: string; factorYear: number; mapped: boolean } | null;
   insightsCount: number;
@@ -93,6 +98,21 @@ function timeoutGuard<T>(p: Promise<T>): Promise<T> {
   ]);
 }
 
+/**
+ * Location-revision publish guard. If the site's address/coordinates were
+ * edited while this run was computing, its weather, territory, tariff and
+ * geometry inputs are stale — fail the run instead of overwriting the
+ * "location changed" state with results for the old location.
+ */
+export class StaleLocationError extends Error {
+  constructor() { super("Site location changed during analysis. Results were not published; rerun analysis for the current location."); }
+}
+async function assertLocationCurrent(site: Site, userId: number): Promise<void> {
+  const started = (site as { locationRevision?: number | null }).locationRevision;
+  if (started == null) return;
+  const current = await h.getSite(site.id, userId);
+  if ((current as { locationRevision?: number | null }).locationRevision !== started) throw new StaleLocationError();
+}
 export async function runAnalysisPipeline(site: Site, meter: Meter | null, userId: number, tier: string): Promise<PipelineResult> {
   const t0 = Date.now();
   const analysisId = await h.createAnalysis({ siteId: site.id, userId, status: "running" });
@@ -415,7 +435,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // §3b: keep the priced basis STRUCTURE around for peak attribution's
   // counterfactual re-price (same engine, same rate as the current-cost figure).
   let basisStructureForAttribution: TariffStructure | null = null;
-  const comparisons: TariffComparison[] = [];
+  let meterRateReview: MeterRateReview | null = null;
+  let comparisons: TariffComparison[] = [];
   if (costPoints.length > 0) {
     // Commodity-aware sweep: a water/gas meter must never be costed on electric
     // rates (caught by AC3 acceptance test). If no tariffs exist for the
@@ -440,8 +461,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     // closed plan or an unlawful (solar-mismatched) plan never enters the sweep.
     const isElig = (t: (typeof allTariffs)[number]) =>
       tariffEligible(
-        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition },
-        { sectorClass, hasSolar: site.hasSolar ?? false },
+        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition, ...tariffEligibilityTerms(t.structure as TariffStructure) },
+        { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType },
         peakKw,
       ).eligible;
     // TERR-2/3: territory-aware sweep. Utilities are territorial monopolies —
@@ -495,7 +516,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       // Defensive: should be unreachable per the filtering above.
       currentCost = null;
     } else if (basis) {
-      currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz });
+      currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz, hasSolar: site.hasSolar ?? false, rateCodeResolution: resolveRateCode(basis.utilityName, meter?.rateScheduleCode ?? null) });
     }
     if (basis) {
       const bs = basis.structure as TariffStructure;
@@ -522,7 +543,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     // into the sweep and hoist it to the front so neither can hide it.
     let sweepRows = sweep;
     if (basis) {
-      sweepRows = [basis, ...sweep.filter((t) => t.id !== basis.id)];
+      sweepRows = [basis, ...sweep.filter((t) => t.id !== basis.id && (!current || sameAccountProvider(t.utilityName, current.utilityName)))];
     }
 
     // Batch-35 (pass 1319b): if no current-cost basis could be established
@@ -533,11 +554,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     const currentTotal = currentCost?.breakdown.total ?? 0;
     for (const t of sweepRows.slice(0, 24)) {
       const elig = tariffEligible(
-        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition },
+        { sector: t.sector, commodity: t.commodity, peakKwMin: t.peakKwMin, peakKwMax: t.peakKwMax, closedToNew: t.closedToNew, techCondition: t.techCondition, ...tariffEligibilityTerms(t.structure as TariffStructure) },
         // v1.18: the current basis stays priceable even when closed to new
         // customers — the customer is already on it; it is only barred as a
         // SWITCH target for everyone else.
-        { sectorClass, hasSolar: site.hasSolar ?? false, isCurrentBasis: t.id === basisTariffId },
+        { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType, isCurrentBasis: t.id === basisTariffId, monthlyImportedKwh: monthlyImportedKwh(costPoints, tz) },
         peakKw,
       );
       const cost = elig.eligible ? costOnTariff(costPoints, t.structure as TariffStructure, { tz }) : null;
@@ -568,7 +589,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         // exists. The UI already renders "— (no current-cost baseline)", but raw
         // API/export consumers received a literal 0 indistinguishable from a
         // genuine break-even delta. Null is the machine-readable equivalent.
-        savingsVsCurrent: cost && hasCostBasis ? currentTotal - cost.breakdown.total : null,
+        savingsVsCurrent: cost && hasCostBasis && cost.switchRecommendationAllowed !== false && currentCost?.switchRecommendationAllowed !== false ? currentTotal - cost.breakdown.total : null,
         // Batch-34 (pass 1279): when the platform already KNOWS the rate is
         // ineligible, telling the user to "confirm final eligibility" was
         // contradictory — the specific reason replaces the generic caveat.
@@ -594,8 +615,116 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       return (b.savingsVsCurrent ?? 0) - (a.savingsVsCurrent ?? 0);
     });
   }
+  /* A campus total is useful for physical load analysis, but it is NOT one
+     utility account. Re-price every MAIN electric agreement on its own filed
+     schedule so blocks, fixed charges, ratchets, and demand determinants remain
+     account-specific. The single-tariff sweep over summed load is suppressed. */
+  if (meter && isVirtualTotalMeter(meter) && costPoints.length > 0) {
+    const componentMeters = (await h.listMeters(site.id, userId)).filter((m) => m.commodity === "electric" && m.meterRole === "main");
+    const allTariffs = await h.listTariffs("electric", site.state ?? undefined);
+    const sectorClass = site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? "residential" : "commercial";
+    const territoryRes = await resolveTerritoryUnified(
+      { state: site.state, city: site.city, zip: site.zip, utilityName: site.utilityName },
+      "electric",
+    );
+    const { inTerritory: territoryTariffs } = partitionByTerritory(allTariffs, territoryRes);
+    const components: AccountPricingComponent[] = [];
+    for (const component of componentMeters) {
+      const componentPoints = (await h.getIntervalPoints(component.id, userId)).map((row) => ({
+        ts: row.ts,
+        durationMin: row.durationMin,
+        usage: row.usage,
+        demand: row.demand,
+      }));
+      if (componentPoints.length === 0) throw new Error(`Account ${component.id} has no intervals; partial campus pricing is withheld.`);
+      const peakKw = computeDemandAnalytics(componentPoints, 4, [6, 7, 8, 9], component.timezone ?? tz)?.peakKw ?? null;
+      const assigned = component.currentTariffId ? await h.getTariff(component.currentTariffId) : undefined;
+      const assignedElectric = assigned?.commodity === "electric" ? assigned : undefined;
+      const utilityTariffs = allTariffs.filter(
+        (tariff) => !site.utilityName || tariff.utilityName.toLowerCase().includes((site.utilityName ?? "").toLowerCase().split(" ")[0]),
+      );
+      const eligible = (tariff: (typeof allTariffs)[number]) =>
+        tariffEligible(
+          {
+            sector: tariff.sector,
+            commodity: tariff.commodity,
+            peakKwMin: tariff.peakKwMin,
+            peakKwMax: tariff.peakKwMax,
+            closedToNew: tariff.closedToNew,
+            techCondition: tariff.techCondition,
+            ...tariffEligibilityTerms(tariff.structure as TariffStructure),
+          },
+          { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType },
+          peakKw,
+        ).eligible;
+      const eligibleAnywhere = territoryTariffs.filter(eligible);
+      const sweep = utilityTariffs.length > 0 ? utilityTariffs : territoryTariffs.length > 0 ? territoryTariffs : allTariffs;
+      const basis = assignedElectric;
+      if (!basis) throw new Error(`Account ${component.id} has no confirmed assigned electric tariff; campus pricing is withheld rather than imputing a provider.`);
+      const resolution = resolveRateCode(basis.utilityName, component.rateScheduleCode);
+      components.push({
+        meterId: component.id,
+        label: component.facilityLabel ?? component.label ?? `Service agreement ${component.id}`,
+        points: componentPoints,
+        structure: basis.structure as TariffStructure,
+        tariffId: basis.id,
+        tariffName: basis.name,
+        utilityName: basis.utilityName,
+        timezone: component.timezone,
+        rateCodeResolution: resolution ?? undefined,
+        disclosures: site.utilityName && !sameAccountProvider(site.utilityName, basis.utilityName)
+          ? [`Site provider metadata (${site.utilityName}) conflicts with assigned account provider (${basis.utilityName}); assigned account provider governs. Confirm site metadata.`] : [],
+      });
+    }
+    requireAlignedCampusSeries(components.map(component => component.points));
+    if (components.length > 0) {
+      const priced = priceAccountsSeparately(components, tz);
+      currentCost = priced.combined;
+      basisStructureHasDemandCharges = components.some((component) => (component.structure.demand?.length ?? 0) > 0 || component.structure.cp != null);
+      basisStructureForAttribution = null;
+      const reviewCandidates = new Map<number, (typeof allTariffs)[number]>();
+      const siteUtilityTariffs = allTariffs.filter(
+        (tariff) => !site.utilityName || tariff.utilityName.toLowerCase().includes((site.utilityName ?? "").toLowerCase().split(" ")[0]),
+      );
+      for (const tariff of [...siteUtilityTariffs, ...territoryTariffs]) reviewCandidates.set(tariff.id, tariff);
+      const scopedReviewCandidates = reviewCandidates.size > 0 ? Array.from(reviewCandidates.values()) : allTariffs;
+      meterRateReview = perMeterRateReview(
+        components,
+        allTariffs.map((tariff) => ({
+          id: tariff.id,
+          name: tariff.name,
+          utilityName: tariff.utilityName,
+          structure: tariff.structure as TariffStructure,
+          freshness: tariff.freshness,
+          eligibleFor: (peakKw, account) =>
+            tariffEligible(
+              {
+                sector: tariff.sector,
+                commodity: tariff.commodity,
+                peakKwMin: tariff.peakKwMin,
+                peakKwMax: tariff.peakKwMax,
+                closedToNew: tariff.closedToNew,
+                techCondition: tariff.techCondition,
+                ...tariffEligibilityTerms(tariff.structure as TariffStructure),
+              },
+              { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType, monthlyImportedKwh: monthlyImportedKwh(account.points, account.timezone) },
+              peakKw,
+            ).eligible,
+        })),
+        tz,
+      );
+      comparisons = [];
+      narrate(`Priced ${components.length} separately billed electric service agreement${components.length === 1 ? "" : "s"}; campus total is the sum of individual bills, not one merged tariff account`);
+    } else {
+      currentCost = null;
+      comparisons = [];
+      narrate("Campus total has no component interval series with a tariff basis to price separately");
+    }
+  }
   narrate(
-    comparisons.length > 0
+    meterRateReview
+      ? `Reviewed filed rate alternatives separately for ${meterRateReview.reviewedCount} service agreement${meterRateReview.reviewedCount === 1 ? "" : "s"}; ${meterRateReview.betterCount} materially cheaper option${meterRateReview.betterCount === 1 ? "" : "s"} found`
+      : comparisons.length > 0
       ? `Re-priced a full year on ${comparisons.length} seeded rate${comparisons.length === 1 ? "" : "s"} — ${comparisons.filter((c) => c.eligible).length} eligible for this ${meter?.commodity ?? "electric"} meter`
       : "No rate sweep possible — no load profile or no seeded rates for this commodity/state",
   );
@@ -1277,8 +1406,20 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       ratePricing: {
         rateUsdPerKwh: kWhRate,
         isFallback: rateIsFallback,
-        basis: rateIsFallback ? priceBasisPhrase : "your tariff-priced cost basis (actual)",
-        tier: !rateIsFallback
+        // FB R2-7 (Oct 2026): an inferred rate code (EGMGSQ → EGMGS) or an
+        // incomplete rider/account basis is never labeled "actual".
+        basis: currentCost?.rateCodeResolution?.match === "family_inferred"
+          ? currentCost.rateCodeResolution.disclosure
+          : meterRateReview?.perMeter.some((m) => m.rateCodeResolution?.match === "family_inferred")
+            ? "Mixed account tariff basis including EGMGSQ → EGMGS (inferred, unconfirmed); see each account's disclosure"
+            : currentCost?.switchRecommendationAllowed === false
+              ? "Modeled tariff subtotal; incomplete rider/account terms — not an actual complete bill"
+              : rateIsFallback ? priceBasisPhrase : "your tariff-priced cost basis (actual)",
+        tier: currentCost?.rateCodeResolution?.match === "family_inferred" || meterRateReview?.perMeter.some((m) => m.rateCodeResolution?.match === "family_inferred")
+          ? "assumed"
+          : currentCost?.switchRecommendationAllowed === false
+            ? "filed"
+            : !rateIsFallback
           ? "tariff_priced_actual"
           : billVerified
             ? "bill_verified"
@@ -1333,6 +1474,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
             }
           : null,
       tariffComparisons: comparisons,
+      meterRateReview,
       baseline: baseline
         ? {
             method: baseline.method,
@@ -1372,6 +1514,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     });
     narrate(`Withheld ${withheld.length} shape-dependent insight${withheld.length === 1 ? "" : "s"} behind the solar net/gross question — blocked, not guessed`);
   }
+  // FA #3 / R3 #6: never publish results computed for a superseded location.
+  await assertLocationCurrent(site, userId);
   await h.replaceInsights(site.id, persistedInsightRows);
   narrate(`Wrote ${persistedInsightRows.length} insight${persistedInsightRows.length === 1 ? "" : "s"} — every figure carries its provenance`);
 
@@ -1431,7 +1575,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       : fallbackReason === "no_net_import"
         ? `Savings priced at ${priceBasisPhrase}: your interval data is valid but shows no positive net-import energy (export-dominated profile), and the blended-rate calculation is based on imported kWh only.`
         : `Savings priced at ${priceBasisPhrase} because your annual cost basis could not be established — actual savings scale with your real rate.`;
-  if (demand && currentCost) {
+  if (demand && currentCost && meter?.meterRole !== "virtual_total") {
     const anyRatchet = currentCost.monthlyDetails.some((m) => m.ratchetApplied);
     const demandRate = currentCost.breakdown.demand > 0 && demand.peakKw > 0 ? currentCost.breakdown.demand / 12 / demand.peakKw : 0;
     if (demand.loadFactor < 0.45 && demandRate > 0) {
@@ -1516,7 +1660,14 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // the `> 50` predicate already excludes null rows (null > 50 is false), but
   // the explicit check documents it and satisfies the narrowed type.
   const bestSwitch = comparisons.find((c) => c.eligible && c.savingsVsCurrent != null && c.savingsVsCurrent > 50);
-  if (bestSwitch) {
+  if (meterRateReview) {
+    oppCands.push({
+      key: "account_demand_review", title: "Review each service agreement’s demand peaks and rate terms",
+      category: "demand", annualSavingsUsdLo: 0, annualSavingsUsdHi: 0, capexBand: "none", confidence: "low",
+      rationale: "Campus coincident peaks are not billed account peaks. Review account-specific demand windows, ratchets, block usage and eligibility before estimating savings.",
+      disclosures: ["Informational action; savings withheld pending per-account control modeling. Same-period rate-review ranges are shown separately, not labeled annual.", ...meterRateReview.disclosures],
+    });
+  } else if (bestSwitch) {
     oppCands.push({
       key: "rate_switch",
       title: `Rate switch: ${bestSwitch.tariffName}`,
@@ -1525,7 +1676,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       // measured load — the old 0.6 haircut on the lower bound misrepresented a
       // computed figure as uncertain. Both bounds now equal the repriced savings;
       // the residual (future load drift) is disclosed in the rationale instead.
-      annualSavingsUsdLo: bestSwitch.savingsVsCurrent!,
+      annualSavingsUsdLo: bestSwitch.savingsVsCurrent! * 0.7,
       annualSavingsUsdHi: bestSwitch.savingsVsCurrent!,
       capexBand: "none",
       confidence: bestSwitch.freshness === "urdb_stale" ? "low" : "medium",
@@ -1698,8 +1849,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       commodity: c.commodity ?? "electric",
     },
   }));
-  await h.replaceOpportunities(
+  await assertLocationCurrent(site, userId);
+  await replaceRecommendationOpportunities(
     site.id,
+    userId,
     ranked.map((c, i) => ({
       siteId: site.id,
       analysisId,
@@ -1809,6 +1962,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     baseline,
     currentCost,
     tariffComparisons: comparisons,
+    meterRateReview,
     benchmark,
     emissions,
     insightsCount: insightRows.length,

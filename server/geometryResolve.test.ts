@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  fetchEsriFootprints,
   resolveFootprints,
   _clearResolveCache,
   type OverpassFetcher,
@@ -120,6 +121,23 @@ describe("resolveFootprints — parallel race, not serial walk", () => {
     expect(esriStartedAt - t0).toBeLessThan(100); // Esri started immediately, not after OSM finished
     expect(wall).toBeLessThan(osmDelay + 200);
   });
+
+  it("starts USA Structures and MSBFP2 together, but prefers USA candidates", async () => {
+    const started: string[] = [];
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetcher: EsriFetcher = async (url) => {
+      started.push(url.includes("USA_Structures") ? "usa" : "microsoft");
+      if (started.length === 2) release();
+      await barrier;
+      return url.includes("USA_Structures") ? esriPayload() : { features: [] };
+    };
+    const result = await fetchEsriFootprints(POINT, fetcher);
+    expect(started).toEqual(expect.arrayContaining(["usa", "microsoft"]));
+    expect(result[0]?.source).toBe("usa_structures");
+  });
 });
 
 describe("resolveFootprints — cache semantics", () => {
@@ -159,16 +177,18 @@ describe("resolveFootprints — cache semantics", () => {
     expect(r2.provider).toBe("osm");
   });
 
-  it("caches a confirmed unmapped-building result (both reachable, both empty)", async () => {
+  it("does not cache a reachable-but-empty result, so a later map update can recover", async () => {
     let calls = 0;
-    const countingEmptyOsm: OverpassFetcher = async () => {
+    const emptyThenCandidate: OverpassFetcher = async () => {
       calls++;
-      return { elements: [] };
+      return calls === 1 ? { elements: [] } : osmElements();
     };
-    await resolveFootprints(POINT, { osmFetcher: countingEmptyOsm, esriFetcher: emptyEsri });
-    const r = await resolveFootprints(POINT, { osmFetcher: countingEmptyOsm, esriFetcher: emptyEsri });
-    expect(r.cached).toBe(true);
-    expect(calls).toBe(1);
+    const first = await resolveFootprints(POINT, { osmFetcher: emptyThenCandidate, esriFetcher: emptyEsri });
+    const second = await resolveFootprints(POINT, { osmFetcher: emptyThenCandidate, esriFetcher: emptyEsri });
+    expect(first.provider).toBe("none");
+    expect(second.cached).toBe(false);
+    expect(second.provider).toBe("osm");
+    expect(calls).toBe(2);
   });
 
   it("skipCache bypasses the cache when explicitly requested", async () => {

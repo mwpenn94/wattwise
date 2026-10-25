@@ -3,7 +3,7 @@
  * year on the active tariff; results carry payback bands, confidence, and
  * disclosure text (handoff §7).
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearch } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,7 @@ import { fmtUsd, fmtNum } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
 import { ProvenanceBadge, classifyBasis } from "@/components/ProvenanceBadge";
 import BillBuilder from "@/components/BillBuilder";
+import { useActiveSite } from "@/hooks/useActiveSite";
 import type { ScenarioResults } from "@shared/wattwise";
 
 const KINDS = [
@@ -60,25 +61,21 @@ export function measureToKind(measure: string): (typeof KINDS)[number]["kind"] |
 }
 
 export default function Scenarios() {
-  const sites = trpc.sites.list.useQuery();
+  const { activeSiteId, sites, setActiveSite } = useActiveSite();
   const search = useSearch();
   const deepLink = useMemo(() => {
     const p = new URLSearchParams(search);
-    return { site: p.get("site"), measure: p.get("measure") };
+    return { measure: p.get("measure") };
   }, [search]);
-  const [siteId, setSiteId] = useState<string>(deepLink.site ?? "");
-  // A deep-linked ?site= may reference a site the viewer doesn't own (stale or
-  // copied URL) — fall back to the first owned site instead of a blank selector.
-  const requestedSiteId = siteId ? Number(siteId) : null;
-  const activeSiteId =
-    requestedSiteId != null && (sites.data == null || sites.data.some((s) => s.id === requestedSiteId))
-      ? requestedSiteId
-      : (sites.data?.[0]?.id ?? null);
   const scenarios = trpc.scenariosApi.list.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
   const utils = trpc.useUtils();
 
   const [kind, setKind] = useState<(typeof KINDS)[number]["kind"]>(() => (deepLink.measure ? measureToKind(deepLink.measure) ?? "efficiency" : "efficiency"));
   const [params, setParams] = useState({ solarKwDc: "10", batteryKwh: "20", batteryKw: "10", reduction: "15", evAnnualKwh: "3500", capexUsd: "" });
+  useEffect(() => {
+    setKind(deepLink.measure ? measureToKind(deepLink.measure) ?? "efficiency" : "efficiency");
+    setParams({ solarKwDc: "10", batteryKwh: "20", batteryKw: "10", reduction: "15", evAnnualKwh: "3500", capexUsd: "" });
+  }, [activeSiteId, deepLink.measure]);
 
   const run = trpc.scenariosApi.run.useMutation({
     onSuccess: async () => {
@@ -129,7 +126,7 @@ export default function Scenarios() {
           <CardContent className="space-y-4">
             <div>
               <Label>Site</Label>
-              <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={setSiteId}>
+              <Select value={activeSiteId != null ? String(activeSiteId) : ""} onValueChange={(value) => setActiveSite(Number(value))}>
                 <SelectTrigger className="mt-1">
                   <SelectValue placeholder="Select site…" />
                 </SelectTrigger>
@@ -214,7 +211,7 @@ export default function Scenarios() {
         </Card>
 
         <div className="space-y-4">
-          {activeSiteId != null && <BillBuilder siteId={activeSiteId} />}
+          {activeSiteId != null && <BillBuilder key={activeSiteId} siteId={activeSiteId} />}
           {scenarios.isLoading && <Skeleton className="h-40" />}
           {(scenarios.data ?? []).map((s) => {
             const r = s.results as unknown as ScenarioResults | null;

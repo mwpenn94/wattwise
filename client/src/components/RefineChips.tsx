@@ -300,7 +300,7 @@ export default function RefineChips({ siteId, site, onRefined }: Props) {
         </Popover>
 
         {/* interval data — biggest unlock, link out */}
-        <Link href="/app/upload" className={chipCls} title="Unlocks: measured demand analytics, real tariff re-pricing, anomaly detection">
+        <Link href={`/app/upload?site=${siteId}`} className={chipCls} title="Unlocks: measured demand analytics, real tariff re-pricing, anomaly detection">
           <FileUp className="h-3.5 w-3.5 text-primary" /> Interval file
           <span className="text-muted-foreground">→ replaces every synthetic figure</span>
         </Link>

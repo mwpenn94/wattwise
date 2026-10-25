@@ -25,11 +25,12 @@ import {
   type ClimateZoneSource,
 } from "../shared/wattwise";
 import { STATE_SUBREGION, STATE_UTILITY } from "./seed/nationalData";
+import { resolveTerritory } from "./serviceTerritory";
 
 export interface DerivedField<T> {
   value: T;
   /** where the value came from — never silently defaulted */
-  source: "user_entered" | "place_verified" | "zip_inferred" | "state_inferred" | "prior_median" | "us_median_fallback" | "unknown";
+  source: "user_entered" | "place_verified" | "territory_inferred" | "zip_inferred" | "state_inferred" | "prior_median" | "us_median_fallback" | "unknown";
   /** human sentence for disclosures / UI hints */
   note: string;
 }
@@ -72,6 +73,32 @@ const TZ_FALLBACK = "America/Phoenix";
  * Derive everything derivable from a free-text address plus optional explicit
  * overrides (explicit values always win and are tagged user_entered).
  */
+/**
+ * Oct 2026 localization fix: the candidate utility follows the service
+ * territory, not just the state. The statewide "largest IOU" default put
+ * Kingman (UNS Electric territory) schools on APS, and because a stored
+ * utilityName is later treated as on-record, every downstream rate view went
+ * to the wrong utility. When the code-reviewed territory catalog resolves the
+ * city/ZIP to exactly ONE utility, that utility is the candidate (disclosed as
+ * territory-inferred). Overlapping or unknown territories keep the statewide
+ * candidate with its existing "override if yours differs" disclosure.
+ */
+export function territoryUtilityCandidate(
+  commodity: "electric" | "gas",
+  loc: { state: string | null; city: string | null; zip: string | null },
+): DerivedField<string | null> | null {
+  if (!loc.state) return null;
+  const r = resolveTerritory({ state: loc.state, city: loc.city, zip: loc.zip }, commodity);
+  if (r.confidence === "unknown" || r.overlap || r.plausibleUtilities.length !== 1) return null;
+  const name = r.plausibleUtilities[0]!;
+  const where = r.confidence === "city_match" ? `the city (${loc.city})` : r.confidence === "zip_match" ? `ZIP prefix ${loc.zip?.slice(0, 3)}` : "the location";
+  return {
+    value: name,
+    source: "territory_inferred",
+    note: `${name} serves ${where} according to the service-territory catalog — inferred from the location, not read from a bill. Override if yours differs.`,
+  };
+}
+
 export function deriveFromAddress(
   rawAddress: string | null | undefined,
   explicit?: {
@@ -138,12 +165,15 @@ export function deriveFromAddress(
     ? { value: tz, source: "state_inferred", note: `Timezone ${tz} is ${stateUp}'s dominant zone.` }
     : { value: tz, source: "us_median_fallback", note: `No recognized state — timezone defaults to ${TZ_FALLBACK}.` };
 
-  const util = explicit?.utilityName ?? (stateUp ? STATE_UTILITY[stateUp] ?? null : null);
+  const territoryUtil = explicit?.utilityName ? null : territoryUtilityCandidate("electric", { state: stateUp, city, zip });
+  const util = explicit?.utilityName ?? territoryUtil?.value ?? (stateUp ? STATE_UTILITY[stateUp] ?? null : null);
   const utilField: DerivedField<string | null> = explicit?.utilityName
     ? { value: util, source: "user_entered", note: "Utility as entered." }
-    : util
-      ? { value: util, source: "state_inferred", note: `${util} is ${stateUp}'s largest electric utility — override if yours differs (municipal utilities and co-ops serve many areas).` }
-      : { value: null, source: "unknown", note: "No state — no candidate utility could be suggested." };
+    : territoryUtil
+      ? territoryUtil
+      : util
+        ? { value: util, source: "state_inferred", note: `${util} is ${stateUp}'s largest electric utility — override if yours differs (municipal utilities and co-ops serve many areas).` }
+        : { value: null, source: "unknown", note: "No state — no candidate utility could be suggested." };
 
   const subregion = stateUp ? STATE_SUBREGION[stateUp] ?? null : null;
   const subregionField: DerivedField<string | null> = subregion
@@ -215,14 +245,21 @@ export interface UtilityTriple {
  * we NAME the pattern ("City of <city> water utility") only when a city is
  * known — otherwise we say honestly that water is city-run and unknowable
  * from state alone. Every entry is an overridable candidate, never a fact. */
-export function deriveUtilityTriple(state: string | null | undefined, city?: string | null): UtilityTriple {
+export function deriveUtilityTriple(state: string | null | undefined, city?: string | null, zip?: string | null): UtilityTriple {
   const st = state?.toUpperCase()?.trim() || null;
+  const loc = { state: st, city: city ?? null, zip: zip ?? null };
+  const electricTerritory = territoryUtilityCandidate("electric", loc);
   const electricName = st ? STATE_UTILITY[st] ?? null : null;
-  const electric: DerivedField<string | null> = electricName
-    ? { value: electricName, source: "state_inferred", note: `${electricName} is ${st}'s largest electric utility — a candidate, not a confirmation.` }
-    : { value: null, source: "unknown", note: "No state — no electric-utility candidate." };
+  const electric: DerivedField<string | null> = electricTerritory
+    ? electricTerritory
+    : electricName
+      ? { value: electricName, source: "state_inferred", note: `${electricName} is ${st}'s largest electric utility — a candidate, not a confirmation.` }
+      : { value: null, source: "unknown", note: "No state — no electric-utility candidate." };
+  const gasTerritory = territoryUtilityCandidate("gas", loc);
   const gasName = st ? STATE_GAS_UTILITY[st] ?? null : null;
-  const gas: DerivedField<string | null> = gasName
+  const gas: DerivedField<string | null> = gasTerritory
+    ? { ...gasTerritory, note: `${gasTerritory.note} Some buildings have no gas service at all.` }
+    : gasName
     ? { value: gasName, source: "state_inferred", note: `${gasName} is ${st}'s largest gas distributor — many areas are served by municipal utilities or smaller LDCs, and some buildings have no gas service at all.` }
     : st
       ? { value: null, source: "unknown", note: `No dominant gas distributor is on file for ${st} — gas service there is sparse or municipally fragmented.` }

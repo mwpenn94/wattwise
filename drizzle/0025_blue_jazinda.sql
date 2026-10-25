@@ -1,0 +1,1 @@
+ALTER TABLE `baselines` MODIFY COLUMN `confidenceLabel` varchar(512) NOT NULL;
