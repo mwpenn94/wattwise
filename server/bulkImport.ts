@@ -106,19 +106,49 @@ export async function assertLiveLeaseForUpdate(tx: Tx, batchId: number, userId: 
   if (b.workerToken !== token || (b.leaseUntil ?? 0) <= Date.now() || b.status !== "committing") throw new Error("Import worker lease lost; stale worker fenced");
   return b;
 }
+/** OPEN-4 (Oct 26): transactions that take the owner's capacity lock
+ * (lockUser) run at READ COMMITTED. Under TiDB's default pessimistic
+ * REPEATABLE READ a transaction that waited for the users row still counts
+ * sites/uploads from its pre-wait snapshot and can miss rows the previous lock
+ * holder committed. Same protocol as dbHelpers.withUserCapacityLock. */
+const RC = { isolationLevel: "read committed" } as const;
 async function fenced<T>(batchId: number, userId: number, token: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
   return (await db()).transaction(async tx => {
     await assertLiveLeaseForUpdate(tx, batchId, userId, token);
     const value = await fn(tx);
     await tx.update(importBatches).set({ leaseUntil: Date.now() + LEASE_MS }).where(owned(importBatches, batchId, userId));
     return value;
-  });
+  }, RC);
 }
+/** Locks the owner's users row (the per-owner capacity lock shared with the
+ * legacy site/upload/scenario routes) and resolves the billing entitlement. */
 async function lockUser(tx: Tx, userId: number) {
   const [u] = await tx.select().from(users).where(eq(users.id, userId)).for("update");
   if (!u) throw new Error("Import owner no longer exists");
   const [account] = await tx.select().from(billingAccounts).where(eq(billingAccounts.userId, userId));
   return u.role === "admin" ? { ...effectiveEntitlement(null), tier: "pro" as const, maxSites: null } : effectiveEntitlement(account ?? null);
+}
+/** OPEN-4: how many sites this commit will still create. Mirrors runCommit's
+ * destination lookup: a planned site is created only when it has no existing
+ * destination, no sheet checkpoint with a site, and no saved group mapping. */
+async function sitesStillToCreate(tx: Tx, batch: { id: number; groupingMode: GroupingMode }, userId: number, planSites: PreviewSite[]): Promise<number> {
+  const candidates = planSites.filter((ps) => ps.existingSiteId == null);
+  if (!candidates.length) return 0;
+  const sheetRows = await tx.select({ id: importBatchSheets.id, siteId: importBatchSheets.siteId }).from(importBatchSheets).where(and(eq(importBatchSheets.batchId, batch.id), eq(importBatchSheets.userId, userId)));
+  const sheetSite = new Map(sheetRows.map((r) => [r.id, r.siteId]));
+  // Only mappings whose site still exists count; runCommit replaces stale ones.
+  const mapped = new Set((await tx.select({ groupHash: importSiteGroups.groupHash }).from(importSiteGroups).innerJoin(sites, and(eq(sites.id, importSiteGroups.siteId), eq(sites.userId, userId))).where(and(eq(importSiteGroups.userId, userId), eq(importSiteGroups.groupingMode, batch.groupingMode)))).map((r) => r.groupHash));
+  return candidates.filter((ps) => !ps.sheetIds.some((id) => sheetSite.get(id) != null) && !mapped.has(digest(ps.groupKey))).length;
+}
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/** Plain wording for a bulk import that would exceed the plan's site limit. */
+export function siteCapacityMessage(limit: number, inUse: number, adding: number): string {
+  return `This import would add ${plural(adding, "new site")}, and your plan allows ${plural(limit, "site")} (${inUse} in use). Map some sheets to sites you already have, remove a workbook, or see plans to add more sites. Nothing was imported.`;
+}
+async function monthlySourceUploads(tx: Tx, userId: number): Promise<number> {
+  const month = new Date(); month.setUTCDate(1); month.setUTCHours(0, 0, 0, 0);
+  const [n] = await tx.select({ n: sql<number>`COUNT(*)` }).from(uploads).where(and(eq(uploads.userId, userId), gte(uploads.createdAt, month), sql`COALESCE(${uploads.parser},'') NOT LIKE 'virtual_total%'`));
+  return Number(n.n);
 }
 async function fileBuffer(_fileId: number, fileKey: string | null): Promise<Buffer> {
   if (!fileKey) throw new Error("Staged source is missing. Start a new import and re-stage the original workbook; no data was committed for this sheet.");
@@ -181,7 +211,7 @@ export async function stageFile(userId: number, input: { batchId?: number | null
     }));
     await tx.update(importBatches).set({ status: "staging", plan: null, planVersion: sql`${importBatches.planVersion}+1` }).where(owned(importBatches,batchId,userId));
     return { batchId, fileId, duplicate: false, sheets: headers.filter(m => m.looksLikeIntervals).length, skippedSheets: headers.filter(m=>!m.looksLikeIntervals).length, filename: input.filename };
-  });
+  }, RC);
 }
 export async function removeFile(userId: number, batchId: number, fileId: number) {
   return (await db()).transaction(async tx => {
@@ -543,9 +573,17 @@ export async function commit(user: {id:number;tier?:string|null;role?:string}, i
     const files=await tx.select().from(importBatchFiles).where(eq(importBatchFiles.batchId,b.id));
     if (files.some(f=>!f.fileKey)) throw new TRPCError({code:"BAD_REQUEST",message:"A durable source is missing; start a new import with the original workbooks."});
     const entitlement=await lockUser(tx,userId);
-    // Reserve capacity by rejecting new bulk creation on limited plans until
-    // all legacy creation paths share this row-lock protocol (F8 interim).
-    if (entitlement.maxSites!==null) throw new TRPCError({code:"FORBIDDEN",message:"Bulk imports are temporarily restricted to Founding/Pro accounts while shared site-capacity reservations are hardened. Use single-site upload on limited plans."});
+    // OPEN-4 (Oct 26): limited plans may bulk import when the sites this
+    // commit still has to create fit the plan. Counted under the owner's
+    // capacity lock (users row, READ COMMITTED), the same lock every legacy
+    // site route takes, before anything is written. Each site creation below
+    // re-checks under the lock, so a site added elsewhere mid-import (or a
+    // plan change before a resume) can never push the owner past the limit.
+    if (entitlement.maxSites!==null) {
+      const adding=await sitesStillToCreate(tx,b,userId,plan.sites);
+      const [inUse]=await tx.select({n:sql<number>`COUNT(*)`}).from(sites).where(eq(sites.userId,userId));
+      if (adding>0 && Number(inUse.n)+adding>entitlement.maxSites) throw new TRPCError({code:"FORBIDDEN",message:siteCapacityMessage(entitlement.maxSites,Number(inUse.n),adding)});
+    }
     // A paused/stalled slice continues in its current phase; a retry of a
     // finished partial/failed import re-walks from the import phase.
     const continuing=b.status==="committing";
@@ -553,7 +591,7 @@ export async function commit(user: {id:number;tier?:string|null;role?:string}, i
     await deriveProgress(tx,b.id,userId,summary);
     await tx.update(importBatches).set({status:"committing",workerToken:token,leaseUntil:Date.now()+LEASE_MS,error:null,summary}).where(owned(importBatches,b.id,userId));
     return {plan,summary,tier:entitlement.tier};
-  });
+  },RC);
   if (!claim) return {batchId:input.batchId,started:false,alreadyRunning:true,more:false};
   running.add(input.batchId);
   try {
@@ -616,13 +654,20 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
           const ent=await lockUser(tx,userId);
           const checkpoints=await tx.select().from(importBatchSheets).where(and(eq(importBatchSheets.batchId,batchId),inArray(importBatchSheets.id,ps.sheetIds)));
           const [mapping]=await tx.select().from(importSiteGroups).where(and(eq(importSiteGroups.userId,userId),eq(importSiteGroups.groupHash,digest(ps.groupKey)),eq(importSiteGroups.groupingMode,(await lockBatch(tx,batchId,userId)).groupingMode)));
-          let siteId=ps.existingSiteId ?? checkpoints.find(s=>s.siteId)?.siteId ?? mapping?.siteId;
+          let siteId:number|undefined=ps.existingSiteId ?? checkpoints.find(s=>s.siteId)?.siteId ?? mapping?.siteId;
           let found:typeof sites.$inferSelect|undefined;
           if (siteId) [found]=await tx.select().from(sites).where(and(eq(sites.id,siteId),eq(sites.userId,userId)));
+          // OPEN-4: a group mapping left by a since-deleted site is stale (the
+          // preview already treats that group as new); drop it and create the
+          // site again instead of failing the re-import.
+          if (siteId && !found && mapping && siteId===mapping.siteId && ps.existingSiteId==null && !checkpoints.some(s=>s.siteId)) {
+            await tx.delete(importSiteGroups).where(and(eq(importSiteGroups.id,mapping.id),eq(importSiteGroups.userId,userId)));
+            siteId=undefined;
+          }
           if (siteId && !found) throw new Error("Destination site no longer belongs to this owner");
           if (!found) {
             const [count]=await tx.select({n:sql<number>`COUNT(*)`}).from(sites).where(eq(sites.userId,userId));
-            if (ent.maxSites!==null && Number(count.n)>=ent.maxSites) throw new Error("Site capacity exhausted; upgrade before resuming");
+            if (ent.maxSites!==null && Number(count.n)>=ent.maxSites) throw new Error(`Site capacity exhausted: your plan allows ${plural(ent.maxSites,"site")} and ${Number(count.n)} are in use. Remove a site or see plans, then resume; sheets already imported are kept.`);
             const cascade=deriveFromAddress(ps.formattedAddress??ps.address,{state:ps.state,zip:ps.zip,city:ps.city,buildingType:summary.options.buildingType??null,placeVerified:ps.geocode==="precise"} as Parameters<typeof deriveFromAddress>[1]);
             const state=ps.state??ps.billUtility?.state??cascade.state.value??null;
             const [r]=await tx.insert(sites).values({userId,entityId:summary.entityId,name:ps.siteName.slice(0,250),address:ps.address || ps.formattedAddress,city:ps.city??cascade.city.value,state,zip:ps.zip??cascade.zip.value,lat:ps.lat,lng:ps.lng,climateZone:cascade.climateZone.value,egridSubregion:cascade.egridSubregion.value,utilityName:ps.billUtility?.utilityName??cascade.utilityName.value,buildingType:summary.options.buildingType,attrSource:"user_entered"});
@@ -660,19 +705,21 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
           // Interim safety: multi-channel sheets require a durable channel map.
           // Reject rather than use unstable row-order suffixes or lose lineage.
           if (series.length!==1) throw new Error("Multiple channels in one sheet are not supported by bulk setup yet. Split into one sheet per durable service-point/channel identifier.");
-          await fenced(batchId,userId,token,async tx=> {
-            const ent=await lockUser(tx,userId);
-            if (ent.maxSites!==null) throw new Error("Bulk entitlement changed; restore Founding/Pro before resuming");
+          // OPEN-4: the source-upload reservation (monthly quota count + row)
+          // is its own short transaction under the owner's capacity lock, so
+          // the users row is NOT held while this sheet's intervals are written
+          // (legacy site/upload/scenario requests for this owner would
+          // otherwise wait on it). Idempotent: one upload row per source file.
+          const uploadId=await fenced(batchId,userId,token,async tx=> {
             const [f]=await tx.select().from(importBatchFiles).where(and(eq(importBatchFiles.id,file.id),eq(importBatchFiles.userId,userId))).for("update");
-            let uploadId=f.uploadId;
-            if (!uploadId) {
-              const month=new Date(); month.setUTCDate(1); month.setUTCHours(0,0,0,0);
-              const [n]=await tx.select({n:sql<number>`COUNT(*)`}).from(uploads).where(and(eq(uploads.userId,userId),gte(uploads.createdAt,month),sql`COALESCE(${uploads.parser},'') NOT LIKE 'virtual_total%'`));
-              if (ent.tier==="free" && Number(n.n)>=FREE_TIER_MAX_UPLOADS_PER_MONTH) throw new Error("Monthly source upload quota exhausted");
-              const [r]=await tx.insert(uploads).values({userId,siteId:null,filename:f.filename,fileKey:f.fileKey,sha256:f.sha256,format:"xlsx",parser:"bulk_import_v2",parserVersion:PARSER_VERSION,status:"pending"});
-              uploadId=Number(r.insertId);
-              await tx.update(importBatchFiles).set({uploadId}).where(eq(importBatchFiles.id,f.id));
-            }
+            if (f.uploadId) return f.uploadId;
+            const ent=await lockUser(tx,userId);
+            if (ent.tier==="free" && (await monthlySourceUploads(tx,userId))>=FREE_TIER_MAX_UPLOADS_PER_MONTH) throw new Error(`Monthly source upload limit reached (${FREE_TIER_MAX_UPLOADS_PER_MONTH} per month on this plan). Resume next month or see plans; sheets already imported are kept.`);
+            const [r]=await tx.insert(uploads).values({userId,siteId:null,filename:f.filename,fileKey:f.fileKey,sha256:f.sha256,format:"xlsx",parser:"bulk_import_v2",parserVersion:PARSER_VERSION,status:"pending"});
+            await tx.update(importBatchFiles).set({uploadId:Number(r.insertId)}).where(eq(importBatchFiles.id,f.id));
+            return Number(r.insertId);
+          });
+          await fenced(batchId,userId,token,async tx=> {
             const candidates=await tx.select().from(meters).where(and(eq(meters.userId,userId),sql`(${meters.importIdentity}=${identity} OR (${meters.importIdentity} IS NULL AND ${pm.servicePointId ? sql`${meters.servicePoint}=${pm.servicePointId}` : sql`${meters.serviceAgreementId}=${pm.serviceAgreementId}`}))`));
             if (candidates.length>1) throw new Error("Duplicate legacy service identities require reconciliation");
             let meter=candidates[0];

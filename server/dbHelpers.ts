@@ -42,6 +42,7 @@ import {
   siteMembers,
   productionSeries,
   recommendationStates,
+  importSiteGroups,
 } from "../drizzle/schema";
 import type { Alert } from "../drizzle/schema";
 
@@ -58,29 +59,45 @@ async function requireDb() {
   return db;
 }
 
+type Db = Awaited<ReturnType<typeof requireDb>>;
+/** A Drizzle transaction handle (same query API as the pooled database). */
+export type DbTx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/** Helpers that take part in a quota check accept the caller's transaction so
+ *  the count and the insert run on the locked connection. */
+type Exec = Db | DbTx;
+
 /**
- * Batch-13 (passes 56/76/86/95): serialize quota check-then-create sequences
- * per user with a MySQL named lock so concurrent requests cannot all pass a
- * count-based free-tier check before any row is inserted (sites, uploads,
- * scenarios). The 5s wait bound keeps pile-ups from becoming timeout cascades;
- * GET_LOCK is released in finally and auto-releases if the session dies.
+ * OPEN-4 (Oct 26): per-user capacity lock shared by every quota-limited write
+ * (sites, uploads, scenarios) and the bulk importer.
+ *
+ * One transaction locks the owner's `users` row (SELECT ... FOR UPDATE) and
+ * runs `fn(tx)`; the count and the insert inside `fn` must use `tx`, so they
+ * commit together before the next waiter proceeds. The transaction runs at
+ * READ COMMITTED on purpose: on TiDB's default pessimistic REPEATABLE READ a
+ * transaction that waited for the row lock still counts from its pre-wait
+ * snapshot and can miss the row the previous holder just committed (verified
+ * Oct 26: waiter saw 0 sites while 1 existed). READ COMMITTED reads the latest
+ * committed rows after the lock is granted.
+ *
+ * Replaces the Batch-13 GET_LOCK named lock, which was taken on one pooled
+ * connection and could be released on another (leaving it held), while the
+ * guarded statements ran on yet other connections. Keep `fn` short: other
+ * quota writes for the same user (and its bulk import) wait on this row.
  */
-export async function withUserQuotaLock<T>(userId: number, fn: () => Promise<T>): Promise<T> {
+export async function withUserCapacityLock<T>(userId: number, fn: (tx: DbTx) => Promise<T>): Promise<T> {
   const db = await requireDb();
-  const lockName = `ww:quota:${userId}`;
-  const got = await db.execute(sql`SELECT GET_LOCK(${lockName}, 5) AS ok`);
-  const rows = (got as unknown as [Array<{ ok: number | string | null }>])[0];
-  if (Number(rows?.[0]?.ok) !== 1) throw new Error("Could not acquire quota lock; please retry");
-  try {
-    return await fn();
-  } finally {
-    try {
-      await db.execute(sql`SELECT RELEASE_LOCK(${lockName})`);
-    } catch {
-      /* auto-released when the session ends; never mask fn()'s outcome */
-    }
-  }
+  return db.transaction(
+    async (tx) => {
+      const [owner] = await tx.select({ id: users.id }).from(users).where(eq(users.id, userId)).for("update");
+      if (!owner) throw new Error("Account not found; sign in again and retry.");
+      return fn(tx);
+    },
+    { isolationLevel: "read committed" },
+  );
 }
+
+/** Batch-13 name kept for the legacy quota call sites; same lock as above. */
+export const withUserQuotaLock = withUserCapacityLock;
 
 /* ---------------- tenancy assertions ---------------- */
 export async function assertSiteOwner(siteId: number, userId: number) {
@@ -157,8 +174,8 @@ export async function getSite(siteId: number, userId: number) {
   return rows[0];
 }
 
-export async function createSite(data: typeof sites.$inferInsert) {
-  const db = await requireDb();
+export async function createSite(data: typeof sites.$inferInsert, exec?: Exec) {
+  const db = exec ?? (await requireDb());
   const res = await db.insert(sites).values(data);
   return Number((res as unknown as [{ insertId: number }])[0].insertId);
 }
@@ -221,6 +238,9 @@ export async function deleteSite(siteId: number, userId: number) {
   await db.delete(meters).where(eq(meters.siteId, siteId));
   // uploads keep their file provenance but detach from the deleted site
   await db.update(uploads).set({ siteId: null }).where(eq(uploads.siteId, siteId));
+  // OPEN-4: a re-import of the same workbook creates the site again (and
+  // counts it against the plan) instead of pointing at a deleted site.
+  await db.delete(importSiteGroups).where(eq(importSiteGroups.siteId, siteId));
   await db.delete(sites).where(eq(sites.id, siteId));
 }
 
@@ -347,8 +367,8 @@ export async function listSharedSites(userId: number) {
   return rows;
 }
 
-export async function countSites(userId: number): Promise<number> {
-  const db = await requireDb();
+export async function countSites(userId: number, exec?: Exec): Promise<number> {
+  const db = exec ?? (await requireDb());
   const rows = await db.select({ n: sql<number>`COUNT(*)` }).from(sites).where(eq(sites.userId, userId));
   return Number(rows[0]?.n ?? 0);
 }
@@ -549,8 +569,8 @@ export async function intervalStats(meterId: number, userId: number) {
 }
 
 /* ---------------- uploads ---------------- */
-export async function createUpload(data: typeof uploads.$inferInsert) {
-  const db = await requireDb();
+export async function createUpload(data: typeof uploads.$inferInsert, exec?: Exec) {
+  const db = exec ?? (await requireDb());
   const res = await db.insert(uploads).values(data);
   return Number((res as unknown as [{ insertId: number }])[0].insertId);
 }
@@ -586,8 +606,8 @@ export async function listUploads(userId: number) {
   return db.select().from(uploads).where(eq(uploads.userId, userId)).orderBy(desc(uploads.createdAt)).limit(50);
 }
 
-export async function countUploadsThisMonth(userId: number): Promise<number> {
-  const db = await requireDb();
+export async function countUploadsThisMonth(userId: number, exec?: Exec): Promise<number> {
+  const db = exec ?? (await requireDb());
   // UTC month boundary — createdAt is stored in UTC; a server-local boundary
   // would mis-count quota near month edges.
   const now = new Date();
@@ -931,8 +951,8 @@ export async function totalVerifiedSavings(userId: number): Promise<number> {
   return attributableVerifiedUsd(rows);
 }
 
-export async function saveScenario(data: typeof scenarios.$inferInsert) {
-  const db = await requireDb();
+export async function saveScenario(data: typeof scenarios.$inferInsert, exec?: Exec) {
+  const db = exec ?? (await requireDb());
   const res = await db.insert(scenarios).values(data);
   return Number((res as unknown as [{ insertId: number }])[0].insertId);
 }
@@ -970,8 +990,8 @@ export async function listScenarios(siteId: number, userId: number) {
   return db.select().from(scenarios).where(eq(scenarios.siteId, siteId)).orderBy(desc(scenarios.id));
 }
 
-export async function countScenariosThisMonth(userId: number): Promise<number> {
-  const db = await requireDb();
+export async function countScenariosThisMonth(userId: number, exec?: Exec): Promise<number> {
+  const db = exec ?? (await requireDb());
   // UTC month boundary — createdAt is stored in UTC (see countUploadsThisMonth).
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));

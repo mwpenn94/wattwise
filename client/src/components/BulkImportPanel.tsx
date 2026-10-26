@@ -591,8 +591,8 @@ export function BulkImportPanel() {
                   <Switch checked={runAnalysis} onCheckedChange={setRunAnalysis} /> Analyze each site after import
                 </label>
                 {limit && !limit.ok ? (
-                  <p className="text-xs text-destructive">
-                    This import adds {limit.newSites} sites and your plan allows {limit.limit} ({limit.currentSites} in use).{" "}
+                  <p className="text-xs text-destructive" data-testid="bulk-plan-limit">
+                    This import adds {limit.newSites} new {limit.newSites === 1 ? "site" : "sites"} and your plan allows {limit.limit} {limit.limit === 1 ? "site" : "sites"} ({limit.currentSites} in use). Map some sheets to sites you already have or remove a workbook to continue.{" "}
                     <Link href="/app/account" className="underline">
                       See plans
                     </Link>

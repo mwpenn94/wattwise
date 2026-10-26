@@ -380,7 +380,7 @@ describe("bulk hardening",()=>{
       await caller.bulkImport.removeFile({batchId:staged.batchId,fileId:staged.fileId});
       await (await getDb())!.delete(importBatches).where(eq(importBatches.id,staged.batchId));
     }
-  });
+  },30_000); // routinely ~4.7 s (stage + two previews); the 5 s default was too tight
   it("recognizes another worker's live lease and fences stale tokens",async()=>{
     const fx=await prepared([sample("fenced")]),d=(await getDb())!;
     await d.update(importBatches).set({status:"committing",workerToken:"foreign-token",leaseUntil:Date.now()+120_000}).where(eq(importBatches.id,fx.staged.batchId));
@@ -396,12 +396,26 @@ describe("bulk hardening",()=>{
     const reset=await fx.caller.bulkImport.preview({batchId:fx.staged.batchId,planVersion:merged.planVersion,overrides:[{sheetId:a.meters[0].sheetId,siteId:null,groupKey:null}]});expect(reset.sites).toHaveLength(2);
     fx.preview=reset;await start(fx);expect((await waitForCommit(fx.caller,fx.staged.batchId)).batch.status).toBe("complete");
   },30_000);
-  it("blocks limited-plan bulk creation instead of racing unrelated legacy quota routes",async()=>{
+  // OPEN-4 (Oct 26): limited plans may bulk import when the new sites fit; the
+  // old interim rule refused every limited-plan bulk import. Detailed race,
+  // resume and cleanup coverage lives in bulkCapacity.test.ts.
+  it("limited plans import when the new sites fit and are refused before writing when they do not",async()=>{
     const fx=await prepared([sample("quota")]),d=(await getDb())!;
+    const inUse=(await h.listSites(userId!)).length;
     await d.update(billingAccounts).set({plan:"free",entitlementTier:"free"}).where(eq(billingAccounts.userId,userId!));
-    try {await expect(start(fx)).rejects.toMatchObject({code:"FORBIDDEN"});}
-    finally{await d.update(billingAccounts).set({plan:"founding",entitlementTier:"pro"}).where(eq(billingAccounts.userId,userId!));}
-    await start(fx);await waitForCommit(fx.caller,fx.staged.batchId);
+    try {
+      if (inUse+1>2) {
+        await expect(start(fx)).rejects.toMatchObject({code:"FORBIDDEN",message:expect.stringMatching(/would add 1 new site, and your plan allows 2 sites/)});
+        const [b]=await d.select().from(importBatches).where(eq(importBatches.id,fx.staged.batchId));
+        expect(b.status).toBe("previewed");
+        expect((await h.listSites(userId!)).length).toBe(inUse);
+        // The same preview commits once the plan has room (unlimited here; this
+        // shared fixture owner already holds more sites than Plus allows).
+        await d.update(billingAccounts).set({plan:"founding",entitlementTier:"pro"}).where(eq(billingAccounts.userId,userId!));
+      }
+      await start(fx);
+      expect((await waitForCommit(fx.caller,fx.staged.batchId)).batch.status).toBe("complete");
+    } finally {await d.update(billingAccounts).set({plan:"founding",entitlementTier:"pro"}).where(eq(billingAccounts.userId,userId!));}
   },30_000);
 });
 

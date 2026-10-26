@@ -425,9 +425,9 @@ export const appRouter = router({
         sqft: input.sqft ?? null,
         vintage: input.vintage ?? null,
       });
-      const id = await h.withUserQuotaLock(ctx.user.id, async () => {
+      const id = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
         if (tier === "free") {
-          const n = await h.countSites(ctx.user.id);
+          const n = await h.countSites(ctx.user.id, tx);
           if (n >= FREE_TIER_MAX_SITES) {
             throw new TRPCError({ code: "FORBIDDEN", message: `Free tier is limited to ${FREE_TIER_MAX_SITES} sites. Upgrade to add more.` });
           }
@@ -446,7 +446,7 @@ export const appRouter = router({
           climateZone: input.climateZone ?? createCascade.climateZone.value,
           utilityName: input.utilityName ?? createCascade.utilityName.value ?? undefined,
           attrSource: "user_entered",
-        });
+        }, tx);
       });
       // Disclose any derived (non-user-entered) suggestions so the cascade is
       // never silent on this path either.
@@ -638,9 +638,9 @@ export const appRouter = router({
           sqft: cascade.sqft.value,
           vintage: cascade.vintage.value,
         });
-        const id = await h.withUserQuotaLock(ctx.user.id, async () => {
+        const id = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
           if (tier === "free") {
-            const n = await h.countSites(ctx.user.id);
+            const n = await h.countSites(ctx.user.id, tx);
             if (n >= FREE_TIER_MAX_SITES) {
               throw new TRPCError({ code: "FORBIDDEN", message: `Free tier is limited to ${FREE_TIER_MAX_SITES} sites. Upgrade to add more.` });
             }
@@ -678,7 +678,7 @@ export const appRouter = router({
             // intake counts a user-confirmed building type as refined from
             // the start; sqft/vintage remain priors until provided.
             refinedFields: input.buildingType ? ["buildingType"] : [],
-          });
+          }, tx);
         });
         // Disclosure exists from the moment the site does — before any analysis.
         // Batch-24 (passes 846/856): quick-start meters inherit tzForState(state),
@@ -2028,9 +2028,9 @@ export const appRouter = router({
         // Batch-13 (passes 56/76/86/95): the monthly-quota count and the upload-row
         // insert run under a per-user named lock so concurrent requests cannot all
         // pass the count check before any row exists.
-        const uploadId = await h.withUserQuotaLock(ctx.user.id, async () => {
+        const uploadId = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
           if (tier === "free") {
-            const n = await h.countUploadsThisMonth(ctx.user.id);
+            const n = await h.countUploadsThisMonth(ctx.user.id, tx);
             if (n >= FREE_TIER_MAX_UPLOADS_PER_MONTH) {
               throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_MAX_UPLOADS_PER_MONTH} uploads/month.` });
             }
@@ -2045,7 +2045,7 @@ export const appRouter = router({
             parserVersion: PARSER_VERSION,
             status: "pending",
             ...(sliced ? { ingestState: singleIngest.initialIngestState(sourceClock, input.commodityHint ?? null, sliceToken) } : {}),
-          });
+          }, tx);
         });
 
         // Store raw file in S3 (source of truth for re-parse). Cycle 3, pass 55:
@@ -3066,9 +3066,9 @@ export const appRouter = router({
             reduction,
             capexUsd: input.capexUsd,
           });
-          const idGw = await h.withUserQuotaLock(ctx.user.id, async () => {
+          const idGw = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
             if (tier === "free") {
-              const n = await h.countScenariosThisMonth(ctx.user.id);
+              const n = await h.countScenariosThisMonth(ctx.user.id, tx);
               if (n >= FREE_TIER_SCENARIOS_PER_MONTH) {
                 throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_SCENARIOS_PER_MONTH} scenario runs/month.` });
               }
@@ -3084,7 +3084,7 @@ export const appRouter = router({
               status: "complete",
               confidenceLabel: gw.results.confidenceLabel,
               extrapolated: gw.results.extrapolated,
-            });
+            }, tx);
           });
           await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - t0gw, tier });
           await h.audit(ctx.user.id, "scenario_run", "scenario", String(idGw), { kind: input.kind, siteId: site.id });
@@ -3171,9 +3171,9 @@ export const appRouter = router({
         } else {
           (results.assumptions as Record<string, unknown>).ratchetConfidence = "measured";
         }
-        const id = await h.withUserQuotaLock(ctx.user.id, async () => {
+        const id = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
           if (tier === "free") {
-            const n = await h.countScenariosThisMonth(ctx.user.id);
+            const n = await h.countScenariosThisMonth(ctx.user.id, tx);
             if (n >= FREE_TIER_SCENARIOS_PER_MONTH) {
               throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_SCENARIOS_PER_MONTH} scenario runs/month.` });
             }
@@ -3189,7 +3189,7 @@ export const appRouter = router({
             status: "complete",
             confidenceLabel: results.confidenceLabel,
             extrapolated: results.extrapolated,
-          });
+          }, tx);
         });
         // Batch-33 (pass 1225): metering stays AFTER the quota-locked save — a
         // failed save must never consume quota. (Verified ordering; the LLM/
