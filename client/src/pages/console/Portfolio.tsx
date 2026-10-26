@@ -182,6 +182,10 @@ export default function Portfolio() {
               sub={
                 totals
                   ? `${totals.analyzedCount}/${totals.siteCount} sites analyzed${totals.demandCostUsd != null ? ` · ${fmtUsd(totals.demandCostUsd)} demand/CP` : ""}${
+                      totals.fullBillRangeUsd
+                        ? ` · Estimated full bill with LFCR and taxes ${fmtUsd(totals.fullBillRangeUsd.low)}–${fmtUsd(totals.fullBillRangeUsd.high)} (${totals.fullBillSiteCount} site${totals.fullBillSiteCount === 1 ? "" : "s"}; not bill-confirmed)`
+                        : ""
+                    }${
                       /* TUX-5: all-services line — modeled utility + entered telecom,
                          labeled distinctly so the two bases never blend. */
                       (totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd != null && ((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd ?? 0) > 0

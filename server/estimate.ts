@@ -156,7 +156,10 @@ export async function computeAddressEstimate(input: {
   let annualCost: number | null = null;
   let tariffName: string | null = null;
   let tariffDisclosures: string[] = [];
-  for (const t of eligible) {
+  // Oct 25: customer-elected variants (e.g. UNS SGS-Demand / SGS-TOU) are not
+  // the schedule a visitor is presumed to be on; price defaults when any exist.
+  const defaults = eligible.filter((t) => !(t.structure as TariffStructure).optionalSchedule);
+  for (const t of defaults.length > 0 ? defaults : eligible) {
     try {
       const c = costOnTariff(points, t.structure as TariffStructure, { hasSolar: false });
       // Oct 24: a modeled-subtotal filed rate is still the best local price

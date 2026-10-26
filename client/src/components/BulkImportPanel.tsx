@@ -57,7 +57,7 @@ export function BulkImportPanel() {
   const [runAnalysis, setRunAnalysis] = useState(true);
   const editorLock = useRef(false);
   const [timeZone, setTimeZone] = useState("");
-  const [timestampBasis, setTimestampBasis] = useState<"start"|"end">("start");
+  const [timestampBasis, setTimestampBasis] = useState<"auto"|"start"|"end">("auto");
   const [clockConfirmed, setClockConfirmed] = useState(false);
   const [committedId, setCommittedId] = useState<number | null>(null);
   // Oct 25: production gives CPU only while a request is in flight, so the
@@ -141,7 +141,7 @@ export function BulkImportPanel() {
       if(id!=null && (added.length || files.length)) await runPreview(id,mode,overrides,true);
     } finally {editorLock.current=false;setStaging(null);if(fileRef.current)fileRef.current.value="";}
   }
-  async function runPreview(id:number,m:"campus"|"building",ov:Record<number,number|string|null>,insideLock=false,clockOverride?:{timeZone?:string;timestampBasis?:"start"|"end"}) {
+  async function runPreview(id:number,m:"campus"|"building",ov:Record<number,number|string|null>,insideLock=false,clockOverride?:{timeZone?:string;timestampBasis?:"auto"|"start"|"end"}) {
     if(!insideLock && (editorLock.current || busy))return;
     if(!insideLock)editorLock.current=true;
     const version=preview?.planVersion;
@@ -186,6 +186,8 @@ export function BulkImportPanel() {
           if (!started) { started = true; setCommittedId(first.batchId); toast.success("Import started. Progress is saved after every sheet."); }
           refreshStatus();
           input = { batchId: first.batchId, planVersion: first.planVersion };
+          // A brief server/database interruption paused this slice; wait a moment.
+          if (r.more && (r as { transient?: boolean }).transient) { await sleep(3000); continue; }
           if (r.more) continue;
           if (r.alreadyRunning) {
             // Another tab/request holds this slice; check back shortly.
@@ -240,7 +242,7 @@ export function BulkImportPanel() {
       setFiles(state.files.map(f=>({...f,fileId:f.id})));
       setOverrides(Object.fromEntries(state.sheets.map(s=>[s.id,s.overrideSiteId??s.overrideGroupKey??null])));
       const first=state.batch.plan?.sites[0]?.sourceClock;
-      setTimeZone(first?.timeZone??"");setTimestampBasis(first?.timestampBasis??"start");setClockConfirmed(false);
+      setTimeZone(first?.timeZone??"");setTimestampBasis(first?.detectBasis?"auto":(first?.timestampBasis??"auto"));setClockConfirmed(false);
       setPreview(state.batch.plan ? {batchId:id,planVersion:state.batch.planVersion,groupingMode:state.batch.groupingMode,...state.batch.plan,files:state.files} as PreviewResult : null);
     }catch(e){toast.error(e instanceof Error?e.message:"Could not reopen import");}
     finally{editorLock.current=false;setStaging(null);}
@@ -555,11 +557,11 @@ export function BulkImportPanel() {
 
             <div className="rounded-md border p-3 space-y-3 text-sm">
               <p className="font-medium">Confirm the source clock before import</p>
-              <p className="text-xs text-muted-foreground">Local wall-clock cells use the IANA timezone below, not the server clock. Explicit UTC offsets are retained. DST gaps/folds without offsets are rejected. KUSD 00:15…00:00 exports appear interval-ending: confirm that convention with the source owner.</p>
+              <p className="text-xs text-muted-foreground">Local wall-clock cells use the IANA timezone below, not the server clock. Explicit UTC offsets are retained. DST gaps/folds without offsets are rejected. Start/end is detected from each sheet's first and last readings (e.g. 00:15 … 00:00 = interval END) and recorded with the import; choose explicitly only if the utility says otherwise.</p>
               <Label htmlFor="bulk-timezone">Source timezone (blank uses each site's existing meter or state)</Label>
               <Input id="bulk-timezone" disabled={busy} value={timeZone} placeholder="e.g. America/Phoenix" onChange={e=>{setTimeZone(e.target.value);setClockConfirmed(false);}} onBlur={()=>{if(batchId!=null&&!busy)void runPreview(batchId,mode,overrides);}} />
-              <Select disabled={busy} value={timestampBasis} onValueChange={v=>{const basis=v as "start"|"end";setTimestampBasis(basis);if(batchId!=null)void runPreview(batchId,mode,overrides,false,{timestampBasis:basis});}}><SelectTrigger aria-label="Source interval timestamp convention"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="start">Timestamps label interval START</SelectItem><SelectItem value="end">Timestamps label interval END (subtract duration)</SelectItem></SelectContent></Select>
-              <p className="text-xs">Preview clocks: {Array.from(new Set(preview.sites.map(s=>`${s.sourceClock.timeZone}, interval ${s.sourceClock.timestampBasis}`))).join("; ")}</p>
+              <Select disabled={busy} value={timestampBasis} onValueChange={v=>{const basis=v as "auto"|"start"|"end";setTimestampBasis(basis);setClockConfirmed(false);if(batchId!=null)void runPreview(batchId,mode,overrides,false,{timestampBasis:basis});}}><SelectTrigger aria-label="Source interval timestamp convention"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="auto">Detect each sheet from its readings (recommended)</SelectItem><SelectItem value="start">Timestamps label interval START</SelectItem><SelectItem value="end">Timestamps label interval END (subtract duration)</SelectItem></SelectContent></Select>
+              <p className="text-xs">Preview clocks: {Array.from(new Set(preview.sites.map(s=>`${s.sourceClock.timeZone}, ${s.sourceClock.detectBasis?"start/end detected per sheet from its first and last readings":`interval ${s.sourceClock.timestampBasis}`}`))).join("; ")}</p>
               <label className="flex items-center gap-2"><input type="checkbox" checked={clockConfirmed} disabled={busy} onChange={e=>setClockConfirmed(e.target.checked)}/> I confirm these source timezones and the start/end convention.</label>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">

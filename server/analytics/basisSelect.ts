@@ -34,7 +34,9 @@ export interface BasisChoice<T extends BasisCandidate> {
 }
 
 function isStandardSchedule(s: TariffStructure): boolean {
-  return (s.energy?.length ?? 0) <= 1 && !s.schoolOnly;
+  // Oct 25: customer-elected variants (UNS SGS-Demand, SGS-Demand-TOU,
+  // SGS-TOU) are never the default an account is presumed to be on.
+  return (s.energy?.length ?? 0) <= 1 && !s.schoolOnly && !s.optionalSchedule;
 }
 
 export function pickSizeFitBasis<T extends BasisCandidate>(
@@ -50,7 +52,11 @@ export function pickSizeFitBasis<T extends BasisCandidate>(
     const byCode = candidates.find((t) => t.urdbId === opts.rateCodeUrdbId);
     if (byCode) return { tariff: byCode, method: "rate_code", disclosure: null };
   }
-  const eligible = candidates.filter(opts.eligible);
+  const eligibleAll = candidates.filter(opts.eligible);
+  // Oct 25: an optional (customer-elected) schedule is a basis only when it is
+  // the sole eligible schedule.
+  const nonOptional = eligibleAll.filter((t) => !(t.structure as TariffStructure).optionalSchedule);
+  const eligible = nonOptional.length > 0 ? nonOptional : eligibleAll;
   if (eligible.length === 0) return null;
   const peak = opts.peakKw;
   const hasSizeTerms = eligible.some((t) => {

@@ -89,7 +89,7 @@ afterAll(async () => {
   await d.delete(importBatchFiles).where(eq(importBatchFiles.userId, userId));
   await d.delete(importBatches).where(eq(importBatches.userId, userId));
   await d.delete(users).where(eq(users.id, userId));
-});
+}, 120_000); // the uploadId cleanup scans the shared intervals table (no uploadId index)
 
 describe("signed source references", () => {
   const sha = "a".repeat(64);

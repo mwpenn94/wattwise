@@ -30,7 +30,7 @@ import {
   BaselineFit,
   MonthNormalRow,
 } from "./baseline";
-import { computeDemandAnalytics, costOnTariff, tariffEligible, tariffEligibilityTerms, monthlyImportedKwh, DemandAnalytics, CostResult } from "./tariffEngine";
+import { computeDemandAnalytics, costOnTariff, tariffEligible, tariffEligibilityTerms, monthlyImportedKwh, sectorAllows, DemandAnalytics, CostResult, notAFitReason } from "./tariffEngine";
 import { computePeakAttribution } from "./attribution";
 import { benchmarkPercentile, rankOpportunities, OpportunityCandidate } from "./scenarios";
 import * as h from "../dbHelpers";
@@ -53,6 +53,7 @@ import { resolveRateCode } from "../rateCodes";
 import { tariffMatchesSiteUtility } from "../utilityMatch";
 import { pickSizeFitBasis } from "./basisSelect";
 import { perMeterRateReview, priceAccountsSeparately, type MeterRateReview, type AccountPricingComponent, sameAccountProvider, RATE_RANGE_BASIS, INDICATIVE_RATE_RANGE_BASIS } from "./multiMeter";
+import { estimateFullBill, type FullBillEstimate } from "./fullBill";
 import type { Site, Meter } from "../../drizzle/schema";
 import { reclaimMemory, relieveMemoryPressure } from "../ingest/memory";
 
@@ -71,6 +72,7 @@ export interface PipelineResult {
   currentCost: CostResult | null;
   tariffComparisons: TariffComparison[];
   meterRateReview: MeterRateReview | null;
+  fullBillEstimate: FullBillEstimate | null;
   benchmark: { siteEui: number | null; percentileBand: string | null; betterThanMedian: boolean | null; source: string | null; sqft?: number | null; sqftBasis?: string | null; sqftBasisLabel?: string | null; plausibility?: { flag: "implausibly_low"; note: string } | null } | null;
   emissions: { annualCo2eLb: number; subregion: string; factorYear: number; mapped: boolean } | null;
   insightsCount: number;
@@ -471,6 +473,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   // counterfactual re-price (same engine, same rate as the current-cost figure).
   let basisStructureForAttribution: TariffStructure | null = null;
   let meterRateReview: MeterRateReview | null = null;
+  // Oct 25: estimated full bill (LFCR + taxes) as a range, separate from the subtotal.
+  let fullBillEstimate: FullBillEstimate | null = null;
   let comparisons: TariffComparison[] = [];
   if (costPoints.length > 0) {
     // Commodity-aware sweep: a water/gas meter must never be costed on electric
@@ -569,6 +573,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       currentCost = null;
     } else if (basis) {
       currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz, hasSolar: site.hasSolar ?? false, rateCodeResolution: resolveRateCode(basis.utilityName, meter?.rateScheduleCode ?? null) });
+      if ((meter?.commodity ?? "electric") === "electric") fullBillEstimate = estimateFullBill({ accounts: [currentCost], utilityName: basis.utilityName, city: site.city, state: site.state, residential: sectorClass === "residential" });
     }
     if (basis) {
       const bs = basis.structure as TariffStructure;
@@ -614,7 +619,16 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType, isCurrentBasis: t.id === basisTariffId, monthlyImportedKwh: monthlyImportedKwh(costPoints, tz) },
         peakKw,
       );
-      const cost = elig.eligible ? costOnTariff(costPoints, t.structure as TariffStructure, { tz }) : null;
+      let cost = elig.eligible ? costOnTariff(costPoints, t.structure as TariffStructure, { tz }) : null;
+      // Oct 26: same rule as the per-account review — a schedule whose filed
+      // minimum billing demand is above this account's peak, and which would
+      // cost more, is listed as "not a fit" with the cost, not as an option.
+      const notFit = cost && hasCostBasis && t.id !== basisTariffId ? notAFitReason(elig.belowMinimumDemandKw, peakKw, cost.breakdown.total, currentTotal) : null;
+      if (notFit) {
+        elig.eligible = false;
+        elig.reason = notFit;
+        cost = null;
+      }
       comparisons.push({
         tariffId: t.id,
         tariffName: t.name,
@@ -653,7 +667,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         // contradictory — the specific reason replaces the generic caveat.
         eligibilityNote:
           (elig.reason
-            ? `Ineligible: ${elig.reason}`
+            ? elig.reason.startsWith("Not a fit") ? elig.reason : `Ineligible: ${elig.reason}`
             : "Eligibility checked on sector and peak-demand size bounds only; voltage class and customer-class minimums are not in the seeded tariff snapshot — confirm final eligibility with your utility.") +
           (sectorFromPlaceholder
             ? ` Note: the site's sector (${sectorClass}) is derived from a PLACEHOLDER building type — confirm the building type to make this eligibility call reliable.`
@@ -754,6 +768,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     if (components.length > 0) {
       const priced = priceAccountsSeparately(components, tz);
       currentCost = priced.combined;
+      const billUtility = components.every((c) => sameAccountProvider(c.utilityName, components[0].utilityName)) ? components[0].utilityName : null;
+      fullBillEstimate = estimateFullBill({ accounts: priced.accountCosts, utilityName: billUtility, city: site.city, state: site.state, residential: sectorClass === "residential" });
       basisStructureHasDemandCharges = components.some((component) => (component.structure.demand?.length ?? 0) > 0 || component.structure.cp != null);
       basisStructureForAttribution = null;
       const reviewCandidates = new Map<number, (typeof allTariffs)[number]>();
@@ -762,6 +778,17 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       );
       for (const tariff of [...siteUtilityTariffs, ...territoryTariffs]) reviewCandidates.set(tariff.id, tariff);
       const scopedReviewCandidates = reviewCandidates.size > 0 ? Array.from(reviewCandidates.values()) : allTariffs;
+      // Oct 26 (performance, identical results): each account's monthly kWh is
+      // computed once and reused by every candidate's eligibility check.
+      const monthlyKwhByAccount = new WeakMap<AccountPricingComponent, ReturnType<typeof monthlyImportedKwh>>();
+      const accountMonthlyKwh = (account: AccountPricingComponent) => {
+        let v = monthlyKwhByAccount.get(account);
+        if (!v) {
+          v = monthlyImportedKwh(account.points, account.timezone);
+          monthlyKwhByAccount.set(account, v);
+        }
+        return v;
+      };
       meterRateReview = perMeterRateReview(
         components,
         allTariffs.map((tariff) => ({
@@ -770,7 +797,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
           utilityName: tariff.utilityName,
           structure: tariff.structure as TariffStructure,
           freshness: tariff.freshness,
-          eligibleFor: (peakKw, account) =>
+          // Oct 25 (owner-approved restore): the full filed-eligibility result
+          // (reason + conditions) feeds the side-by-side comparison; same-sector
+          // schedules the account cannot take are listed with the filed reason.
+          eligibility: (peakKw, account) =>
             tariffEligible(
               {
                 sector: tariff.sector,
@@ -781,9 +811,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
                 techCondition: tariff.techCondition,
                 ...tariffEligibilityTerms(tariff.structure as TariffStructure),
               },
-              { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType, monthlyImportedKwh: monthlyImportedKwh(account.points, account.timezone) },
+              { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType, monthlyImportedKwh: accountMonthlyKwh(account) },
               peakKw,
-            ).eligible,
+            ),
+          eligibleFor: () => false,
+          listIfIneligible: sectorAllows(sectorClass, tariff.sector),
         })),
         tz,
       );
@@ -1569,6 +1601,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
           : null,
       tariffComparisons: comparisons,
       meterRateReview,
+      fullBillEstimate,
       baseline: baseline
         ? {
             method: baseline.method,
@@ -1776,12 +1809,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         disclosures: [anyIndicative ? INDICATIVE_RATE_RANGE_BASIS : RATE_RANGE_BASIS],
       });
     }
-    oppCands.push({
-      key: "account_demand_review", title: "Review each service agreement’s demand peaks and rate terms",
-      category: "demand", annualSavingsUsdLo: 0, annualSavingsUsdHi: 0, capexBand: "none", confidence: "low",
-      rationale: "Campus coincident peaks are not billed account peaks. Review account-specific demand windows, ratchets, block usage and eligibility before estimating savings.",
-      disclosures: ["Informational action — no dollar estimate until each service agreement's demand is modeled. Rate-review ranges are shown separately.", ...meterRateReview.disclosures],
-    });
+    // Oct 25 (owner): the no-dollar "account_demand_review" card was removed —
+    // the per-account rate comparison (with verdicts) now carries this content.
   } else if (bestSwitch) {
     oppCands.push({
       key: "rate_switch",
@@ -2080,6 +2109,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     currentCost,
     tariffComparisons: comparisons,
     meterRateReview,
+    fullBillEstimate,
     benchmark,
     emissions,
     insightsCount: insightRows.length,

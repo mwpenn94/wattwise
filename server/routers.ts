@@ -1684,6 +1684,8 @@ export const appRouter = router({
               meterCount: meterRows.filter((meter) => meter.meterRole !== "virtual_total").length,
               analyzed: m != null,
               annualCostUsd: m?.currentCost?.breakdown?.total ?? null,
+              // Oct 25: estimated full bill (LFCR + taxes) range — never bill-confirmed.
+              fullBillRangeUsd: (m as { fullBillEstimate?: { total?: { low: number; high: number } } | null } | null)?.fullBillEstimate?.total ?? null,
               demandCostUsd: m?.currentCost?.breakdown ? (m.currentCost.breakdown.demand ?? 0) + (m.currentCost.breakdown.cp ?? 0) : null,
               peakKw: m?.demand?.peakKw ?? null,
               loadFactor: m?.demand?.loadFactor ?? null,
@@ -1834,6 +1836,12 @@ export const appRouter = router({
             siteCount: siteRollups.length,
             analyzedCount: siteRollups.filter((r) => r.analyzed).length,
             annualCostUsd: sum("annualCostUsd"),
+            // Oct 25: sum of estimated full-bill ranges over the sites that have
+            // one (count shown beside it); other sites are not mixed in.
+            fullBillRangeUsd: siteRollups.some((r) => r.fullBillRangeUsd)
+              ? siteRollups.reduce((a, r) => (r.fullBillRangeUsd ? { low: a.low + r.fullBillRangeUsd.low, high: a.high + r.fullBillRangeUsd.high } : a), { low: 0, high: 0 })
+              : null,
+            fullBillSiteCount: siteRollups.filter((r) => r.fullBillRangeUsd).length,
             demandCostUsd: sum("demandCostUsd"),
             annualUsageKwh: sum("annualUsageKwh"),
             annualCo2eLb: sum("annualCo2eLb"),
@@ -1900,7 +1908,7 @@ export const appRouter = router({
           batchId: z.number().int(),
           planVersion: z.number().int().optional(),
           timeZone: z.string().min(1).max(64).optional(),
-          timestampBasis: z.enum(["start", "end"]).optional(),
+          timestampBasis: z.enum(["start", "end", "auto"]).optional(),
           groupingMode: z.enum(["campus", "building"]).default("campus"),
           stateHint: z.string().max(4).nullable().optional(),
           overrides: z.array(z.object({ sheetId: z.number().int(), siteId: z.number().int().nullable(), groupKey: z.string().max(512).nullable().optional() })).max(2000).optional(),
@@ -1955,7 +1963,7 @@ export const appRouter = router({
           contentBase64: z.string().max(70_000_000).optional(),
           sourceRef: z.string().max(2048).optional(),
           timeZone: z.string().max(64).optional(),
-          timestampBasis: z.enum(["start", "end"]).optional(),
+          timestampBasis: z.enum(["start", "end", "auto"]).optional(),
           commodityHint: z.enum(["electric", "gas", "water"]).optional(),
           /** Oct 25: when true, a workbook listing several service addresses
            * stops for the user's choice (separate sites vs. this site) before
@@ -1972,7 +1980,9 @@ export const appRouter = router({
         const clockMeters = await h.listMeters(input.siteId, ctx.user.id);
         const clockZones = Array.from(new Set(clockMeters.filter(m => m.meterRole !== "virtual_total").map(m => m.timezone)));
         if (!input.timeZone && clockZones.length > 1) throw new TRPCError({ code: "BAD_REQUEST", message: "This site has multiple meter timezones; specify the source timezone." });
-        const sourceClock = { timeZone: input.timeZone ?? clockZones[0] ?? tzForState(site.state), timestampBasis: input.timestampBasis ?? "start", ambiguousTime: "reject" } as const;
+        // Oct 25 (cost audit): the start/end convention is detected from the
+        // readings unless the user explicitly chose one ("auto" = default).
+        const sourceClock = { timeZone: input.timeZone ?? clockZones[0] ?? tzForState(site.state), timestampBasis: input.timestampBasis === "end" ? "end" : "start", detectBasis: !input.timestampBasis || input.timestampBasis === "auto", ambiguousTime: "reject" } as const;
         const stored = input.sourceRef ? await loadSourceRef(ctx.user.id, input.sourceRef) : null;
         const buf = stored ? stored.buf : Buffer.from(input.contentBase64!, "base64");
         const gate = preParseGate(buf, input.format);
@@ -2169,7 +2179,7 @@ export const appRouter = router({
                   // R2 #2: the new meter records the SOURCE clock the file was
                   // parsed with (site/meter timezone + START/END basis).
                   timezone: sourceClock.timeZone,
-                  timestampBasis: sourceClock.timestampBasis,
+                  timestampBasis: s.timestampBasis ?? sourceClock.timestampBasis,
                 },
                 ctx.user.id,
               );
@@ -2211,12 +2221,19 @@ export const appRouter = router({
                 /* fail-open: the analysis falls back to the disclosed basis ladder */
               }
             }
+            const basisConflict = await singleIngest.conventionConflict(meter, s.timestampBasis, uploadId);
+            if (basisConflict) throw new ConventionConflictError(basisConflict);
             const w = await writeIntervals(db, meter.id, s, uploadId, 2);
             totalIn += s.rowsIngested;
             totalSkip += s.rowsSkipped;
             out.push({ meterId: meter.id, label, points: w.inserted + w.replaced, validationPass: s.validation.pass });
           }
         } catch (writeErr) {
+          if (writeErr instanceof ConventionConflictError) {
+            // Nothing from this file may stay: remove readings already written.
+            await h.deleteUpload(uploadId, ctx.user.id).catch(() => undefined);
+            throw new TRPCError({ code: "BAD_REQUEST", message: `${writeErr.message} Nothing from this file was saved.` });
+          }
           const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
           await h.updateUpload(uploadId, {
             status: "failed",
@@ -3909,6 +3926,7 @@ export const appRouter = router({
 });
 
 /* ---------------- scenario basis builder ---------------- */
+class ConventionConflictError extends Error {}
 /** Cycle 3, passes 36/66: meter timezone derived from the site's state. */
 // Batch-24 (passes 846/856): states that span two clock zones — the map's single
 // value covers the dominant-population zone, and any meter created from bare

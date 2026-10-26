@@ -68,6 +68,23 @@ const LEASE_MS = 120_000;
 const COMMIT_SLICE_MS = Number(process.env.BULK_COMMIT_SLICE_MS ?? 45_000);
 /** After a slice pauses, the batch is "continuing" (not stalled) for this long. */
 const PAUSE_GRACE_MS = 90_000;
+/** Consecutive transient-failure slices tolerated before the import is marked failed. */
+const MAX_TRANSIENT_RETRIES = 5;
+/**
+ * Oct 26: a brief database/network interruption (connect timeout, dropped
+ * connection, deadlock) is not a failed import. Every unit is checkpointed, so
+ * the slice pauses and the page continues it; only persistent faults fail.
+ */
+export function isTransientInfraError(e: unknown): boolean {
+  const parts: string[] = [];
+  let cur: unknown = e;
+  for (let i = 0; i < 4 && cur; i++) {
+    const o = cur as { message?: unknown; code?: unknown; errno?: unknown; cause?: unknown };
+    parts.push(String(o?.message ?? cur), String(o?.code ?? ""), String(o?.errno ?? ""));
+    cur = o?.cause;
+  }
+  return /ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|EAI_AGAIN|PROTOCOL_CONNECTION_LOST|PROTOCOL_SEQUENCE_TIMEOUT|Connection lost|Too many connections|ER_LOCK_DEADLOCK|ER_LOCK_WAIT_TIMEOUT|Lock wait timeout|Deadlock found|socket hang up/i.test(parts.join(" "));
+}
 const MAX_BATCH_FILES = 8, MAX_BATCH_BYTES = 150 * 1024 * 1024, MAX_BATCH_SHEETS = 128;
 const running = new Set<number>(); // admission optimization only, never ownership
 const digest = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -272,7 +289,7 @@ async function siteLimit(user: { id: number; tier?: string | null; role?: string
 
 export async function preview(
   user: { id: number; tier?: string | null; role?: string },
-  input: { batchId: number; planVersion?: number; groupingMode: GroupingMode; stateHint?: string | null; timeZone?: string; timestampBasis?: "start" | "end"; overrides?: Array<{ sheetId: number; siteId: number | null; groupKey?: string | null }> },
+  input: { batchId: number; planVersion?: number; groupingMode: GroupingMode; stateHint?: string | null; timeZone?: string; timestampBasis?: "start" | "end" | "auto"; overrides?: Array<{ sheetId: number; siteId: number | null; groupKey?: string | null }> },
 ) {
   const userId = user.id;
   const d = await db();
@@ -426,7 +443,7 @@ export async function preview(
       billUtility,
       needsReview: review,
       meters: metersOut,
-      sourceClock: { timeZone: input.timeZone ?? (metersOut.map(m=>userMeters.find(x=>x.id===m.existingMeterId)?.timezone).find(Boolean)) ?? TZ_BY_STATE[state ?? ""] ?? "UTC", timestampBasis: input.timestampBasis ?? "start", ambiguousTime: "reject" },
+      sourceClock: { timeZone: input.timeZone ?? (metersOut.map(m=>userMeters.find(x=>x.id===m.existingMeterId)?.timezone).find(Boolean)) ?? TZ_BY_STATE[state ?? ""] ?? "UTC", timestampBasis: input.timestampBasis === "end" ? "end" : "start", detectBasis: !input.timestampBasis || input.timestampBasis === "auto", ambiguousTime: "reject" },
     };
   });
 
@@ -476,6 +493,8 @@ interface CommitSummary {
   sheetsTotal: number; sheetsDone: number; sheetsImported: number; sheetsFailed: number; sheetsDuplicate: number; pointsWritten: number;
   sitesCreated: number; sitesReused: number; metersCreated: number; metersReused: number; tariffsAssigned: number;
   campusTotals: number; analysesRun: number; analysesFailed: number;
+  /** Consecutive slices ended by a transient infrastructure error (reset on progress). */
+  transientRetries?: number;
   currentSheet: string | null; currentSite: string | null; siteIds: number[]; entityId: number | null;
   options: CommitOptions; startedAt: number; notes: string[];
   postProcessing: Record<string, { totals?: "done" | "failed"; analysis?: "done" | "failed"; detail?: string; propertyFacts?: "done" | "skipped" | "unavailable"; floorAreaApplied?: boolean }>;
@@ -541,6 +560,13 @@ export async function commit(user: {id:number;tier?:string|null;role?:string}, i
     const outcome=await runCommit(input.batchId,userId,claim.tier,claim.plan.sites,claim.summary,token,Date.now()+COMMIT_SLICE_MS);
     return {batchId:input.batchId,started:true,alreadyRunning:false,more:outcome==="paused"};
   } catch(e) {
+    const tries=(claim.summary.transientRetries??0)+1;
+    if (isTransientInfraError(e) && tries<=MAX_TRANSIENT_RETRIES) {
+      // Keep the batch resumable: release the lease into the pause grace so
+      // the page (or Resume) continues from the last checkpoint.
+      const paused=await d.update(importBatches).set({status:"committing",error:null,summary:{...claim.summary,transientRetries:tries},workerToken:null,leaseUntil:Date.now()+PAUSE_GRACE_MS}).where(and(owned(importBatches,input.batchId,userId),eq(importBatches.workerToken,token))).then(()=>true,()=>false);
+      return {batchId:input.batchId,started:true,alreadyRunning:false,more:true,transient:true,pausedOk:paused};
+    }
     await d.update(importBatches).set({status:"failed",error:message(e).slice(0,4000),workerToken:null,leaseUntil:null}).where(and(owned(importBatches,input.batchId,userId),eq(importBatches.workerToken,token)));
     return {batchId:input.batchId,started:true,alreadyRunning:false,more:false};
   } finally { running.delete(input.batchId); }
@@ -556,6 +582,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
     await d.transaction(async tx=> {
       await assertLiveLeaseForUpdate(tx,batchId,userId,token);
       await deriveProgress(tx,batchId,userId,summary);
+      summary.transientRetries=0;
       await tx.update(importBatches).set({summary:{...summary},workerToken:null,leaseUntil:Date.now()+PAUSE_GRACE_MS}).where(owned(importBatches,batchId,userId));
     });
     return "paused" as const;
@@ -622,9 +649,13 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
           if (!rows) throw new Error("Source sheet missing");
           const identity=meterIdentityKey(pm);
           const [known]=await d.select().from(meters).where(and(eq(meters.userId,userId),eq(meters.importIdentity,identity)));
-          const clock:IntervalClock={...ps.sourceClock,timeZone:known?.timezone??ps.sourceClock.timeZone,timestampBasis:known?.timestampBasis??ps.sourceClock.timestampBasis};
-          if (known?.timestampBasis && known.timestampBasis!==ps.sourceClock.timestampBasis) throw new Error("Existing meter timestamp convention differs; explicit source correction is required");
+          // Oct 25 (cost audit): with detection on, each sheet's convention is
+          // read from its own first/last readings; an explicit choice still wins.
+          const detect=!!ps.sourceClock.detectBasis;
+          const clock:IntervalClock={...ps.sourceClock,timeZone:known?.timezone??ps.sourceClock.timeZone,timestampBasis:detect?ps.sourceClock.timestampBasis:(known?.timestampBasis??ps.sourceClock.timestampBasis)};
+          if (!detect && known?.timestampBasis && known.timestampBasis!==ps.sourceClock.timestampBasis) throw new Error("Existing meter timestamp convention differs; explicit source correction is required");
           const series=parseSheetRows(cleanSheetName(checkpoint.sheetName),rows,clock).filter(s=>s.points.length);
+          if (detect && known?.timestampBasis && series[0]?.timestampBasis && series[0].timestampBasis!==known.timestampBasis) throw new Error(`This sheet's timestamps look like interval ${series[0].timestampBasis.toUpperCase()}S, but this meter's earlier data was imported as interval ${known.timestampBasis.toUpperCase()}S. Nothing was changed; choose the convention explicitly or remove the earlier data first.`);
           if (!series.length) throw new Error("No interval rows could be parsed");
           // Interim safety: multi-channel sheets require a durable channel map.
           // Reject rather than use unstable row-order suffixes or lose lineage.
@@ -650,11 +681,11 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
               // Do not silently mix old timezone-naive timestamps with corrected data.
               const [n]=await tx.select({n:sql<number>`COUNT(*)`}).from(intervals).where(eq(intervals.meterId,meter.id));
               if (Number(n.n)>0 && !meter.timestampBasis) throw new Error("Legacy meter has unverified timestamp provenance. Audit/reparse existing data before attaching corrected intervals.");
-              await tx.update(meters).set({importIdentity:identity,timestampBasis:clock.timestampBasis}).where(eq(meters.id,meter.id));
+              await tx.update(meters).set({importIdentity:identity,timestampBasis:series[0].timestampBasis??clock.timestampBasis}).where(eq(meters.id,meter.id));
             }
             const s=series[0];
             if (!meter) {
-              const [r]=await tx.insert(meters).values({userId,siteId:site.id,importIdentity:identity,commodity:s.commodity,label:[pm.facility,pm.serviceAgreementId?`SA ${pm.serviceAgreementId}`:pm.sheetName].filter(Boolean).join(" · ").slice(0,250),accountNumber:pm.accountNumber,servicePoint:pm.servicePointId,serviceAgreementId:pm.serviceAgreementId,rateScheduleCode:pm.rateScheduleCode,facilityLabel:pm.facility,importBatchId:batchId,usageUnit:s.usageUnit,demandUnit:s.demandUnit,meterRole:"main",timezone:clock.timeZone,timestampBasis:clock.timestampBasis});
+              const [r]=await tx.insert(meters).values({userId,siteId:site.id,importIdentity:identity,commodity:s.commodity,label:[pm.facility,pm.serviceAgreementId?`SA ${pm.serviceAgreementId}`:pm.sheetName].filter(Boolean).join(" · ").slice(0,250),accountNumber:pm.accountNumber,servicePoint:pm.servicePointId,serviceAgreementId:pm.serviceAgreementId,rateScheduleCode:pm.rateScheduleCode,facilityLabel:pm.facility,importBatchId:batchId,usageUnit:s.usageUnit,demandUnit:s.demandUnit,meterRole:"main",timezone:clock.timeZone,timestampBasis:s.timestampBasis??clock.timestampBasis});
               [meter]=await tx.select().from(meters).where(eq(meters.id,Number(r.insertId)));
             }
             const w=await writeIntervals(tx,meter.id,s,uploadId,2);
@@ -770,7 +801,7 @@ async function runCommit(batchId:number,userId:number,tier:Tier,planSites:Previe
         reclaimMemory();
       }
     }
-    summary.phase="done"; summary.currentSite=null; summary.currentSheet=null;
+    summary.phase="done"; summary.currentSite=null; summary.currentSheet=null; summary.transientRetries=0;
     await fenced(batchId,userId,token,async tx=> {
       const all=await deriveProgress(tx,batchId,userId,summary);
       const warnings=all.some(s=>s.status==="skipped" || ((s.validation as Array<{pass:boolean}>|null)??[]).some(v=>!v.pass))||Object.values(summary.postProcessing).some(p=>p.detail||p.totals==="failed"||p.analysis==="failed");

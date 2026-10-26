@@ -44,6 +44,8 @@ export interface ParsedMeterSeries {
   headerRowIndex: number;
   rowsIngested: number;
   rowsSkipped: number;
+  /** The start/end convention actually applied (detected when the clock asked for detection). */
+  timestampBasis?: "start" | "end";
 }
 
 /* ---------------- footer extraction ---------------- */
@@ -61,8 +63,32 @@ function extractFooterTotals(summaryRows: string[]): { totalUsage?: number; maxD
 /* ---------------- time parsing ---------------- */
 export interface IntervalClock {
   timeZone: string;
+  /** Applied as-is, or the fallback when `detectBasis` cannot decide. */
   timestampBasis: "start" | "end";
   ambiguousTime?: "reject";
+  /**
+   * Oct 25 (cost audit): detect the start/end convention from the readings
+   * themselves. A wrong default turned an end-labeled year into a 13th billing
+   * month, so detection is the default for new uploads.
+   */
+  detectBasis?: boolean;
+}
+/**
+ * Decide whether timestamps label interval STARTS or ENDS from the data's
+ * edges: a day-aligned export labeled by interval end begins at 00:<len> and
+ * ends at 00:00 (e.g. 00:15 … 00:00); one labeled by start begins at 00:00
+ * and ends at 24:00 minus one interval (00:00 … 23:45). Returns null when the
+ * edges do not clearly match either pattern.
+ */
+export function detectTimestampBasis(firstLabelTs: number, lastLabelTs: number, durationMin: number, zone: string): "start" | "end" | null {
+  if (!(durationMin > 0) || durationMin >= 1440 || 1440 % durationMin !== 0) return null;
+  const minuteOfDay = (ts: number) => Math.round((((wallAt(ts, zone) % 86_400_000) + 86_400_000) % 86_400_000) / 60_000);
+  const first = minuteOfDay(firstLabelTs), last = minuteOfDay(lastLabelTs);
+  const end = Number(first === durationMin) + Number(last === 0);
+  const start = Number(first === 0) + Number(last === 1440 - durationMin);
+  if (end > start) return "end";
+  if (start > end) return "start";
+  return null;
 }
 // Legacy pure-parser callers have a deterministic UTC default. All ingestion
 // entry points supply the confirmed/source or existing-meter clock explicitly.
@@ -347,7 +373,20 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock, prebuilt
   if (points.length < 3) return null;
   points.sort((a, b) => a.ts - b.ts);
   const dur = inferDurationMin(points.map((p) => p.ts));
-  for (const p of points) { p.durationMin = dur; if (clock.timestampBasis === "end") p.ts -= dur * 60_000; }
+  let basis: "start" | "end" = clock.timestampBasis;
+  let basisNote: string | null = null;
+  if (clock.detectBasis) {
+    const detected = detectTimestampBasis(points[0].ts, points[points.length - 1].ts, dur, clock.timeZone);
+    const fmt = (ts: number) => new Date(wallAt(ts, clock.timeZone)).toISOString().slice(11, 16);
+    const edges = `first reading ${fmt(points[0].ts)}, last ${fmt(points[points.length - 1].ts)}`;
+    if (detected) {
+      basis = detected;
+      basisNote = `Timestamps were detected as the ${detected === "end" ? "END" : "START"} of each ${dur}-minute interval (${edges}).`;
+    } else {
+      basisNote = `Could not tell from the readings whether timestamps mark the start or end of each interval (${edges}); treated them as interval ${basis === "end" ? "ENDS" : "STARTS"}. If your utility labels the other way, re-upload choosing it explicitly.`;
+    }
+  }
+  for (const p of points) { p.durationMin = dur; if (basis === "end") p.ts -= dur * 60_000; }
 
   const footerTotals = extractFooterTotals(table.summaryRows);
   const ingestedUsageSum = points.reduce((a, p) => a + p.usage, 0);
@@ -359,7 +398,7 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock, prebuilt
     if (p.demand != null && (ingestedMaxDemand == null || p.demand > ingestedMaxDemand)) ingestedMaxDemand = p.demand;
   }
 
-  const notes: string[] = [...inferenceNotes, `Source clock: ${clock.timeZone}; ${clock.timestampBasis}-labeled intervals stored as UTC starts. Explicit offsets preserved; unresolved DST folds/gaps rejected.`];
+  const notes: string[] = [...inferenceNotes, ...(basisNote ? [basisNote] : []), `Source clock: ${clock.timeZone}; ${basis}-labeled intervals stored as UTC starts. Explicit offsets preserved; unresolved DST folds/gaps rejected.`];
   if (receivedRows > 0) {
     notes.push(`${receivedRows} "Received" (export) rows excluded from consumption — net-metering export is not usage`);
   }
@@ -404,6 +443,7 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock, prebuilt
     headerRowIndex: table.headerRowIndex,
     rowsIngested: points.length,
     rowsSkipped: skipped,
+    timestampBasis: basis,
   };
 }
 

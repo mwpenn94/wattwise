@@ -13,6 +13,10 @@ export type RateCodeResolution = {
 
 const EXACT_UNS_CODES: Record<string, string> = {
   EGSGS: "uns-egsgs",
+  // Oct 25: official SGS variants (sheets 202–204).
+  EGSGST: "uns-egsgst",
+  EGSGSD: "uns-egsgsd",
+  EGSGSDT: "uns-egsgsdt",
   EGMGS: "uns-egmgs",
   EGMGST: "uns-egmgst",
   EGMGSST: "uns-egmgsst",

@@ -47,6 +47,22 @@ export interface InsightsPrintData {
     savingsVsCurrent: number | null;
     eligibilityNote?: string;
   }> | null;
+  /** Oct 25: estimated full bill (LFCR + taxes) range — never bill-confirmed. */
+  fullBillEstimate?: { total: { low: number; high: number }; lfcr: { low: number; high: number }; taxes: { low: number; high: number } | null; unconfirmedTca: { low: number; high: number }; assumptions: string[] } | null;
+  /** Oct 25: per-account comparison for sites with several billed accounts. */
+  accountRateReview?: {
+    perMeter: Array<{
+      meterId: number; label: string; tariffName: string; currentObservedCost: number;
+      verdictText?: string;
+      options?: Array<{ id: number; name: string; isCurrent: boolean; observedCost: number; differenceUsd: number; differencePct: number | null }>;
+      excluded?: Array<{ id: number; name: string; reason: string }>;
+      bestAlternative: { savingsRangeUsd: { low: number; high: number } } | null;
+    }>;
+    totalCurrentObservedCost: number;
+    totalSavingsRangeUsd: { low: number; high: number } | null;
+    savingsBasis: string;
+    sharedNotes?: string[];
+  } | null;
   chart: Array<{ ts: number; kw: number }>;
   chartWindowLabel: string;
   insights: Array<{ kind: string; title: string; body: string; confidence?: string | null }>;
@@ -221,11 +237,21 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
     { label: "Peak demand", value: d ? `${num(d.peakKw)} kW` : "—", sub: d ? new Date(d.peakTimestamp).toLocaleDateString() : undefined },
     { label: "Load factor", value: d ? `${Math.round(d.loadFactor * 100)}%` : "—", sub: d ? `avg ${num(d.avgKw)} kW` : undefined },
     {
-      label: "Modeled annual cost",
+      label: "Modeled cost, period covered",
       value: cost ? usd(cost.total) : "—",
       sub: cost ? `energy ${usd(cost.energy)} · demand ${usd(cost.demand)} · fixed ${usd(cost.fixed)}` : undefined,
       chip: data.baseline?.confidenceLabel ?? "Est.",
     },
+    ...(data.fullBillEstimate
+      ? [
+          {
+            label: data.fullBillEstimate.taxes ? "Est. full bill (LFCR + taxes)" : "Est. bill with LFCR",
+            value: `${usd(data.fullBillEstimate.total.low)}–${usd(data.fullBillEstimate.total.high)}`,
+            sub: `LFCR ${usd(data.fullBillEstimate.lfcr.low)}–${usd(data.fullBillEstimate.lfcr.high)}${data.fullBillEstimate.taxes ? ` · taxes ${usd(data.fullBillEstimate.taxes.low)}–${usd(data.fullBillEstimate.taxes.high)}` : ""} · not bill-confirmed`,
+            chip: "Estimate",
+          },
+        ]
+      : []),
     ...(data.telecom && data.telecom.serviceCount > 0
       ? [
           {
@@ -404,6 +430,52 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
         </section>
       )}
 
+      {data.fullBillEstimate && (
+        <section className="mb-3">
+          <p className="text-[9px] text-neutral-600">
+            <span className="font-semibold text-neutral-800">Estimated full bill: </span>
+            {data.fullBillEstimate.assumptions.join(" ")}
+          </p>
+        </section>
+      )}
+      {/* Oct 25: per-account rate comparison (campus with several billed accounts) */}
+      {data.accountRateReview && data.accountRateReview.perMeter.length > 0 && (
+        <section className="mb-4">
+          <SectionTitle>Rate comparison by account</SectionTitle>
+          <p className="text-[9px] text-neutral-600 mb-1">
+            Each account priced on its own readings over the same uploaded period. A switch is worth requesting when it saves more than $50 and 2%.
+          </p>
+          <table className="w-full border-collapse text-[9.5px]">
+            <thead>
+              <tr className="border-b border-neutral-400 text-left text-neutral-500">
+                <th className="py-1 pr-2">Account</th>
+                <th className="py-1 pr-2">Schedules priced (cost · vs. current)</th>
+                <th className="py-1">Verdict</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.accountRateReview.perMeter.map((m) => (
+                <tr key={m.meterId} className="border-b border-neutral-200 align-top break-inside-avoid">
+                  <td className="py-1 pr-2 font-medium">{m.label}<div className="font-normal text-neutral-600">{m.tariffName.split(" — ")[0]} · {usd(m.currentObservedCost)}</div></td>
+                  <td className="py-1 pr-2">
+                    {(m.options ?? []).filter((o) => !o.isCurrent).map((o) => (
+                      <div key={o.id}>{o.name}: {usd(o.observedCost)} · {Math.abs(o.differenceUsd) < 0.5 ? "same" : o.differenceUsd > 0 ? `${usd(o.differenceUsd)} less` : `${usd(-o.differenceUsd)} more`}{o.differencePct != null && Math.abs(o.differenceUsd) >= 0.5 ? ` (${(Math.abs(o.differencePct) * 100).toFixed(1)}%)` : ""}</div>
+                    ))}
+                    {m.excluded && m.excluded.length > 0 && <div className="text-neutral-500">Not available: {m.excluded.map((e) => `${e.name} — ${e.reason}`).join("; ")}</div>}
+                  </td>
+                  <td className="py-1">{m.verdictText ?? (m.bestAlternative ? `Switch candidate: ${usd(m.bestAlternative.savingsRangeUsd.low)}–${usd(m.bestAlternative.savingsRangeUsd.high)}` : "No material alternative")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-1 text-[9px] text-neutral-600">
+            All accounts on current schedules: {usd(data.accountRateReview.totalCurrentObservedCost)}. Combined screening range for switch candidates: {data.accountRateReview.totalSavingsRangeUsd ? `${usd(data.accountRateReview.totalSavingsRangeUsd.low)}–${usd(data.accountRateReview.totalSavingsRangeUsd.high)}` : "none above the threshold"}. {data.accountRateReview.savingsBasis}
+          </p>
+          {(data.accountRateReview.sharedNotes ?? []).length > 0 && (
+            <p className="mt-1 text-[8.5px] text-neutral-500">Notes: {(data.accountRateReview.sharedNotes ?? []).join(" ")}</p>
+          )}
+        </section>
+      )}
       {/* opportunities */}
       {occupantOpps.length > 0 && (
         <section className="mb-4">

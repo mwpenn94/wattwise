@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.10.3"; // Oct 24: UNS Gas Oct-1-2026 official values; MGS 750 kW reclassification condition
+export const SEED_VERSION = "2026.10.5"; // Oct 25: official UNS SGS-TOU / SGS-Demand / SGS-Demand-TOU (sheets 202–204, Decision 79277)
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -298,6 +298,8 @@ const UNS_ELECTRIC_UTILITY = "UniSource Energy Services (UNS Electric)";
 const UNS_OFFICIAL_SOURCE = "uns_official_tariff";
 const UNS_SOC = "https://docs.uesaz.com/wp-content/uploads/801-UNSE-Statement-of-Charges.pdf";
 const UNS_PPFAC = "https://docs.uesaz.com/wp-content/uploads/701-Rider-1-PPFAC-Clean.pdf";
+const UNS_SOC_2024 = "https://docs.uesaz.com/wp-content/uploads/2018/03/Statement-of-Charges.pdf#page=3";
+const UNS_REST_PAGE = "https://www.uesaz.com/rest/";
 const UNS_EXCLUDED_RIDER_NOTE = "Modeled subtotal; excludes LFCR, taxes/assessments and unconfirmed account-specific terms. LFCR EE/DG rates are 0.7536%/0.3462% from 2025-10-01 (ACC announcement 2025-09-17), then 0.9298%/0.4138% from 2026-09-01 (Statement of Charges sheet 801-2, p.3). The complete assessment base is unverified, so no LFCR dollar charge is invented.";
 const UNS_MODEL_TERMS = {
   requiredRiderLabels: ["PPFAC", "DSMS", "REST", "TCA", "TEAM", "Regulatory Expense"],
@@ -329,9 +331,24 @@ function unsElectricRiders(restCapUsd: number, demandBilled = false): NonNullabl
     { label: "PPFAC temporary surcharge", ratePerUnit: 0.022259, validFrom: "2025-10-01", validTo: "2025-11-30", source: `${UNS_PPFAC}#page=2 (sheet 701-1)` },
     { label: "PPFAC temporary credit", ratePerUnit: -0.020931, validFrom: "2026-05-01", validTo: "2026-12-31", source: `${UNS_SOC}#page=2 (sheet 801-1)` },
     { label: "DSMS", ratePerUnit: 0.0015, validFrom: "2014-08-01", source: `${UNS_SOC}#page=2 (sheet 801-1)` },
+    // Oct 25 (cost audit): the REST version in effect BEFORE May 1 2026 —
+    // official Statement of Charges sheet 801-2 (First Revised, eff Jun 1 2024;
+    // Decision 78922 values eff May 1 2023), also the values published on
+    // uesaz.com/rest/ through at least Feb 2026. Superseded May 1 2026.
+    { label: "REST", ratePerUnit: 0.0123, monthlyCapUsd: restCapUsd === 59.5 ? 45 : restCapUsd === 350 ? 238 : 590,
+      renewableClassAverageUsd: restCapUsd === 59.5 ? 12.51 : restCapUsd === 350 ? 125.32 : 587.12,
+      validFrom: "2023-05-01", validTo: "2026-04-30", source: `${UNS_SOC_2024} (sheet 801-2, First Revised, eff 2024-06-01; Decision 78922, eff 2023-05-01); confirmed on ${UNS_REST_PAGE} (captures 2025-10-16, 2026-02-18)` },
     { label: "REST", ratePerUnit: 0.0126, monthlyCapUsd: restCapUsd,
       renewableClassAverageUsd: restCapUsd === 59.5 ? 13.46 : restCapUsd === 350 ? 203.39 : 911.50,
       validFrom: "2026-05-01", source: `${UNS_SOC}#page=3 (sheet 801-2); renewable eligibility: sheet 706 p.1` },
+    // Oct 25 (cost audit): TCA before Jun 1 2026 for NON-demand schedules —
+    // $0.000413/kWh eff Jun 1 2024 (official SoC sheet 801-2 First Revised,
+    // Decision 79277), still the published value on uesaz.com/tca/ through the
+    // 2026-04-18 capture. The demand-customer value is published as "$0.13 per
+    // kW" on the sheet but as a ~13¢/kW CREDIT on the utility page; with the
+    // sign unconfirmed it is NOT modeled (those months stay "incomplete").
+    ...(demandBilled ? [] : [{ label: "TCA", ratePerUnit: 0.000413, basis: "import_kwh" as const,
+      validFrom: "2024-06-01", validTo: "2026-05-31", source: `${UNS_SOC_2024} (sheet 801-2, First Revised, eff 2024-06-01; Decision 79277); confirmed on https://www.uesaz.com/tca/ (captures 2025-09-15, 2025-12-15, 2026-04-18)` }]),
     { label: "TCA", ratePerUnit: demandBilled ? 0.36 : 0.001474, basis: demandBilled ? "billing_demand_kw" : "import_kwh",
       validFrom: "2026-06-01", source: `${UNS_SOC}#page=3 (sheet 801-2); basis: sheet 709 p.1` },
     { label: "TEAM", ratePerUnit: -0.0001, validFrom: "2026-01-01", source: `${UNS_SOC}#page=4 (sheet 801-3)` },
@@ -695,6 +712,134 @@ export const SEED_TARIFFS: SeedTariff[] = [
         UNS_EXCLUDED_RIDER_NOTE,
         UNS_SWITCH_NOTE,
         "SGS customers meeting or exceeding 12,000 kWh for two consecutive months migrate to Medium General Service (EGMGS).",
+      ],
+    },
+    freshness: "verified",
+    effectiveDate: "2024-02-01",
+    source: UNS_OFFICIAL_SOURCE,
+  },
+  /* Oct 25 (owner-approved rate-comparison restore): the three customer-
+   * elected Small General Service variants from the official UNS Electric
+   * tariff sheets 202–204 (Original sheets, effective 2024-02-01, Decision
+   * 79277; index https://www.uesaz.com/electric-rates/).
+   * Encoded so an engine that ignores the newer fields OVERSTATES their cost
+   * (never invents savings): SGS-TOU prices carry the top delivery block with
+   * ≤0 block adjustments; demand tiers carry the top tier in ratePerKw; an
+   * unaveraged 15-minute peak is never below the filed 1-hour average. */
+  {
+    urdbId: "uns-egsgst",
+    utilityName: UNS_ELECTRIC_UTILITY,
+    name: "Small General Service Time-of-Use (EGSGST) — filed base; modeled subtotal",
+    sector: "commercial",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: null,
+    structure: {
+      ...UNS_MODEL_TERMS,
+      fixedMonthly: 20.0,
+      optionalSchedule: true,
+      migrationAtConsecutiveMonthlyKwh: { kwh: 12000, months: 2, to: "Medium General Service Time-of-Use (EGMGST)", sheet: "202" },
+      // Sheet 202-1: delivery $0.040384 (0–400 kWh) / $0.045509 (401–7,500) /
+      // $0.089070 (over 7,500) + base power by season and period. Rates below
+      // are the over-7,500-kWh totals; the adjustments restore the lower blocks.
+      energy: [
+        { label: "Summer on-peak", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 14, hourEnd: 20, ratePerUnit: 0.233162, holidayExclusions: ["memorial_day", "independence_day", "labor_day"] },
+        { label: "Summer off-peak", months: SUMMER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.149043 },
+        { label: "Winter on-peak morning", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 5, hourEnd: 9, ratePerUnit: 0.23185, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "Winter on-peak evening", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 17, hourEnd: 21, ratePerUnit: 0.23185, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "Winter off-peak", months: WINTER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.14161 },
+      ],
+      energyBlockAdjustments: [
+        { upToKwh: 400, ratePerUnit: -0.048686 },
+        { upToKwh: 7500, ratePerUnit: -0.043561 },
+        { upToKwh: null, ratePerUnit: 0 },
+      ],
+      demand: [],
+      riders: unsElectricRiders(59.5),
+      notes: [
+        UNS_EXCLUDED_RIDER_NOTE,
+        UNS_SWITCH_NOTE,
+        "SGS-TOU delivery price steps by monthly kWh (0–400 / 401–7,500 / over 7,500); on-peak is 2–8 pm weekdays May–Oct and 5–9 am & 5–9 pm weekdays Nov–Apr, excluding filed holidays (sheet 202-1). Service starts once a TOU meter is installed. 12,000 kWh in two consecutive months moves the account to MGS-TOU.",
+      ],
+    },
+    freshness: "verified",
+    effectiveDate: "2024-02-01",
+    source: UNS_OFFICIAL_SOURCE,
+  },
+  {
+    urdbId: "uns-egsgsd",
+    utilityName: UNS_ELECTRIC_UTILITY,
+    name: "Small General Service Demand (EGSGSD) — filed base; modeled subtotal",
+    sector: "commercial",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    // Sheet 203: at 40 kW measured the utility may move the account to MGS the
+    // next billing period, so savings at or above 40 kW are not dependable.
+    peakKwMax: 40,
+    structure: {
+      ...UNS_MODEL_TERMS,
+      fixedMonthly: 20.0,
+      optionalSchedule: true,
+      sizeLimitReason: "Filed rule (sheet 203): at 40 kW or more the utility may move the account to Medium General Service the next billing period.",
+      // Sheet 203: all kWh $0.083206 (delivery $0.013273 + base power $0.069933).
+      // Two identical seasonal periods keep older code from treating this
+      // optional schedule as a default single-period standard rate.
+      energy: [
+        { label: "All energy — summer", months: SUMMER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.083206 },
+        { label: "All energy — winter", months: WINTER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.083206 },
+      ],
+      // Sheet 203-1: billing demand = greatest measured 1-hour average during
+      // on-peak TOU hours; $8.46/kW for the first 7 kW, $11.27/kW above 7 kW.
+      demand: [
+        { label: "On-peak demand — summer", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 14, hourEnd: 20, demandGroup: "sgsd-onpeak", ratePerKw: 11.27, tiers: [{ upToKw: 7, ratePerKw: 8.46 }, { upToKw: null, ratePerKw: 11.27 }], averagingMinutes: 60, holidayExclusions: ["memorial_day", "independence_day", "labor_day"] },
+        { label: "On-peak demand — winter morning", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 5, hourEnd: 9, demandGroup: "sgsd-onpeak", ratePerKw: 11.27, tiers: [{ upToKw: 7, ratePerKw: 8.46 }, { upToKw: null, ratePerKw: 11.27 }], averagingMinutes: 60, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "On-peak demand — winter evening", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 17, hourEnd: 21, demandGroup: "sgsd-onpeak", ratePerKw: 11.27, tiers: [{ upToKw: 7, ratePerKw: 8.46 }, { upToKw: null, ratePerKw: 11.27 }], averagingMinutes: 60, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+      ],
+      riders: unsElectricRiders(59.5, true),
+      notes: [
+        UNS_EXCLUDED_RIDER_NOTE,
+        UNS_SWITCH_NOTE,
+        "SGS-Demand bills the greatest 1-hour average demand during on-peak hours (2–8 pm weekdays May–Oct; 5–9 am & 5–9 pm weekdays Nov–Apr, excluding filed holidays): $8.46/kW for the first 7 kW and $11.27/kW above that (sheets 203, 203-1). Modeled as the greatest rolling 60-minute average of the uploaded readings.",
+      ],
+    },
+    freshness: "verified",
+    effectiveDate: "2024-02-01",
+    source: UNS_OFFICIAL_SOURCE,
+  },
+  {
+    urdbId: "uns-egsgsdt",
+    utilityName: UNS_ELECTRIC_UTILITY,
+    name: "Small General Service Demand Time-of-Use (EGSGSDT) — filed base; modeled subtotal",
+    sector: "commercial",
+    commodity: "electric",
+    state: "AZ",
+    peakKwMin: null,
+    peakKwMax: 40,
+    structure: {
+      ...UNS_MODEL_TERMS,
+      fixedMonthly: 20.0,
+      optionalSchedule: true,
+      sizeLimitReason: "Filed rule (sheet 204): at 40 kW or more the utility may move the account to Medium General Service Time-of-Use the next billing period.",
+      // Sheet 204-1: delivery $0.013273 + base power by season and period.
+      energy: [
+        { label: "Summer on-peak", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 14, hourEnd: 20, ratePerUnit: 0.157365, holidayExclusions: ["memorial_day", "independence_day", "labor_day"] },
+        { label: "Summer off-peak", months: SUMMER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.073246 },
+        { label: "Winter on-peak morning", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 5, hourEnd: 9, ratePerUnit: 0.156053, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "Winter on-peak evening", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 17, hourEnd: 21, ratePerUnit: 0.156053, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "Winter off-peak", months: WINTER, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.065813 },
+      ],
+      demand: [
+        { label: "On-peak demand — summer", months: SUMMER, daysOfWeek: WEEKDAYS, hourStart: 14, hourEnd: 20, demandGroup: "sgsdt-onpeak", ratePerKw: 11.27, tiers: [{ upToKw: 7, ratePerKw: 8.46 }, { upToKw: null, ratePerKw: 11.27 }], averagingMinutes: 60, holidayExclusions: ["memorial_day", "independence_day", "labor_day"] },
+        { label: "On-peak demand — winter morning", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 5, hourEnd: 9, demandGroup: "sgsdt-onpeak", ratePerKw: 11.27, tiers: [{ upToKw: 7, ratePerKw: 8.46 }, { upToKw: null, ratePerKw: 11.27 }], averagingMinutes: 60, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+        { label: "On-peak demand — winter evening", months: WINTER, daysOfWeek: WEEKDAYS, hourStart: 17, hourEnd: 21, demandGroup: "sgsdt-onpeak", ratePerKw: 11.27, tiers: [{ upToKw: 7, ratePerKw: 8.46 }, { upToKw: null, ratePerKw: 11.27 }], averagingMinutes: 60, holidayExclusions: ["thanksgiving", "christmas_day", "new_years_day"] },
+      ],
+      riders: unsElectricRiders(59.5, true),
+      notes: [
+        UNS_EXCLUDED_RIDER_NOTE,
+        UNS_SWITCH_NOTE,
+        "SGS-Demand-TOU combines on-peak/off-peak energy prices with the SGS-Demand charge: greatest 1-hour average on-peak demand, $8.46/kW for the first 7 kW and $11.27/kW above (sheets 204, 204-1). Service starts once a TOU meter is installed.",
       ],
     },
     freshness: "verified",

@@ -51,7 +51,7 @@ export const uploadClient = createTRPCProxyClient<AppRouter>({
 export function isTransient(e: unknown): boolean {
   if (e instanceof TransientServerError) return true;
   const m = e instanceof Error ? e.message : String(e);
-  return /Unexpected token|not valid JSON|Failed to fetch|NetworkError|Load failed|unexpected 50[234]|Service Unavailable|Bad Gateway|Gateway Time/i.test(m);
+  return /Unexpected token|not valid JSON|Failed to fetch|NetworkError|Load failed|unexpected 50[234]|Service Unavailable|Bad Gateway|Gateway Time|ETIMEDOUT|ECONNRESET|ECONNREFUSED|PROTOCOL_CONNECTION_LOST|Connection lost|Too many connections/i.test(m);
 }
 
 /** Plain-language message for anything the user sees in a toast. */

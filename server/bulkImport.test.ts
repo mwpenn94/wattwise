@@ -214,6 +214,8 @@ import * as writer from "./ingest/writer";
 import * as bulk from "./bulkImport";
 import * as virtualTotal from "./virtualTotal";
 import * as pipeline from "./analytics/pipeline";
+import * as propertyFacts from "./propertyFacts";
+import { isTransientInfraError } from "./bulkImport";
 const sample=(tag:string,patch:Partial<SyntheticSheet>={}):SyntheticSheet=>({name:tag.slice(0,31),account:`AC-${tag}`,agreement:`SA-${tag}`,servicePoint:`SP-${tag}`,rateCode:"EGSGS",address:`300 ${tag} Ave, Kingman, AZ`,...patch});
 const callerFor=()=>appRouter.createCaller(ctxFor({id:userId!,openId}));
 async function prepared(sheets:SyntheticSheet[],mode:"campus"|"building"="campus") {
@@ -244,6 +246,47 @@ describe("bulk hardening",()=>{
       await d.delete(importBatches).where(eq(importBatches.id,staged.batchId));
     }
   }, 30_000);
+  it("classifies brief database/network interruptions as transient (including wrapped causes)",()=>{
+    expect(isTransientInfraError(Object.assign(new Error("connect ETIMEDOUT"),{code:"ETIMEDOUT"}))).toBe(true);
+    expect(isTransientInfraError(new Error("Failed query: select 1",{cause:Object.assign(new Error("Connection lost: The server closed the connection."),{code:"PROTOCOL_CONNECTION_LOST"})}))).toBe(true);
+    expect(isTransientInfraError(new Error("Deadlock found when trying to get lock; try restarting transaction"))).toBe(true);
+    expect(isTransientInfraError(new Error("Source sheet missing"))).toBe(false);
+    expect(isTransientInfraError(new Error("Site capacity exhausted; upgrade before resuming"))).toBe(false);
+  });
+  it("pauses (not fails) on a transient database timeout and resumes to completion; persistent faults still fail",async()=>{
+    const timeout=()=>{ throw Object.assign(new Error("connect ETIMEDOUT"),{code:"ETIMEDOUT"}); };
+    const fx=await prepared([sample("blip-a",{address:"910 Blip Ave, Kingman, AZ"})]);
+    const spy=vi.spyOn(propertyFacts,"propertyFactsNetworkAvailable").mockImplementationOnce(timeout).mockReturnValue(false);
+    try {
+      const r=await start(fx);
+      expect(r).toMatchObject({started:true,more:true,transient:true});
+      const mid=await fx.caller.bulkImport.status({batchId:fx.staged.batchId});
+      expect(mid.batch.status).toBe("committing");
+      expect(mid.batch.error).toBeNull();
+      expect(mid.paused).toBe(true);
+      expect(mid.batch.summary!.transientRetries).toBe(1);
+      const done=await waitForCommit(fx.caller,fx.staged.batchId);
+      expect(done.batch.status).toBe("complete");
+      expect(done.batch.summary).toMatchObject({sheetsDone:1,sheetsFailed:0,transientRetries:0});
+    } finally { spy.mockRestore(); }
+    const fx2=await prepared([sample("blip-b",{address:"920 Blip Ave, Kingman, AZ"})]);
+    const spy2=vi.spyOn(propertyFacts,"propertyFactsNetworkAvailable").mockImplementation(timeout);
+    try {
+      const outcomes:unknown[]=[];
+      outcomes.push(await start(fx2));
+      for (let i=0;i<5;i++) outcomes.push(await fx2.caller.bulkImport.commit({batchId:fx2.staged.batchId,planVersion:fx2.preview.planVersion}));
+      expect(outcomes.slice(0,5).every(o=>(o as {transient?:boolean}).transient===true)).toBe(true);
+      expect(outcomes[5]).toMatchObject({more:false});
+      const st=await fx2.caller.bulkImport.status({batchId:fx2.staged.batchId});
+      expect(st.batch.status).toBe("failed");
+      expect(st.batch.error).toContain("ETIMEDOUT");
+      // imported checkpoints survive; a later Retry resumes once the fault clears
+      spy2.mockReturnValue(false);
+      await fx2.caller.bulkImport.commit({batchId:fx2.staged.batchId,planVersion:fx2.preview.planVersion,clockConfirmed:true,runAnalysis:false});
+      const healed=await waitForCommit(fx2.caller,fx2.staged.batchId);
+      expect(healed.batch.status).toBe("complete");
+    } finally { spy2.mockRestore(); }
+  },90_000);
   it("retries failed totals and analysis independently, clears stale detail, and preserves imported checkpoints",async()=>{
     const fx=await prepared([sample("post-a",{address:"900 Retry Ave, Unit A, Kingman, AZ"}),sample("post-b",{address:"900 Retry Ave, Unit B, Kingman, AZ"})]);
     const totalSpy=vi.spyOn(virtualTotal,"materializeVirtualTotal").mockRejectedValueOnce(new Error("temporary total failure"));

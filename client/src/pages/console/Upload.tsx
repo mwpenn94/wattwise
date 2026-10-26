@@ -41,7 +41,7 @@ export default function Upload() {
   const billRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   // R2 #2: the source timestamp convention is explicit, never silently assumed.
-  const [clockBasis, setClockBasis] = useState<"start" | "end">("start");
+  const [clockBasis, setClockBasis] = useState<"auto" | "start" | "end">("auto");
   const [mode, setMode] = useState<"single" | "bulk">(() => (new URLSearchParams(window.location.search).get("mode") === "bulk" ? "bulk" : "single"));
   const [billManual, setBillManual] = useState<null | { reason: string }>(null);
   const [manualBill, setManualBill] = useState({ periodStart: "", periodEnd: "", totalUsage: "", totalCost: "", billedDemandKw: "" });
@@ -95,7 +95,12 @@ export default function Upload() {
   }
   function reportResult(filename: string, res: IngestResult) {
     if (res.duplicate) toast.info(`${filename}: already ingested (duplicate checksum) — skipped`);
-    else toast.success(`${filename}: ${res.totalPoints.toLocaleString()} interval points across ${res.meters.length} meter(s)`);
+    else {
+      // Oct 25 (cost audit): say which start/end convention was applied.
+      const notes = (res.validations ?? []).flatMap((v) => (v as { notes?: string[] }).notes ?? []);
+      const detected = notes.find((n) => n.startsWith("Timestamps were detected as the ") || n.startsWith("Could not tell from the readings"));
+      toast.success(`${filename}: ${res.totalPoints.toLocaleString()} interval points across ${res.meters.length} meter(s)`, detected ? { description: detected } : undefined);
+    }
   }
 
   async function onFiles(files: FileList | null) {
@@ -296,16 +301,17 @@ export default function Upload() {
             </SelectContent>
           </Select>
           <Label htmlFor="single-clock-basis" className="mt-3 block">Interval timestamps mark the</Label>
-          <Select disabled={busy} value={clockBasis} onValueChange={(v) => setClockBasis(v === "end" ? "end" : "start")}>
+          <Select disabled={busy} value={clockBasis} onValueChange={(v) => setClockBasis(v === "end" ? "end" : v === "start" ? "start" : "auto")}>
             <SelectTrigger id="single-clock-basis" className="mt-1" aria-label="Source interval timestamp convention (single upload)">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="start">Interval START (default)</SelectItem>
+              <SelectItem value="auto">Detect from the readings (recommended)</SelectItem>
+              <SelectItem value="start">Interval START</SelectItem>
               <SelectItem value="end">Interval END (common in utility exports)</SelectItem>
             </SelectContent>
           </Select>
-          <p className="mt-1 text-[11px] text-muted-foreground">Local clock is the site's meter timezone. Check your file's header — e.g. a 00:15 reading that covers 00:00–00:15 is END-labeled.</p>
+          <p className="mt-1 text-[11px] text-muted-foreground">Local clock is the site's meter timezone. Detection reads the first and last readings — a file that runs 00:15 … 00:00 is END-labeled; 00:00 … 23:45 is START-labeled. The result is shown with each upload. Choose explicitly only if your utility says otherwise.</p>
           {(sites.data ?? []).length === 0 && !sites.isLoading && (
             <p className="mt-2 text-xs text-muted-foreground">
               No sites yet — <Link href="/app/sites" className="text-primary underline">create one</Link> first.

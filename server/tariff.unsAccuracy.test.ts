@@ -22,10 +22,19 @@ describe("UNS official tariff corrections (R2)", () => {
     expect(riders(price("uns-egsgs", "2025-12-15T12:00Z", 10000))["PPFAC temporary surcharge"]).toBeUndefined();
     const jan = price("uns-egsgs", "2026-01-15T12:00Z", 10000);
     expect(riders(jan).PPFAC).toBeCloseTo(134.25);
-    expect(riders(jan).REST).toBeUndefined();
-    expect(jan.pricingStatus).toBe("incomplete_rider_coverage");
-    expect(jan.switchRecommendationAllowed).toBe(false);
-    expect(jan.missingRiderCoverage?.[0].labels).toEqual(expect.arrayContaining(["REST", "TCA"]));
+    // Official 2023 REST version ($0.0123/kWh, SGS cap $45) applies until 2026-04-30;
+    // official pre-June-2026 non-demand TCA ($0.000413/kWh) applies to SGS.
+    expect(riders(jan).REST).toBeCloseTo(45);
+    expect(riders(jan).TCA).toBeCloseTo(4.13);
+    expect(jan.pricingStatus).toBe("modeled_subtotal");
+    // MGS demand TCA before June 2026 is not yet verified from an official sheet: stays disclosed as missing.
+    const janMgs = price("uns-egmgs", "2026-01-15T12:00Z", 10000, 10);
+    expect(riders(janMgs).REST).toBeCloseTo(123);
+    expect(janMgs.pricingStatus).toBe("incomplete_rider_coverage");
+    expect(janMgs.switchRecommendationAllowed).toBe(false);
+    expect(janMgs.missingRiderCoverage?.[0].labels).toEqual(["TCA"]);
+    // TEAM before 2026 is not verified: Dec 2025 discloses it as missing rather than guessing.
+    expect(price("uns-egsgs", "2025-12-15T12:00Z", 10000).missingRiderCoverage?.[0].labels).toEqual(["TEAM"]);
     expect(riders(price("uns-egsgs", "2025-12-15T12:00Z")).TEAM).toBeUndefined();
     expect(riders(price("uns-egsgs", "2026-04-15T12:00Z"))["PPFAC temporary credit"]).toBeUndefined();
     expect(riders(price("uns-egsgs", "2026-05-15T12:00Z", 10000))["PPFAC temporary credit"]).toBeCloseTo(-209.31);

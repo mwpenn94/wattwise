@@ -176,6 +176,22 @@ export interface DemandCharge {
    * max(kW across the group's windows) x ratePerKw ONCE, not once per window.
    */
   demandGroup?: string;
+  /**
+   * Oct 25: progressive demand tiers on the billed kW (e.g. UNS SGS-Demand:
+   * first 7 kW $8.46, above 7 kW $11.27). When present, tiers replace
+   * ratePerKw; ratePerKw must hold the HIGHEST tier rate so an engine that
+   * ignores tiers overstates (never understates) the charge.
+   */
+  tiers?: Array<{ upToKw: number | null; ratePerKw: number }>;
+  /**
+   * Oct 25: billing demand is the greatest average over this many minutes of
+   * contiguous readings inside the window (UNS SGS-Demand: 60-minute average).
+   * Omitted = the greatest single reading (legacy behavior, never lower than
+   * an averaged determinant).
+   */
+  averagingMinutes?: number;
+  /** Named holidays whose hours fall outside this demand window (filed TOU holidays). */
+  holidayExclusions?: TouPeriod["holidayExclusions"];
 }
 
 export interface RatchetClause {
@@ -228,13 +244,29 @@ export interface TariffStructure {
   energy: TouPeriod[];
   demand: DemandCharge[];
   energyBlocks?: EnergyBlock[];
+  /**
+   * Oct 25: progressive monthly ADJUSTMENTS added to TOU energy charges, for
+   * schedules whose per-kWh delivery price steps by monthly usage block on top
+   * of TOU power-supply prices (UNS SGS-TOU). TOU rates carry the HIGHEST
+   * block's price and these adjustments are ≤ 0, so an engine that ignores
+   * them overstates (never understates) the cost.
+   */
+  energyBlockAdjustments?: EnergyBlock[];
+  /**
+   * Oct 25: customer-elected variant (demand or time-of-use options); never
+   * used as the default current-rate basis when an account's rate is not on file.
+   */
+  optionalSchedule?: boolean;
+  /** Plain filed-rule wording shown when peakKwMax excludes an account. */
+  sizeLimitReason?: string;
   riders?: TariffRider[];
   /** Labels requiring a verified rate version in every priced month. */
   requiredRiderLabels?: string[];
   /** Historical pricing is not a projection beyond this source-verification date. */
   verifiedThrough?: string;
   billingCaveat?: string;
-  migrationAtConsecutiveMonthlyKwh?: { kwh: number; months: number };
+  /** Filed SGS-style migration; `to`/`sheet` name the destination class and filed sheet (default MGS, sheet 201). */
+  migrationAtConsecutiveMonthlyKwh?: { kwh: number; months: number; to?: string; sheet?: string };
   switchRequiresConfirmation?: boolean;
   primaryVoltageDemandCreditPct?: number;
   /** Minimum monthly billing-demand determinant, if the filed tariff states one. */

@@ -238,6 +238,19 @@ async function fail(uploadId: number, ctx: IngestContext, s: IngestState, kind: 
   throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "The file was read, but saving its readings failed partway. Nothing from this file was kept — please upload it again." });
 }
 
+/**
+ * Plain refusal text when `basis` differs from the convention of readings this
+ * meter already holds from other uploads; null when compatible.
+ */
+export async function conventionConflict(meter: { id: number; label: string | null; timestampBasis?: "start" | "end" | null }, basis: "start" | "end" | undefined, uploadId: number): Promise<string | null> {
+  if (!basis || !meter.timestampBasis || meter.timestampBasis === basis) return null;
+  const d = await database();
+  const [c] = await d.select({ n: sql<number>`COUNT(*)` }).from(intervals).where(and(eq(intervals.meterId, meter.id), sql`${intervals.uploadId} <> ${uploadId}`));
+  if (Number(c?.n ?? 0) === 0) return null;
+  const word = (b: "start" | "end") => (b === "end" ? "END" : "START");
+  return `This file's timestamps mark the ${word(basis)} of each interval, but meter “${meter.label ?? `#${meter.id}`}” already holds readings imported as interval ${word(meter.timestampBasis)}s. Mixing them would count the same usage twice. To replace the earlier data, delete that earlier upload from Upload history, then upload this file again.`;
+}
+
 /** Header pass: sheet list, bill identity per sheet, and distinct service addresses. */
 async function readHeaders(buf: Buffer, s: IngestState) {
   preflightWorkbookZip(buf);
@@ -377,12 +390,17 @@ async function runSheets(
           if (!meter) {
             const meterId = await h.createMeter({
               siteId: ctx.siteId, userId: ctx.userId, commodity, label, usageUnit: ser.usageUnit, demandUnit: ser.demandUnit,
-              timezone: s.clock.timeZone, timestampBasis: s.clock.timestampBasis,
+              timezone: s.clock.timeZone, timestampBasis: ser.timestampBasis ?? s.clock.timestampBasis,
             }, ctx.userId);
             s.createdMeterIds.push(meterId);
             await save(uploadId, ctx.userId, s, token);
             meter = (await h.listMeters(ctx.siteId, ctx.userId)).find((m) => m.id === meterId)!;
           }
+          // Oct 25 (cost audit): never mix interval-START and interval-END data on
+          // one meter — the same readings would be stored 15 minutes apart and
+          // counted twice. Nothing from this file is kept (fail() rolls back).
+          const basisConflict = await conventionConflict(meter, ser.timestampBasis, uploadId);
+          if (basisConflict) return fail(uploadId, ctx, s, "parse", basisConflict);
           touched.push(meter.id);
           // RC2: the bill's rate code reconciles to the official filed schedule —
           // never over an assignment the user (or a prior import) made.

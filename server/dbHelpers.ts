@@ -519,7 +519,10 @@ export async function setMeterRole(
 export async function getIntervalPoints(meterId: number, userId: number, fromTs?: number, toTs?: number) {
   await assertMeterOwner(meterId, userId);
   const db = await requireDb();
-  const conds = [eq(intervals.meterId, meterId), sql`${intervals.qcFlags} IS NULL OR ${intervals.qcFlags} != 'superseded_overlap'`];
+  // Oct 26: the OR must be parenthesized. Without it the WHERE clause read
+  // "(meterId = ? AND qcFlags IS NULL) OR qcFlags != …", which scanned the whole
+  // intervals table and dropped the meter/time filters for flagged rows.
+  const conds = [eq(intervals.meterId, meterId), sql`(${intervals.qcFlags} IS NULL OR ${intervals.qcFlags} != 'superseded_overlap')`];
   if (fromTs != null) conds.push(gte(intervals.ts, fromTs));
   if (toTs != null) conds.push(lte(intervals.ts, toTs));
   return db

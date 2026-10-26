@@ -10,6 +10,7 @@ import { detectPersona, personaVocab } from "@/lib/persona";
 import AnalysisProgress from "@/components/AnalysisProgress";
 import DemandReview, { type DemandReviewData } from "@/components/DemandReview";
 import MeterRateReviewCard, { type MeterRateReviewData } from "@/components/MeterRateReviewCard";
+import type { FullBillEstimate as FullBillEstimateData } from "../../../../server/analytics/fullBill";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -212,6 +213,7 @@ export default function Dashboard() {
     } | null;
     demandReview?: DemandReviewData | null;
     meterRateReview?: MeterRateReviewData | null;
+    fullBillEstimate?: FullBillEstimateData | null;
     tariffComparisons?: Array<{
       tariffName: string;
       utilityName: string;
@@ -328,6 +330,8 @@ export default function Dashboard() {
           })(),
           baseline: summary?.baseline ?? null,
           tariffComparisons: tariffInsight,
+          accountRateReview: summary?.meterRateReview ?? null,
+          fullBillEstimate: summary?.fullBillEstimate ?? null,
           chart: chartData,
           chartWindowLabel: rangeDays === "all" ? "full history" : `last ${rangeDays} days`,
           insights: insightRows.map((i) => ({
@@ -989,6 +993,31 @@ export default function Dashboard() {
                       ))}
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">{plain}</p>
+                    {summary?.fullBillEstimate && (
+                      <div className="mt-2 rounded-md border border-dashed border-border px-3 py-2" data-testid="full-bill-estimate">
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                          <p className="text-xs font-medium">
+                            {summary.fullBillEstimate.taxes ? "Estimated full bill with LFCR and taxes" : "Estimated bill with LFCR, before taxes"}
+                          </p>
+                          <p className="font-mono text-sm font-semibold">
+                            {fmtUsd(summary.fullBillEstimate.total.low)}–{fmtUsd(summary.fullBillEstimate.total.high)}
+                          </p>
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-muted-foreground">
+                          LFCR {fmtUsd(summary.fullBillEstimate.lfcr.low)}–{fmtUsd(summary.fullBillEstimate.lfcr.high)}
+                          {summary.fullBillEstimate.taxes ? ` · taxes and assessments ${fmtUsd(summary.fullBillEstimate.taxes.low)}–${fmtUsd(summary.fullBillEstimate.taxes.high)}` : ""}
+                          {summary.fullBillEstimate.unconfirmedTca.high > 0.5 ? ` · unconfirmed transmission adjustor ±${fmtUsd(summary.fullBillEstimate.unconfirmedTca.high)}` : ""}
+                          {" "}· estimated from published rates, not confirmed by a bill
+                        </p>
+                        <details className="mt-1 text-[11px]">
+                          <summary className="cursor-pointer text-muted-foreground">What the range covers</summary>
+                          <ul className="mt-1 list-disc space-y-1 pl-4 leading-relaxed text-muted-foreground">
+                            {summary.fullBillEstimate.assumptions.map((a, i) => <li key={i}>{a}</li>)}
+                          </ul>
+                          <p className="mt-1 break-words text-muted-foreground">Sources: {summary.fullBillEstimate.sources.join(" · ")}</p>
+                        </details>
+                      </div>
+                    )}
                   </div>
                 );
               })()
@@ -1605,7 +1634,7 @@ function TariffTable({ metrics }: { metrics: { comparisons?: TariffRow[]; hasCos
       <Collapsible className="mt-2">
         <CollapsibleTrigger className="group flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" data-testid="rate-not-applicable-toggle">
           <ChevronDown className="h-3.5 w-3.5 transition-transform group-data-[state=open]:rotate-180" />
-          {notApplicable.length} other {notApplicable.length === 1 ? "rate does" : "rates do"} not apply to this site
+          {notApplicable.length} other {notApplicable.length === 1 ? "rate is" : "rates are"} not available or not a fit for this site
         </CollapsibleTrigger>
         <CollapsibleContent>
           <ul className="mt-1.5 space-y-1 text-xs text-muted-foreground" data-testid="rate-not-applicable">
