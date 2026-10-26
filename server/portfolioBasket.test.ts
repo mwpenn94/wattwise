@@ -9,12 +9,14 @@
  *  4. Honesty: the disclosure states no cross-site interaction is modeled.
  *  5. Tenancy: a basket containing another user's site is rejected outright.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
 import { getDb } from "./db";
-import { users } from "../drizzle/schema";
-import { eq } from "drizzle-orm";
+import { scenarios, users } from "../drizzle/schema";
+import { eq, inArray } from "drizzle-orm";
+import { clearTestPlan, grantTestPlan } from "./testBilling";
+import * as h from "./dbHelpers";
 
 function ctxFor(user: { id: number; openId: string; tier?: string }): TrpcContext {
   return {
@@ -43,8 +45,21 @@ async function makeUser(openId: string, tier: "free" | "pro") {
     .onDuplicateKeyUpdate({ set: { name: openId } });
   const rows = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
   await db.update(users).set({ tier }).where(eq(users.id, rows[0].id));
+  await grantTestPlan(rows[0].id, tier); // BILL-1: access follows the billing account
+  madeUserIds.push(rows[0].id);
   return { ...rows[0], tier };
 }
+const madeUserIds: number[] = [];
+afterAll(async () => {
+  const db = await getDb();
+  if (!db) return;
+  for (const id of madeUserIds) {
+    for (const s of await h.listSites(id)) await h.deleteSite(s.id, id);
+  }
+  await db.delete(scenarios).where(inArray(scenarios.userId, madeUserIds.length ? madeUserIds : [-1]));
+  await clearTestPlan(madeUserIds);
+  for (const id of madeUserIds) await db.delete(users).where(eq(users.id, id));
+}, 60_000);
 
 const MEASURE = {
   key: "led_retrofit",

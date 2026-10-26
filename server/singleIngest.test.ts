@@ -10,6 +10,7 @@ import type { TrpcContext } from "./_core/context";
 import { getDb } from "./db";
 import * as h from "./dbHelpers";
 import { intervals, meters, uploads, users } from "../drizzle/schema";
+import { clearTestPlan, grantTestPlan } from "./testBilling";
 
 const sources = vi.hoisted(() => new Map<string, Buffer>());
 vi.mock("./storage", async (importOriginal) => ({
@@ -74,12 +75,14 @@ beforeAll(async () => {
   await d.insert(users).values({ openId, name: openId, email: `${openId}@fe-fixture.invalid`, loginMethod: "test", tier: "pro" });
   const [u] = await d.select().from(users).where(eq(users.openId, openId)).limit(1);
   userId = u!.id;
+  await grantTestPlan(userId, "pro"); // BILL-1: access follows the billing account
 });
 afterAll(async () => {
   const d = await getDb();
   if (!d || !userId) return;
   for (const s of await h.listSites(userId)) await h.deleteSite(s.id, userId);
   await d.delete(uploads).where(eq(uploads.userId, userId));
+  await clearTestPlan(userId);
   await d.delete(users).where(eq(users.id, userId));
   delete process.env.SINGLE_INGEST_SLICE_MS;
 });

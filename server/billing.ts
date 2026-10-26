@@ -33,8 +33,40 @@ export function planEntitlements(plan: string | null | undefined): PlanEntitleme
 
 export function effectiveEntitlement(account: Pick<BillingAccount, "plan" | "status" | "graceEndsAt"> | null, now = Date.now()): PlanEntitlements {
   if (!account) return PLAN_ENTITLEMENTS.free;
-  if (account.status === "past_due" && (account.graceEndsAt == null || account.graceEndsAt <= now)) return PLAN_ENTITLEMENTS.free;
-  return planEntitlements(account.plan);
+  // BILL-1: an allowlist, so an unknown or non-paying subscription state
+  // (canceled, unpaid, incomplete, paused, …) fails closed to Free. Founding
+  // and Free accounts are always "active".
+  if (account.status === "active" || account.status === "trialing") return planEntitlements(account.plan);
+  if (account.status === "past_due" && account.graceEndsAt != null && account.graceEndsAt > now) return planEntitlements(account.plan);
+  return PLAN_ENTITLEMENTS.free;
+}
+
+/** BILL-1 (Oct 26): the ONE access rule for every protected procedure. The
+ * owner/admin role keeps full access (as before); everyone else gets the plan
+ * of their billing account (no account → Free). The legacy users.tier column
+ * is never read for access, so it cannot be used to self-upgrade. */
+export function entitlementFor(role: string | null | undefined, account: Pick<BillingAccount, "plan" | "status" | "graceEndsAt"> | null, now = Date.now()): PlanEntitlements {
+  if (role === "admin") return PLAN_ENTITLEMENTS.pro;
+  return effectiveEntitlement(account, now);
+}
+
+type BillingReader = Pick<NonNullable<Awaited<ReturnType<typeof getDb>>>, "select">;
+
+/** Loads the caller's billing account (through `exec` when given, e.g. the
+ * capacity-lock transaction) and applies {@link entitlementFor}. Fails closed
+ * to Free when there is no database or no real user id (e.g. cron). */
+export async function entitlementForUser(user: { id: number; role?: string | null }, exec?: BillingReader): Promise<PlanEntitlements> {
+  if (user.role === "admin") return PLAN_ENTITLEMENTS.pro;
+  if (!(user.id > 0)) return PLAN_ENTITLEMENTS.free;
+  const db = exec ?? (await getDb());
+  if (!db) return PLAN_ENTITLEMENTS.free;
+  const rows = await db.select().from(billingAccounts).where(eq(billingAccounts.userId, user.id)).limit(1);
+  return entitlementFor(user.role, rows[0] ?? null);
+}
+
+const PLAN_LABEL: Record<BillingPlan, string> = { free: "Free", founding: "Founding", plus: "Plus", pro: "Pro" };
+export function planLabel(plan: BillingPlan): string {
+  return PLAN_LABEL[plan] ?? "Free";
 }
 
 export function webhookSignature(payload: string, secret: string, timestamp: number): string {

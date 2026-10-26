@@ -10,13 +10,15 @@
  *     implementation verdicts — a site with zero implementations contributes
  *     nothing and does not appear in perSite.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
 import { getDb } from "./db";
 import { users } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
 import { portfolioManagerCsv, type PortfolioExportRow } from "./reports";
+import { clearTestPlan, grantTestPlan } from "./testBilling";
+import * as h from "./dbHelpers";
 
 function ctxFor(user: { id: number; openId: string }, tier: "free" | "pro" = "pro"): TrpcContext {
   return {
@@ -44,8 +46,20 @@ async function makeUser(openId: string, tier: "free" | "pro" = "pro") {
     .onDuplicateKeyUpdate({ set: { name: openId } });
   const rows = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
   await db.update(users).set({ tier }).where(eq(users.id, rows[0].id));
+  await grantTestPlan(rows[0].id, tier); // BILL-1: access follows the billing account
+  madeUserIds.push(rows[0].id);
   return rows[0];
 }
+const madeUserIds: number[] = [];
+afterAll(async () => {
+  const db = await getDb();
+  if (!db) return;
+  for (const id of madeUserIds) {
+    for (const s of await h.listSites(id)) await h.deleteSite(s.id, id);
+  }
+  await clearTestPlan(madeUserIds);
+  for (const id of madeUserIds) await db.delete(users).where(eq(users.id, id));
+}, 60_000);
 
 describe("GAP-N portfolioManagerCsv shaper", () => {
   const rows: PortfolioExportRow[] = [

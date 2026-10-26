@@ -4,9 +4,7 @@ import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
 import { addSavingsRanges, savingsRangeFromEstimate, type SavingsRangeUsd } from "@shared/savingsRange";
 import {
-  FREE_TIER_MAX_SITES,
   FREE_TIER_MAX_UPLOADS_PER_MONTH,
-  FREE_TIER_SCENARIOS_PER_MONTH,
   MODELED_ESTIMATES_DISCLAIMER,
   // (§3l reports engine imported separately below)
   LABEL_CP_ESTIMATED,
@@ -81,7 +79,7 @@ import * as propertyFacts from "./propertyFacts";
 import { computeAddressEstimate, estimateRateAllows } from "./estimate";
 import { reconcileBill } from "./billReconciliation";
 import { deriveBillVerifiedRate } from "./billCalibration";
-import { checkoutSetupMessage, effectiveEntitlement, ensureBillingAccount, loadBillingAccount, stripeConfigured } from "./billing";
+import { checkoutSetupMessage, ensureBillingAccount, entitlementFor, entitlementForUser, loadBillingAccount, planLabel, stripeConfigured, type PlanEntitlements } from "./billing";
 import { createCustomerPortalSession, createHostedCheckoutSession } from "./stripeBilling";
 import {
   analyzeTelecomServices,
@@ -123,18 +121,32 @@ import { and, asc, eq, gte, lte } from "drizzle-orm";
 
 /* ---------- tier helpers ---------- */
 type Tier = "free" | "plus" | "pro";
-function tierOf(user: { tier?: string | null; role?: string }): Tier {
-  if (user.role === "admin") return "pro"; // owner/admin gets full access
-  return (user.tier as Tier) ?? "free";
+/** BILL-1 (Oct 26): access follows the billing account (entitlementForUser:
+ * admin → Pro; billing plan with past-due grace; no account → Free). The
+ * legacy users.tier column is no longer read, so it cannot self-upgrade. */
+async function tierOf(user: { id: number; role?: string | null }): Promise<Tier> {
+  return (await entitlementForUser(user)).tier;
 }
+const TIER_LABEL: Record<Tier, string> = { free: "Free", plus: "Plus", pro: "Pro" };
 function requireTier(current: Tier, needed: Tier, feature: string) {
   const order: Tier[] = ["free", "plus", "pro"];
   if (order.indexOf(current) < order.indexOf(needed)) {
     throw new TRPCError({
       code: "FORBIDDEN",
-      message: `${feature} requires the ${needed} tier. You are on ${current}.`,
+      message: `${feature} requires the ${TIER_LABEL[needed]} plan. Your plan: ${TIER_LABEL[current]}.`,
     });
   }
+}
+/** Site cap from the one plan map. The Free wording is unchanged. */
+function siteCapMessage(ent: PlanEntitlements): string {
+  return ent.plan === "free"
+    ? `Free tier is limited to ${ent.maxSites} sites. Upgrade to add more.`
+    : `The ${planLabel(ent.plan)} plan is limited to ${ent.maxSites} sites. Upgrade to add more.`;
+}
+function scenarioCapMessage(ent: PlanEntitlements): string {
+  return ent.plan === "free"
+    ? `Free tier allows ${ent.maxScenariosPerMonth} scenario runs/month.`
+    : `The ${planLabel(ent.plan)} plan allows ${ent.maxScenariosPerMonth} scenario runs/month.`;
 }
 
 const seeded = () => ensureSeeded().catch((e) => console.error("[Seed] failed:", e));
@@ -408,7 +420,6 @@ export const appRouter = router({
         }),
     }),
     create: protectedProcedure.input(siteInput).mutation(async ({ ctx, input }) => {
-      const tier = tierOf(ctx.user);
       // Batch-13 (passes 56/76/86/95): count-then-create runs under a per-user
       // named lock so concurrent requests cannot all pass the free-tier check.
       // Gap-8 cascade (Jul 2026): the direct-create path now derives every
@@ -426,10 +437,12 @@ export const appRouter = router({
         vintage: input.vintage ?? null,
       });
       const id = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
-        if (tier === "free") {
+        // BILL-1: the plan is read inside the capacity-lock transaction.
+        const ent = await entitlementForUser(ctx.user, tx);
+        if (ent.maxSites !== null) {
           const n = await h.countSites(ctx.user.id, tx);
-          if (n >= FREE_TIER_MAX_SITES) {
-            throw new TRPCError({ code: "FORBIDDEN", message: `Free tier is limited to ${FREE_TIER_MAX_SITES} sites. Upgrade to add more.` });
+          if (n >= ent.maxSites) {
+            throw new TRPCError({ code: "FORBIDDEN", message: siteCapMessage(ent) });
           }
         }
         return h.createSite({
@@ -604,7 +617,6 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         await seeded();
-        const tier = tierOf(ctx.user);
         // Grounded location: resolve the verified Place server-side when one
         // was selected; degrade to free-text parsing (disclosed) otherwise —
         // a Places outage must never block intake.
@@ -639,10 +651,11 @@ export const appRouter = router({
           vintage: cascade.vintage.value,
         });
         const id = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
-          if (tier === "free") {
+          const ent = await entitlementForUser(ctx.user, tx);
+          if (ent.maxSites !== null) {
             const n = await h.countSites(ctx.user.id, tx);
-            if (n >= FREE_TIER_MAX_SITES) {
-              throw new TRPCError({ code: "FORBIDDEN", message: `Free tier is limited to ${FREE_TIER_MAX_SITES} sites. Upgrade to add more.` });
+            if (n >= ent.maxSites) {
+              throw new TRPCError({ code: "FORBIDDEN", message: siteCapMessage(ent) });
             }
           }
           return h.createSite({
@@ -1028,7 +1041,7 @@ export const appRouter = router({
           const hasMeters = (await h.listMeters(siteId, ctx.user.id).catch(() => [])).length > 0;
           if (hasMeters && !geocodeFailed) {
             const { queueSiteReanalysis } = await import("./siteReanalysis");
-            reanalysisQueued = queueSiteReanalysis(siteId, ctx.user.id, tierOf(ctx.user));
+            reanalysisQueued = queueSiteReanalysis(siteId, ctx.user.id, await tierOf(ctx.user));
           }
           if (!reanalysisQueued) propertyFacts.enrichSiteInBackground(siteId);
         }
@@ -1884,7 +1897,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         await seeded();
-        requireTier(tierOf(ctx.user), "pro", "Bulk site screening");
+        requireTier(await tierOf(ctx.user), "pro", "Bulk site screening");
         const res = await runBulkScreen(input.text, input.defaultBuildingType);
         await h.audit(ctx.user.id, "bulk_screen", "portfolio", "batch", { requested: res.requested, estimated: res.estimated, failed: res.failed });
         return res;
@@ -1978,7 +1991,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }): Promise<singleIngest.IngestResult> => {
         await seeded();
-        const tier = tierOf(ctx.user);
+        const tier = await tierOf(ctx.user);
         const site = await h.getSite(input.siteId, ctx.user.id);
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
@@ -2288,7 +2301,7 @@ export const appRouter = router({
         const site = await h.getSite(u.siteId, ctx.user.id);
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
         return singleIngest.continueWorkbookIngest(u.id, {
-          userId: ctx.user.id, tier: tierOf(ctx.user), siteId: u.siteId, siteUtility: site.utilityName ?? null,
+          userId: ctx.user.id, tier: await tierOf(ctx.user), siteId: u.siteId, siteUtility: site.utilityName ?? null,
           tzNote: tzAmbiguityNote(site.state), filename: u.filename, format: u.format,
         }, { confirmMultiAddress: input.confirmMultiAddress === true });
       }),
@@ -2310,7 +2323,7 @@ export const appRouter = router({
           };
         }
         const dataUrl = `data:${input.mime};base64,${input.contentBase64}`;
-        const outcome = await extractBill(dataUrl, ctx.user.id, tierOf(ctx.user));
+        const outcome = await extractBill(dataUrl, ctx.user.id, await tierOf(ctx.user));
         await h.audit(ctx.user.id, "bill_ocr", "site", String(input.siteId), { outcome: outcome.status });
         // v1.22 parser-drift monitor: per-template (LLM extractor) success
         // tracking — sustained drops raise a template-update task before users
@@ -2486,7 +2499,7 @@ export const appRouter = router({
       if (input.meterId == null) await materializeVirtualTotal(input.siteId, ctx.user.id);
       const meters = await h.listMeters(input.siteId, ctx.user.id);
       const meter = input.meterId ? meters.find((m) => m.id === input.meterId) ?? null : pickSiteAnalysisMeter(meters);
-      const tier = tierOf(ctx.user);
+      const tier = await tierOf(ctx.user);
       const result = await runAnalysisPipeline(site, meter, ctx.user.id, tier);
       // AC5: instrumented free-tier cost cap
       const cap = await assertFreeTierCostCap(result.analysisId);
@@ -3040,16 +3053,17 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         await seeded();
-        const tier = tierOf(ctx.user);
+        const ent = await entitlementForUser(ctx.user);
+        const tier = ent.tier;
         // Tier gates: solar/battery modeling = Plus features (free teaser insight only)
         if (["solar", "battery", "solar_battery"].includes(input.kind)) requireTier(tier, "plus", "Solar/battery scenario modeling");
         // Batch-13: fast-fail pre-check only; the authoritative quota check runs
         // under the per-user lock at save time (see below) so concurrent runs
         // cannot all pass a count taken before any row exists.
-        if (tier === "free") {
+        if (ent.maxScenariosPerMonth !== null) {
           const n = await h.countScenariosThisMonth(ctx.user.id);
-          if (n >= FREE_TIER_SCENARIOS_PER_MONTH) {
-            throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_SCENARIOS_PER_MONTH} scenario runs/month.` });
+          if (n >= ent.maxScenariosPerMonth) {
+            throw new TRPCError({ code: "FORBIDDEN", message: scenarioCapMessage(ent) });
           }
         }
                 const site = await h.getSite(input.siteId, ctx.user.id);
@@ -3067,10 +3081,10 @@ export const appRouter = router({
             capexUsd: input.capexUsd,
           });
           const idGw = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
-            if (tier === "free") {
+            if (ent.maxScenariosPerMonth !== null) {
               const n = await h.countScenariosThisMonth(ctx.user.id, tx);
-              if (n >= FREE_TIER_SCENARIOS_PER_MONTH) {
-                throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_SCENARIOS_PER_MONTH} scenario runs/month.` });
+              if (n >= ent.maxScenariosPerMonth) {
+                throw new TRPCError({ code: "FORBIDDEN", message: scenarioCapMessage(ent) });
               }
             }
             return h.saveScenario({
@@ -3172,10 +3186,10 @@ export const appRouter = router({
           (results.assumptions as Record<string, unknown>).ratchetConfidence = "measured";
         }
         const id = await h.withUserQuotaLock(ctx.user.id, async (tx) => {
-          if (tier === "free") {
+          if (ent.maxScenariosPerMonth !== null) {
             const n = await h.countScenariosThisMonth(ctx.user.id, tx);
-            if (n >= FREE_TIER_SCENARIOS_PER_MONTH) {
-              throw new TRPCError({ code: "FORBIDDEN", message: `Free tier allows ${FREE_TIER_SCENARIOS_PER_MONTH} scenario runs/month.` });
+            if (n >= ent.maxScenariosPerMonth) {
+              throw new TRPCError({ code: "FORBIDDEN", message: scenarioCapMessage(ent) });
             }
           }
           return h.saveScenario({
@@ -3232,7 +3246,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         await seeded();
-        const tier = tierOf(ctx.user);
+        const tier = await tierOf(ctx.user);
         // §3c conversion rule: free tier composes up to 3 measures; the full
         // basket is the Plus unlock at the moment of demonstrated value.
         if (tier === "free" && input.measures.length > 3) {
@@ -3323,7 +3337,7 @@ export const appRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         await seeded();
-        const tier = tierOf(ctx.user);
+        const tier = await tierOf(ctx.user);
         requireTier(tier, "pro", "Portfolio basket (apply a measure across sites)");
         const t0 = Date.now();
         const CONF_RANK = { low: 0, medium: 1, high: 2 } as const;
@@ -3452,7 +3466,7 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         // Persisted plans are a Plus feature, matching the full-basket unlock;
         // free users can still compose transiently up to 3 measures.
-        requireTier(tierOf(ctx.user), "plus", "Saving a plan");
+        requireTier(await tierOf(ctx.user), "plus", "Saving a plan");
         const id = await h.savePlanBasket({
           siteId: input.siteId,
           userId: ctx.user.id,
@@ -3559,7 +3573,7 @@ export const appRouter = router({
           };
         }
         const dataUrl = `data:${input.mime};base64,${input.contentBase64}`;
-        const outcome = await extractTelecomBill(dataUrl, ctx.user.id, tierOf(ctx.user));
+        const outcome = await extractTelecomBill(dataUrl, ctx.user.id, await tierOf(ctx.user));
         await h.audit(ctx.user.id, "telecom_bill_ocr", "site", String(input.siteId), { outcome: outcome.status });
         await recordParseOutcome("llm_telecom_extractor_v1", outcome.status === "extracted").catch(() => undefined);
         return outcome;
@@ -3687,16 +3701,17 @@ export const appRouter = router({
     question: protectedProcedure
       .input(z.object({ siteId: z.number(), question: z.string().min(3).max(500) }))
       .mutation(async ({ ctx, input }) => {
-        requireTier(tierOf(ctx.user), "plus", "Ask Meterly");
+        const askTier = await tierOf(ctx.user);
+        requireTier(askTier, "plus", "Ask Meterly");
         const site = await h.getSite(input.siteId, ctx.user.id);
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
 
         // Budget pre-check: routing uses a tiny LLM call; over-budget or
         // unavailable → deterministic keyword router (disclosed in provenance).
-        const allowLlm = await llmBudgetAllows(ctx.user.id, tierOf(ctx.user), ASK_ROUTE_EST_COST_USD);
+        const allowLlm = await llmBudgetAllows(ctx.user.id, askTier, ASK_ROUTE_EST_COST_USD);
         const route = await routeQuestion(input.question, allowLlm);
         if (route.routedBy === "llm") {
-          await recordMeterEvent({ userId: ctx.user.id, kind: "ask_wattwise_route", llmTokensIn: 200, llmTokensOut: 20, tier: tierOf(ctx.user) });
+          await recordMeterEvent({ userId: ctx.user.id, kind: "ask_wattwise_route", llmTokensIn: 200, llmTokensOut: 20, tier: askTier });
         }
         const routedNote =
           route.routedBy === "llm"
@@ -3722,11 +3737,13 @@ export const appRouter = router({
   account: router({
     usage: protectedProcedure.query(async ({ ctx }) => {
       const llmSpend = await monthToDateLlmSpend(ctx.user.id);
-      return { tier: tierOf(ctx.user), monthToDateLlmUsd: llmSpend };
+      const ent = await entitlementForUser(ctx.user);
+      return { tier: ent.tier, plan: ent.plan, monthToDateLlmUsd: llmSpend };
     }),
     billing: protectedProcedure.query(async ({ ctx }) => {
       const account = (await loadBillingAccount(ctx.user.id)) ?? (await ensureBillingAccount(ctx.user.id));
-      const entitlements = effectiveEntitlement(account);
+      // BILL-1: the same resolver every gate uses (owner/admin → full access).
+      const entitlements = entitlementFor(ctx.user.role, account);
       return {
         plan: account?.plan ?? "free",
         status: account?.status ?? "active",
@@ -3743,6 +3760,12 @@ export const appRouter = router({
       .input(z.object({ plan: z.enum(["plus", "pro"]) }))
       .mutation(async ({ ctx, input }) => {
         if (!stripeConfigured()) throw new TRPCError({ code: "PRECONDITION_FAILED", message: checkoutSetupMessage() });
+        // BILL-1: Founding and owner accounts already have full access at no
+        // charge — never send them to a paid checkout.
+        const current = await loadBillingAccount(ctx.user.id);
+        if (ctx.user.role === "admin" || current?.plan === "founding") {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Your Founding access already includes every feature at no charge, so there is nothing to buy." });
+        }
         return createHostedCheckoutSession({ userId: ctx.user.id, email: ctx.user.email, plan: input.plan });
       }),
     billingPortal: protectedProcedure.mutation(async ({ ctx }) => {
@@ -3750,35 +3773,20 @@ export const appRouter = router({
       if (!account?.stripeCustomerId) throw new TRPCError({ code: "PRECONDITION_FAILED", message: checkoutSetupMessage() });
       return createCustomerPortalSession(account.stripeCustomerId);
     }),
-    /** Gap-6 (Jul 2026): self-serve tier switching during the beta — the
-     *  pricing page previously showed dead "Coming soon" buttons for tiers
-     *  that were already fully enforced server-side (requireTier gates).
-     *  During the beta there is NO billing integration, so switching is free
-     *  and honestly labeled as such in the UI; the audit trail records every
-     *  change. When billing lands, this becomes the checkout entry point. */
+    /** Gap-6 (Jul 2026) self-serve beta tier switching is retired (BILL-1,
+     *  Oct 26): plans now come only from the billing account (Stripe test
+     *  mode once configured; Founding for existing accounts). The input
+     *  schema is kept so old clients get a clear answer instead of a 404.
+     *  Nothing is written; the refusal is audited. */
     setTier: protectedProcedure
       .input(z.object({ tier: z.enum(["free", "plus", "pro"]) }))
       .mutation(async ({ ctx, input }) => {
-        const prev = tierOf(ctx.user);
-        await h.setUserTier(ctx.user.id, input.tier);
-        // §5b rule 7: beta tier selections are willingness-to-pay signal —
-        // capture persona (building types owned) and analysis state alongside
-        // the switch so the market-research read is possible later.
-        const userSites = await h.listSites(ctx.user.id);
-        const buildingTypes = Array.from(new Set(userSites.map((s) => s.buildingType).filter(Boolean)));
-        const persona = buildingTypes.length === 0 ? "no_sites_yet" : buildingTypes.every((b) => ["single_family", "multifamily"].includes(b as string)) ? "residential" : "commercial";
-        await h.audit(ctx.user.id, "tier_change", "user", String(ctx.user.id), {
-          from: prev,
-          to: input.tier,
-          billing: "none — beta period, no payment collected",
-          wtpSignal: {
-            persona,
-            siteCount: userSites.length,
-            buildingTypes,
-            hasAnalyzedSite: (await Promise.all(userSites.slice(0, 5).map((s) => h.getLatestAnalysis(s.id, ctx.user.id)))).some(Boolean),
-          },
+        const ent = await entitlementForUser(ctx.user);
+        await h.audit(ctx.user.id, "tier_change_refused", "user", String(ctx.user.id), { requested: input.tier, plan: ent.plan });
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: `Plans can't be switched here. Your plan (${planLabel(ent.plan)}) comes from your billing account.`,
         });
-        return { tier: input.tier, previous: prev };
       }),
     exportData: protectedProcedure.mutation(async ({ ctx }) => {
       const data = await h.exportUserData(ctx.user.id);
@@ -3879,7 +3887,7 @@ export const appRouter = router({
     data: protectedProcedure
       .input(z.object({ siteId: z.number().int(), kind: z.enum(["energy_plan", "verified_savings", "practitioner"]) }))
       .query(async ({ ctx, input }) => {
-        requireTier(tierOf(ctx.user), input.kind === "energy_plan" ? "plus" : "pro", REPORT_FEATURE_NAME[input.kind]);
+        requireTier(await tierOf(ctx.user), input.kind === "energy_plan" ? "plus" : "pro", REPORT_FEATURE_NAME[input.kind]);
         return assembleReportData(input.siteId, ctx.user.id);
       }),
     /** Create a report artifact: persists the printed snapshot + verify token.
@@ -3889,7 +3897,7 @@ export const appRouter = router({
       .input(z.object({ siteId: z.number().int(), kind: z.enum(["energy_plan", "verified_savings", "practitioner", "site_insights"]) }))
       .mutation(async ({ ctx, input }) => {
         const tierFloor = REPORT_TIER[input.kind];
-        if (tierFloor !== "free") requireTier(tierOf(ctx.user), tierFloor, REPORT_FEATURE_NAME[input.kind]);
+        if (tierFloor !== "free") requireTier(await tierOf(ctx.user), tierFloor, REPORT_FEATURE_NAME[input.kind]);
         const data = await assembleReportData(input.siteId, ctx.user.id);
         const token = newReportToken();
         await h.createReportArtifact({
@@ -3914,7 +3922,7 @@ export const appRouter = router({
      * (Pro). Rows come from persisted summary insights + baselines only; sites
      * without an analysis export with blank figures, never fabricated ones. */
     portfolioExport: protectedProcedure.mutation(async ({ ctx }) => {
-      requireTier(tierOf(ctx.user), "pro", "Portfolio Manager export");
+      requireTier(await tierOf(ctx.user), "pro", "Portfolio Manager export");
       const userSites = await h.listSites(ctx.user.id);
       const rows: PortfolioExportRow[] = [];
       for (const s of userSites) {
@@ -3951,7 +3959,7 @@ export const appRouter = router({
      * headline across all sites + per-site verdict ledgers. Only persisted
      * implementation verdicts count toward the verified total. */
     portfolioVerified: protectedProcedure.query(async ({ ctx }) => {
-      requireTier(tierOf(ctx.user), "pro", "Portfolio Verified Savings Statement");
+      requireTier(await tierOf(ctx.user), "pro", "Portfolio Verified Savings Statement");
       return assemblePortfolioVerified(ctx.user.id);
     }),
     /** Public verify endpoint — the token is the capability. Shows the printed

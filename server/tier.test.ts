@@ -1,81 +1,66 @@
 /**
- * Gap-6 (Jul 2026): self-serve beta tier switching — setTier updates the
- * user's own row, unlocks requireTier-gated features immediately, is audited
- * with an explicit no-billing note, and downgrading re-imposes gates.
+ * Gap-6 (Jul 2026) self-serve beta tier switching was retired by BILL-1
+ * (Oct 26): account.setTier no longer changes the plan or the legacy
+ * users.tier column, and access follows the billing account. Detailed
+ * plan/grace coverage lives in entitlementGates.test.ts.
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appRouter } from "./routers";
 import { getDb } from "./db";
-import { users } from "../drizzle/schema";
+import { auditLog, billingAccounts, users } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
 
 type Ctx = Parameters<typeof appRouter.createCaller>[0];
 
-async function makeUser(openId: string) {
-  const db = (await getDb())!;
-  await db
-    .insert(users)
-    .values({ openId, name: `Tier Test ${openId}`, email: `${openId}@test.local`, loginMethod: "test" })
-    .onDuplicateKeyUpdate({ set: { name: `Tier Test ${openId}` } });
-  const rows = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-  return rows[0];
-}
+const openId = `tier-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+let user: typeof users.$inferSelect;
 
-function callerFor(user: Awaited<ReturnType<typeof makeUser>>) {
+function callerFor(u: typeof users.$inferSelect) {
   return appRouter.createCaller({
-    user,
+    user: u,
     req: { headers: {} },
     res: { setHeader: () => undefined, clearCookie: () => undefined },
   } as unknown as Ctx);
 }
 
-let user: Awaited<ReturnType<typeof makeUser>>;
-
 beforeAll(async () => {
-  user = await makeUser("tier-test-user-1");
-  // reset to free in case of prior runs
   const db = (await getDb())!;
-  await db.update(users).set({ tier: "free" }).where(eq(users.id, user.id));
-  user = { ...user, tier: "free" };
+  await db.insert(users).values({ openId, name: `Tier Test ${openId}`, email: `${openId}@test.local`, loginMethod: "test", tier: "free" });
+  [user] = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  await db.insert(billingAccounts).values({ userId: user.id, plan: "free", entitlementTier: "free", status: "active" });
 });
 
-describe("account.setTier (self-serve beta)", () => {
-  it("switches free → plus, persists, and audits with a no-billing note", async () => {
-    const caller = callerFor(user);
-    const res = await caller.account.setTier({ tier: "plus" });
-    expect(res.tier).toBe("plus");
-    expect(res.previous).toBe("free");
+afterAll(async () => {
+  const db = await getDb();
+  if (!db || !user) return;
+  await db.delete(auditLog).where(eq(auditLog.userId, user.id));
+  await db.delete(billingAccounts).where(eq(billingAccounts.userId, user.id));
+  await db.delete(users).where(eq(users.id, user.id));
+});
 
+describe("account.setTier (retired)", () => {
+  it("refuses free → plus and changes nothing", async () => {
+    await expect(callerFor(user).account.setTier({ tier: "plus" })).rejects.toThrow(/Plans can't be switched here/);
     const db = (await getDb())!;
-    const rows = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
-    expect(rows[0]?.tier).toBe("plus");
+    const [u] = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
+    expect(u?.tier).toBe("free");
+    const [b] = await db.select().from(billingAccounts).where(eq(billingAccounts.userId, user.id)).limit(1);
+    expect(b?.plan).toBe("free");
   });
 
-  it("usage reflects the new tier immediately", async () => {
-    // fresh ctx with updated tier (session refetch equivalent)
-    const db = (await getDb())!;
-    const rows = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
-    const caller = callerFor(rows[0]);
-    const usage = await caller.account.usage();
-    expect(usage.tier).toBe("plus");
+  it("usage still reports the billing plan", async () => {
+    const usage = await callerFor(user).account.usage();
+    expect(usage).toMatchObject({ tier: "free", plan: "free" });
   });
 
-  it("downgrading back to free re-imposes the tier gates", async () => {
-    const db = (await getDb())!;
-    let rows = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
-    const caller = callerFor(rows[0]);
-    const res = await caller.account.setTier({ tier: "free" });
-    expect(res.tier).toBe("free");
-    expect(res.previous).toBe("plus");
-    rows = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
-    expect(rows[0]?.tier).toBe("free");
+  it("a session row edited to tier 'pro' still gets Free access", async () => {
+    await expect(callerFor({ ...user, tier: "pro" }).reports.portfolioExport()).rejects.toThrow(/requires the Pro plan\. Your plan: Free\./);
   });
 
   it("rejects invalid tiers at the schema boundary", async () => {
-    const caller = callerFor(user);
     await expect(
       // @ts-expect-error — deliberately invalid input
-      caller.account.setTier({ tier: "enterprise" }),
+      callerFor(user).account.setTier({ tier: "enterprise" }),
     ).rejects.toThrow();
   });
 });

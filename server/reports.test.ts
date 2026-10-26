@@ -9,6 +9,10 @@
 import { describe, expect, it } from "vitest";
 import { chipForConfidence, practitionerCsv, newReportToken, type ReportData } from "./reports";
 import { appRouter } from "./routers";
+import { clearTestPlan, grantTestPlan } from "./testBilling";
+import { getDb } from "./db";
+import { users } from "../drizzle/schema";
+import { eq } from "drizzle-orm";
 
 function caller(tier: "free" | "plus" | "pro", id = 999902) {
   return appRouter.createCaller({
@@ -77,9 +81,20 @@ describe("§3l tier gates", () => {
   });
 
   it("plus tier gets energy_plan but not the Pro artifacts", async () => {
-    // energy_plan passes the tier gate and then fails on tenancy (site 1 not owned) — proving the gate itself passed
-    await expect(caller("plus").reports.generate({ siteId: 1, kind: "energy_plan" })).rejects.toThrow(/Access denied|does not belong/i);
-    await expect(caller("plus").reports.generate({ siteId: 1, kind: "practitioner" })).rejects.toThrow(/Pro/i);
+    // BILL-1: the plan comes from a real billing row, not the session's tier.
+    const db = (await getDb())!;
+    const openId = `test-reports-plus-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await db.insert(users).values({ openId, name: openId, email: `${openId}@test.local`, loginMethod: "test" });
+    const [u] = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+    try {
+      await grantTestPlan(u!.id, "plus");
+      // energy_plan passes the tier gate and then fails on tenancy (site 1 not owned) — proving the gate itself passed
+      await expect(caller("plus", u!.id).reports.generate({ siteId: 1, kind: "energy_plan" })).rejects.toThrow(/Access denied|does not belong|not found/i);
+      await expect(caller("plus", u!.id).reports.generate({ siteId: 1, kind: "practitioner" })).rejects.toThrow(/Pro/i);
+    } finally {
+      await clearTestPlan(u!.id);
+      await db.delete(users).where(eq(users.id, u!.id));
+    }
   });
 });
 

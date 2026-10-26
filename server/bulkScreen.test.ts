@@ -2,13 +2,14 @@
  * §3i-2 bulk screening specs — parsing honesty, row cap, ranked output,
  * named failures, and the Pro gate on the router.
  */
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { parseBulkLines, runBulkScreen, BULK_SCREEN_MAX_ROWS } from "./bulkScreen";
 import { appRouter } from "./routers";
 import { getDb } from "./db";
 import { users } from "../drizzle/schema";
 import { ensureSeeded } from "./seed/runSeeders";
 import type { TrpcContext } from "./_core/context";
+import { clearTestPlan, grantTestPlan } from "./testBilling";
 
 function ctxFor(user: { id: number; openId: string; role: "admin" | "user"; tier?: string | null }): TrpcContext {
   return {
@@ -18,16 +19,28 @@ function ctxFor(user: { id: number; openId: string; role: "admin" | "user"; tier
   };
 }
 
+const freeOpenId = `bulk-free-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 let freeUser: { id: number; openId: string; role: "admin" | "user"; tier: string };
+afterAll(async () => {
+  const db = await getDb();
+  if (!db || !freeUser) return;
+  const { eq } = await import("drizzle-orm");
+  await clearTestPlan(freeUser.id);
+  await db.delete(users).where(eq(users.id, freeUser.id));
+});
 let proUser: { id: number; openId: string; role: "admin" | "user"; tier: string };
 
 beforeAll(async () => {
   await ensureSeeded();
   const db = await getDb();
   const { eq } = await import("drizzle-orm");
-  await db.insert(users).values({ openId: "bulk-free", name: "bulk-free", tier: "free" as never }).onDuplicateKeyUpdate({ set: { name: "bulk-free" } });
+  // BILL-1: the shared "bulk-free" fixture carries a Founding billing row from
+  // the Founding backfill, so the Free gate uses a per-run user with an
+  // explicit Free plan (removed in afterAll).
+  await db.insert(users).values({ openId: freeOpenId, name: freeOpenId, tier: "free" as never });
   await db.insert(users).values({ openId: "bulk-pro", name: "bulk-pro", tier: "pro" as never }).onDuplicateKeyUpdate({ set: { tier: "pro" as never } });
-  const [f] = await db.select().from(users).where(eq(users.openId, "bulk-free"));
+  const [f] = await db.select().from(users).where(eq(users.openId, freeOpenId));
+  await grantTestPlan(f.id, "free");
   const [p] = await db.select().from(users).where(eq(users.openId, "bulk-pro"));
   freeUser = { id: f.id, openId: f.openId, role: "user", tier: "free" };
   proUser = { id: p.id, openId: p.openId, role: "user", tier: "pro" };

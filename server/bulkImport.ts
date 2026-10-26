@@ -29,7 +29,7 @@ import { writeIntervals } from "./ingest/writer";
 import { geocodeAddress } from "./places";
 import { deriveFromAddress } from "./cascade";
 import { TZ_BY_STATE, MAX_UPLOAD_BYTES, FREE_TIER_MAX_UPLOADS_PER_MONTH } from "../shared/wattwise";
-import { effectiveEntitlement, loadBillingAccount } from "./billing";
+import { entitlementFor, entitlementForUser } from "./billing";
 import { resolveRateCode, assignTariffForMeter } from "./rateCodes";
 import {
   buildSitePlan,
@@ -126,7 +126,7 @@ async function lockUser(tx: Tx, userId: number) {
   const [u] = await tx.select().from(users).where(eq(users.id, userId)).for("update");
   if (!u) throw new Error("Import owner no longer exists");
   const [account] = await tx.select().from(billingAccounts).where(eq(billingAccounts.userId, userId));
-  return u.role === "admin" ? { ...effectiveEntitlement(null), tier: "pro" as const, maxSites: null } : effectiveEntitlement(account ?? null);
+  return entitlementFor(u.role, account ?? null);
 }
 /** OPEN-4: how many sites this commit will still create. Mirrors runCommit's
  * destination lookup: a planned site is created only when it has no existing
@@ -312,9 +312,7 @@ function normStreetCity(street: string | null | undefined, city: string | null |
 }
 
 async function siteLimit(user: { id: number; tier?: string | null; role?: string }): Promise<number | null> {
-  if (user.role === "admin") return null;
-  const account = await loadBillingAccount(user.id);
-  return effectiveEntitlement(account).maxSites;
+  return (await entitlementForUser(user)).maxSites;
 }
 
 export async function preview(

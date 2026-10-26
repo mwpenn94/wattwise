@@ -350,7 +350,7 @@ function AskWattwise({ siteId, tier }: { siteId: number | null; tier: string }) 
           e.preventDefault();
           if (!isPlus) {
             toast.info("Ask Meterly is a Plus feature", {
-              description: "Upgrade on the Account page — during the beta, switching tiers is free.",
+              description: "It is included in the Plus and Pro plans. See plan options on the Account page.",
               action: { label: "Account", onClick: () => navigate("/app/account") },
             });
             return;

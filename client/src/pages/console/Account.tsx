@@ -19,7 +19,7 @@ import { useTheme, type ThemePreference } from "@/contexts/ThemeContext";
 
 const TIERS: Array<{ id: "free" | "plus" | "pro"; name: string; blurb: string }> = [
   { id: "free", name: "Free", blurb: "2 sites · 12 uploads/mo · 3 scenario runs/mo · template-first bill parsing" },
-  { id: "plus", name: "Plus", blurb: "Solar/battery modeling · more sites & runs · LLM bill parsing" },
+  { id: "plus", name: "Plus", blurb: "Up to 10 sites · 20 scenario runs/mo · solar/battery modeling · LLM bill parsing" },
   { id: "pro", name: "Pro", blurb: "Everything in Plus · priority parsing · portfolio at scale" },
 ];
 

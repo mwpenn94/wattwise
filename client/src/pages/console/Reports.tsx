@@ -64,7 +64,8 @@ export default function Reports() {
   // owner rule via tierOf); reading the raw user row's tier column rendered
   // every report button disabled for the admin owner (tier=free in the row).
   const usageQ = trpc.account.usage.useQuery(undefined, { enabled: !!user });
-  const tier = usageQ.data?.tier ?? (user as { tier?: string } | null)?.tier ?? "free";
+  // BILL-1: the plan comes only from the server (billing account).
+  const tier = usageQ.data?.tier ?? "free";
   const { activeSiteId, sites: sitesQ, setActiveSite } = useActiveSite();
   const captureSiteRequest = useSiteRequestGuard(activeSiteId);
   const [printKind, setPrintKind] = useState<Kind | null>(null);
@@ -156,7 +157,7 @@ export default function Reports() {
                   </Button>
                   {!allowed && (
                     <p className="text-xs text-muted-foreground mt-2">
-                      Requires {meta.tier === "plus" ? "Plus" : "Pro"} — switch tiers free during the beta on{" "}
+                      Requires the {meta.tier === "plus" ? "Plus" : "Pro"} plan — see plan options on{" "}
                       <a href="/app/account" className="underline">Account &amp; usage</a>.
                     </p>
                   )}

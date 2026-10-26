@@ -272,8 +272,8 @@ export default function Home() {
                 persona: "For homeowners and owners acting on their plan",
                 // §5b rule 2: a number, not a range.
                 price: "$12/mo",
-                items: ["Full tariff sweep across every eligible plan", "End-use disaggregation", "Solar + battery modeling", "Unlimited scenarios + Bill Builder full basket", "Narrative reports", "PDF export"],
-                cta: "Start Plus (beta)",
+                items: ["Full tariff sweep across every eligible plan", "End-use disaggregation", "Solar + battery modeling", "Up to 10 sites", "20 scenario runs/month + Bill Builder full basket", "Narrative reports", "PDF export"],
+                cta: "See plan options",
                 highlight: true,
                 badge: "Most popular" as string | null,
               },
@@ -285,7 +285,7 @@ export default function Home() {
                 // §3i pre-purchase feed honesty: name the data mechanism before
                 // checkout — analysis re-runs on each upload; no live utility feed yet.
                 items: ["Portfolio view across every site", "Anomaly + demand-spike findings on each upload", "Demand-charge management", "M&V-grade reporting + practitioner export", "Data updates via bill/interval uploads today — utility feeds are on the roadmap, not sold as live"],
-                cta: "Start Pro (beta)",
+                cta: "See plan options",
                 highlight: false,
                 badge: null as string | null,
               },
@@ -329,9 +329,9 @@ export default function Home() {
                       </li>
                     ))}
                   </ul>
-                  {/* Gap-6: Plus/Pro were dead "Coming soon" buttons while the
-                      server-side tier gates were already live — now every tier
-                      is self-serve during the beta via Account & usage. */}
+                  {/* BILL-1 (Oct 26): plans come from the billing account; the
+                      Plus/Pro buttons open Account & usage, which shows the
+                      current plan and the billing setup state. */}
                   {t.name === "Free" ? (
                     <Button className="mt-6 w-full" onClick={() => (isAuthenticated ? (window.location.href = "/app") : startLogin())}>
                       {t.cta}
@@ -349,7 +349,7 @@ export default function Home() {
                       annual-toggle note deferred until billing exists — no fake toggle. */}
                   {t.name !== "Free" && (
                     <p className="mt-2 text-center text-[11px] text-foreground/75">
-                      Beta: no billing yet — switch plans free on the Account page.
+                      Paid plans open once billing is set up. Existing accounts keep Founding access at no charge.
                     </p>
                   )}
                 </CardContent>
