@@ -1321,6 +1321,14 @@ export default function Dashboard() {
                         </Button>
                       </div>
                     )}
+                    {!queue.refreshSuggested && queue.connectivityChanged && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs" data-testid="queue-connectivity-changed">
+                        <span>Your connectivity services or bills changed since the last analysis. Update to include them in this list.</span>
+                        <Button size="sm" variant="outline" disabled={run.isPending || activeSiteId == null} onClick={() => activeSiteId != null && run.mutate({ siteId: activeSiteId })}>
+                          {run.isPending ? "Re-estimating…" : "Update estimates"}
+                        </Button>
+                      </div>
+                    )}
                     {queue.active.map((item) => (
                       <div key={item.measure} className="rounded-md border border-border/70 bg-card p-4">
                         <div className="flex flex-wrap items-start justify-between gap-3">

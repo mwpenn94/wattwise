@@ -18,6 +18,9 @@ import { BulkImportPanel } from "@/components/BulkImportPanel";
 import { Link } from "wouter";
 
 type Fmt = "xlsx" | "csv" | "espi_xml" | "zip" | "auto";
+type Commodity = "electric" | "gas" | "water";
+const USAGE_UNIT: Record<Commodity, string> = { electric: "kWh", gas: "therms", water: "gallons" };
+const COMMODITY_LABEL: Record<Commodity, string> = { electric: "Electric", gas: "Natural gas", water: "Water" };
 
 // Extension is only a HINT — the server re-verifies content via magic bytes
 // and routes accordingly, so extensionless Green Button files ("HourlyIntervalData")
@@ -43,6 +46,13 @@ export default function Upload() {
   // R2 #2: the source timestamp convention is explicit, never silently assumed.
   const [clockBasis, setClockBasis] = useState<"auto" | "start" | "end">("auto");
   const [mode, setMode] = useState<"single" | "bulk">(() => (new URLSearchParams(window.location.search).get("mode") === "bulk" ? "bulk" : "single"));
+  // TEL-1: links from "Utility services on this site" carry ?commodity=gas|water|electric;
+  // that utility is preselected for interval files and bills (changeable here).
+  const [commodity, setCommodity] = useState<"auto" | Commodity>(() => {
+    const c = new URLSearchParams(window.location.search).get("commodity");
+    return c === "electric" || c === "gas" || c === "water" ? c : "auto";
+  });
+  const [billCommodity, setBillCommodity] = useState<Commodity>(() => (commodity === "auto" ? "electric" : commodity));
   const [billManual, setBillManual] = useState<null | { reason: string }>(null);
   const [manualBill, setManualBill] = useState({ periodStart: "", periodEnd: "", totalUsage: "", totalCost: "", billedDemandKw: "" });
   // Oct 25: large workbooks import sheet-by-sheet in short server requests.
@@ -66,6 +76,7 @@ export default function Upload() {
     onError: (e) => toast.error(e.message),
   });
   const billCreate = trpc.bills.create.useMutation();
+  const createMeter = trpc.sites.createMeter.useMutation();
 
   type IngestResult = Awaited<ReturnType<typeof uploadClient.uploads.ingest.mutate>>;
   /** Keep calling the server until the sliced import finishes (or needs a choice). */
@@ -127,7 +138,7 @@ export default function Upload() {
           );
           if (!isCurrent()) return;
           setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: "Reading workbook…" });
-          const res = await driveIngest(f.name, () => uploadClient.uploads.ingest.mutate({ siteId: Number(siteId), filename: f.name, format: fmt, sourceRef, timestampBasis: clockBasis, askOnMultiAddress: true }), isCurrent);
+          const res = await driveIngest(f.name, () => uploadClient.uploads.ingest.mutate({ siteId: Number(siteId), filename: f.name, format: fmt, sourceRef, timestampBasis: clockBasis, askOnMultiAddress: true, ...(commodity !== "auto" ? { commodityHint: commodity } : {}) }), isCurrent);
           if (!res || !isCurrent()) return;
           if (res.needsChoice) {
             setChoice({ uploadId: res.uploadId, filename: f.name, ...res.needsChoice });
@@ -195,10 +206,13 @@ export default function Upload() {
       const res = await billOcr.mutateAsync({ siteId: Number(siteId), filename: f.name, contentBase64: b64, mime });
       if (!isCurrent()) return;
       if (res.status === "manual_entry_required") {
+        setBillCommodity(commodity === "auto" ? "electric" : commodity);
         setBillManual({ reason: res.reason });
         toast.warning("Automatic bill parsing unavailable — enter the bill manually below.");
       } else {
         const b = res.bill;
+        const unit = (b.usageUnit?.value ?? "").toLowerCase();
+        setBillCommodity(commodity !== "auto" ? commodity : /therm|ccf|mcf|dth/.test(unit) ? "gas" : /gal|kgal/.test(unit) ? "water" : "electric");
         toast.success(`Bill parsed (confidence ${(b.overallConfidence * 100).toFixed(0)}%) — review the extracted values`);
         setManualBill({
           periodStart: b.periodStart.value ?? "",
@@ -215,6 +229,7 @@ export default function Upload() {
       }
     } catch (e) {
       if (!isCurrent()) return;
+      setBillCommodity(commodity === "auto" ? "electric" : commodity);
       setBillManual({ reason: e instanceof Error ? e.message : "Parsing failed" });
       toast.warning("Bill parsing failed — manual entry enabled.");
     } finally {
@@ -230,23 +245,26 @@ export default function Upload() {
     const isCurrent = captureSiteRequest();
     setBusy(true);
     try {
-      // bills key on a meter; use (or lazily rely on server default) first electric meter of the site
+      // TEL-1: a bill keys on a meter of the bill's utility (main first, never a
+      // derived campus total); a site with no meter for that utility gets one.
       const meters = await utils.sites.meters.fetch({ siteId: Number(siteId) });
       if (!isCurrent()) return;
-      const meter = meters.find((m) => m.commodity === "electric" && m.meterRole === "main") ?? meters.find((m) => m.meterRole !== "virtual_total");
-      if (!meter) {
-        toast.error("This site has no meter yet — upload an interval file first, or create the site via the wizard.");
-        return;
+      const ofKind = meters.filter((m) => m.commodity === billCommodity && m.meterRole !== "virtual_total");
+      let meterId = (ofKind.find((m) => m.meterRole === "main") ?? ofKind.find((m) => !["submeter", "generation", "ev"].includes(m.meterRole)) ?? ofKind[0])?.id;
+      if (meterId == null) {
+        meterId = (await createMeter.mutateAsync({ siteId: Number(siteId), commodity: billCommodity, label: `${COMMODITY_LABEL[billCommodity]} (from bills)` })).id;
+        if (!isCurrent()) return;
       }
       await billCreate.mutateAsync({
-        meterId: meter.id,
+        meterId,
         periodStart: manualBill.periodStart,
         periodEnd: manualBill.periodEnd,
         totalUsage: Number(manualBill.totalUsage),
-        usageUnit: "kWh",
+        usageUnit: USAGE_UNIT[billCommodity],
         totalCostUsd: Number(manualBill.totalCost),
-        billedDemandKw: manualBill.billedDemandKw ? Number(manualBill.billedDemandKw) : undefined,
+        billedDemandKw: billCommodity === "electric" && manualBill.billedDemandKw ? Number(manualBill.billedDemandKw) : undefined,
       });
+      await utils.sites.meters.invalidate();
       if (!isCurrent()) return;
       toast.success("Bill saved");
       setBillManual(null);
@@ -302,6 +320,18 @@ export default function Upload() {
                   {s.name}
                 </SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+          <Label htmlFor="single-commodity" className="mt-3 block">Utility</Label>
+          <Select disabled={busy} value={commodity} onValueChange={(v) => setCommodity(v === "electric" || v === "gas" || v === "water" ? v : "auto")}>
+            <SelectTrigger id="single-commodity" className="mt-1" aria-label="Utility for this upload" data-testid="upload-commodity">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">Detect from the file</SelectItem>
+              <SelectItem value="electric">Electric</SelectItem>
+              <SelectItem value="gas">Natural gas</SelectItem>
+              <SelectItem value="water">Water</SelectItem>
             </SelectContent>
           </Select>
           <Label htmlFor="single-clock-basis" className="mt-3 block">Interval timestamps mark the</Label>
@@ -399,6 +429,19 @@ export default function Upload() {
             <p className="text-xs text-muted-foreground">{billManual.reason}</p>
           </CardHeader>
           <CardContent className="grid gap-3 sm:grid-cols-5">
+            <div className="sm:col-span-5 sm:max-w-56">
+              <Label htmlFor="b-commodity">Utility</Label>
+              <Select value={billCommodity} onValueChange={(v) => setBillCommodity(v === "gas" || v === "water" ? v : "electric")}>
+                <SelectTrigger id="b-commodity" className="mt-1" data-testid="bill-commodity">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="electric">Electric</SelectItem>
+                  <SelectItem value="gas">Natural gas</SelectItem>
+                  <SelectItem value="water">Water</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <div>
               <Label htmlFor="b-start">Period start</Label>
               <Input id="b-start" type="date" value={manualBill.periodStart} onChange={(e) => setManualBill({ ...manualBill, periodStart: e.target.value })} />
@@ -408,17 +451,19 @@ export default function Upload() {
               <Input id="b-end" type="date" value={manualBill.periodEnd} onChange={(e) => setManualBill({ ...manualBill, periodEnd: e.target.value })} />
             </div>
             <div>
-              <Label htmlFor="b-usage">Usage (kWh)</Label>
+              <Label htmlFor="b-usage">Usage ({USAGE_UNIT[billCommodity]})</Label>
               <Input id="b-usage" type="number" value={manualBill.totalUsage} onChange={(e) => setManualBill({ ...manualBill, totalUsage: e.target.value })} />
             </div>
             <div>
               <Label htmlFor="b-cost">Total cost ($)</Label>
               <Input id="b-cost" type="number" value={manualBill.totalCost} onChange={(e) => setManualBill({ ...manualBill, totalCost: e.target.value })} />
             </div>
-            <div>
-              <Label htmlFor="b-demand">Billed demand (kW)</Label>
-              <Input id="b-demand" type="number" value={manualBill.billedDemandKw} onChange={(e) => setManualBill({ ...manualBill, billedDemandKw: e.target.value })} />
-            </div>
+            {billCommodity === "electric" && (
+              <div>
+                <Label htmlFor="b-demand">Billed demand (kW)</Label>
+                <Input id="b-demand" type="number" value={manualBill.billedDemandKw} onChange={(e) => setManualBill({ ...manualBill, billedDemandKw: e.target.value })} />
+              </div>
+            )}
             <div className="sm:col-span-5 flex gap-2">
               <Button onClick={saveManualBill} disabled={busy || !manualBill.periodStart || !manualBill.periodEnd || !manualBill.totalUsage || !manualBill.totalCost || billCreate.isPending}>
                 Save bill

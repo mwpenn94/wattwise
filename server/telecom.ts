@@ -20,7 +20,7 @@
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { getDb } from "./db";
-import { sites, telecomBenchmarks, telecomServices, type TelecomBenchmark, type TelecomService } from "../drizzle/schema";
+import { sites, telecomBenchmarks, telecomPriceHistory, telecomServices, type TelecomBenchmark, type TelecomService } from "../drizzle/schema";
 import { assertSiteOwner } from "./dbHelpers";
 import { detectPriceCreep, listTelecomPriceHistory, recordTelecomPriceObservation } from "./telecomPriceHistory";
 import {
@@ -124,6 +124,8 @@ export async function upsertTelecomService(userId: number, input: TelecomService
 export async function removeTelecomService(id: number, userId: number): Promise<void> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
+  // TEL-1: a removed service takes its bill history with it.
+  await db.delete(telecomPriceHistory).where(and(eq(telecomPriceHistory.serviceId, id), eq(telecomPriceHistory.userId, userId)));
   await db.delete(telecomServices).where(and(eq(telecomServices.id, id), eq(telecomServices.userId, userId)));
 }
 
@@ -337,7 +339,7 @@ export async function analyzeTelecomServices(
         serviceLabel: label,
         kind: "price_creep",
         title: `Month-over-month price creep on ${svc.provider}`,
-        body: `Your normalized monthly cost rose from $${creep.previousMonthlyUsd.toFixed(0)} to $${creep.latestMonthlyUsd.toFixed(0)} — an increase of $${creep.deltaMonthlyUsd.toFixed(0)}/mo (${Math.round(creep.deltaPct * 100)}%).${creep.sustained ? " The rise continued across three captured periods." : " Capture another bill to confirm whether the change persists."}`,
+        body: `Your normalized monthly cost rose from $${creep.previousMonthlyUsd.toFixed(0)} to $${creep.latestMonthlyUsd.toFixed(0)} — an increase of $${creep.deltaMonthlyUsd.toFixed(0)}/mo (${Math.round(creep.deltaPct * 100)}%).${creep.sustained ? " The rise continued across three bills." : " Add another bill to confirm whether the change persists."} Based on your bills for ${creep.priorPeriodLabel} and ${creep.latestPeriodLabel}. Ask ${svc.provider} for the earlier price or a current promotion; the low end assumes half of the increase is restored.`,
         estAnnualSavingsLo: Math.round(creep.deltaMonthlyUsd * 12 * 0.5),
         estAnnualSavingsHi: Math.round(creep.deltaMonthlyUsd * 12),
         confidence: creep.sustained ? "high" : "medium",

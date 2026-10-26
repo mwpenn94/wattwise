@@ -39,6 +39,7 @@ import {
   Trash2,
   Loader2,
   ScanLine,
+  ReceiptText,
 } from "lucide-react";
 
 type ServiceType = "internet" | "mobile" | "tv_bundle" | "phone_landline";
@@ -66,6 +67,11 @@ interface FormState {
   unlimitedData: boolean;
   actualDataUsedGb: string;
   actualDownloadNeedMbps: string;
+  /** TEL-1: optional first bill — inclusive service period + amount billed. */
+  billStart: string;
+  billEnd: string;
+  billedUsd: string;
+  billFromScan: boolean;
 }
 
 const EMPTY_FORM: FormState = {
@@ -83,7 +89,15 @@ const EMPTY_FORM: FormState = {
   unlimitedData: true,
   actualDataUsedGb: "",
   actualDownloadNeedMbps: "",
+  billStart: "",
+  billEnd: "",
+  billedUsd: "",
+  billFromScan: false,
 };
+
+const SOURCE_LABEL: Record<string, string> = { entered_bill: "entered", ocr_confirmed: "scanned, confirmed", manual: "entered" };
+const usd2 = (n: number) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const DAY_MS = 86_400_000;
 
 const num = (s: string): number | null => {
   const n = Number(s);
@@ -108,8 +122,42 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setForm((f) => ({ ...f, [k]: v }));
 
+  const history = trpc.telecom.history.useQuery({ siteId });
   const refresh = async () => {
-    await Promise.all([utils.telecom.list.invalidate(), utils.telecom.analyze.invalidate()]);
+    await Promise.all([
+      utils.telecom.list.invalidate(),
+      utils.telecom.analyze.invalidate(),
+      utils.telecom.history.invalidate(),
+      utils.recommendations.queue.invalidate(),
+    ]);
+  };
+  const historyByService = useMemo(() => {
+    const m = new Map<number, NonNullable<typeof history.data>>();
+    for (const r of history.data ?? []) m.set(r.serviceId, [...(m.get(r.serviceId) ?? []), r]);
+    return m;
+  }, [history.data]);
+  /* TEL-1: per-service bill history dialog */
+  const [billsFor, setBillsFor] = useState<{ id: number; label: string } | null>(null);
+  const [billForm, setBillForm] = useState({ start: "", end: "", amount: "" });
+  const addBill = trpc.telecom.addObservation.useMutation({
+    onSuccess: async (r) => {
+      toast.success(r.replaced ? "Bill updated — same period replaced" : "Bill saved");
+      setBillForm({ start: "", end: "", amount: "" });
+      await refresh();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const removeBill = trpc.telecom.removeObservation.useMutation({
+    onSuccess: async () => {
+      toast.success("Bill removed");
+      await refresh();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const billDays = (start: string, end: string): number | null => {
+    if (!start || !end) return null;
+    const d = Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / DAY_MS) + 1;
+    return Number.isFinite(d) && d > 0 ? d : null;
   };
   const upsert = trpc.telecom.upsert.useMutation({
     onSuccess: async () => {
@@ -170,6 +218,9 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
             dataAllowanceGb: b.dataAllowanceGb.value != null ? String(b.dataAllowanceGb.value) : f.dataAllowanceGb,
             unlimitedData: b.unlimitedData.value ?? f.unlimitedData,
             actualDataUsedGb: b.actualDataUsedGb.value != null ? String(b.actualDataUsedGb.value) : f.actualDataUsedGb,
+            ...(b.statementStartDate?.value && b.statementEndDate?.value && b.amountBilledUsd?.value != null
+              ? { billStart: b.statementStartDate.value, billEnd: b.statementEndDate.value, billedUsd: String(b.amountBilledUsd.value), billFromScan: true }
+              : {}),
           }));
           toast.success(
             out.needsReview
@@ -199,6 +250,10 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
       unlimitedData: s.unlimitedData,
       actualDataUsedGb: s.actualDataUsedGb != null ? String(s.actualDataUsedGb) : "",
       actualDownloadNeedMbps: s.actualDownloadNeedMbps != null ? String(s.actualDownloadNeedMbps) : "",
+      billStart: "",
+      billEnd: "",
+      billedUsd: "",
+      billFromScan: false,
     });
     setDialogOpen(true);
   };
@@ -207,6 +262,10 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
     const cost = num(form.monthlyCostUsd);
     if (!form.provider.trim()) return void toast.error("Provider is required");
     if (cost == null) return void toast.error("Monthly cost must be a positive number");
+    const anyBill = form.billStart || form.billEnd || form.billedUsd.trim();
+    const billed = num(form.billedUsd);
+    if (anyBill && (!form.billStart || !form.billEnd || billed == null))
+      return void toast.error("To save the bill, enter its first day, last day and amount — or leave all three empty.");
     upsert.mutate({
       id: form.id,
       siteId,
@@ -227,6 +286,9 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
           ? Math.max(0, Number(form.actualDataUsedGb) || 0)
           : null,
       actualDownloadNeedMbps: form.serviceType === "internet" ? num(form.actualDownloadNeedMbps) : null,
+      ...(anyBill
+        ? { billStartDate: form.billStart, billEndDate: form.billEnd, billedUsd: billed, billSource: form.billFromScan ? ("ocr_confirmed" as const) : ("entered_bill" as const) }
+        : {}),
     });
   };
 
@@ -296,8 +358,47 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
                       : ""}
                     {s.promoEndsAt ? ` · promo ends ${new Date(s.promoEndsAt).toLocaleDateString()}` : ""}
                   </p>
+                  {(() => {
+                    const hs = historyByService.get(s.id) ?? [];
+                    if (hs.length === 0)
+                      return (
+                        <p className="text-[11px] text-muted-foreground" data-testid={`tel-history-${s.id}`}>
+                          No bills saved yet — add each new bill to watch for price increases.
+                        </p>
+                      );
+                    const latest = hs[hs.length - 1];
+                    const prior = hs.length > 1 ? hs[hs.length - 2] : null;
+                    const delta = prior ? latest.normalizedMonthlyUsd - prior.normalizedMonthlyUsd : null;
+                    return (
+                      <p className="text-[11px] text-muted-foreground" data-testid={`tel-history-${s.id}`}>
+                        Latest bill {latest.periodLabel}: <span className="font-mono text-foreground">{usd2(latest.billedUsd)}</span> (
+                        {usd2(latest.normalizedMonthlyUsd)} per standard month)
+                        {delta != null && Math.abs(delta) >= 0.5 ? (
+                          <span className={delta > 0 ? "text-amber-700 dark:text-amber-400" : "text-emerald-700 dark:text-emerald-400"}>
+                            {" "}· {delta > 0 ? "up" : "down"} {usd2(Math.abs(delta))}/mo vs the bill before
+                          </span>
+                        ) : prior ? (
+                          " · same as the bill before"
+                        ) : null}
+                        {" "}· {hs.length} bill{hs.length === 1 ? "" : "s"} saved
+                      </p>
+                    );
+                  })()}
                 </div>
                 <div className="flex shrink-0 items-center">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => {
+                      setBillForm({ start: "", end: "", amount: "" });
+                      setBillsFor({ id: s.id, label: `${Meta.label} — ${s.provider}` });
+                    }}
+                    aria-label={`Bills for ${Meta.label} — ${s.provider}`}
+                    data-testid={`tel-bills-${s.id}`}
+                  >
+                    <ReceiptText className="mr-1 h-3.5 w-3.5" /> Bills
+                  </Button>
                   <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(s)} aria-label="Edit service">
                     <Pencil className="h-3.5 w-3.5" />
                   </Button>
@@ -471,6 +572,29 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
               <label className="text-xs font-medium text-muted-foreground">Contract ends</label>
               <Input className="mt-1" type="date" value={form.contractEndsAt} onChange={(e) => set("contractEndsAt", e.target.value)} />
             </div>
+            {!form.id && (
+              <fieldset className="rounded-md border border-border/70 p-3" data-testid="tel-first-bill">
+                <legend className="px-1 text-xs font-medium">This bill (optional)</legend>
+                <p className="mb-2 text-[11px] text-muted-foreground">
+                  Save the period and amount so later bills can be compared with it.
+                  {form.billFromScan ? " Read from your scan — check before saving." : ""}
+                </p>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div>
+                    <label htmlFor="tel-bill-start" className="text-xs font-medium text-muted-foreground">First day</label>
+                    <Input id="tel-bill-start" className="mt-1" type="date" value={form.billStart} onChange={(e) => set("billStart", e.target.value)} />
+                  </div>
+                  <div>
+                    <label htmlFor="tel-bill-end" className="text-xs font-medium text-muted-foreground">Last day</label>
+                    <Input id="tel-bill-end" className="mt-1" type="date" value={form.billEnd} onChange={(e) => set("billEnd", e.target.value)} />
+                  </div>
+                  <div>
+                    <label htmlFor="tel-bill-amt" className="text-xs font-medium text-muted-foreground">Amount billed ($)</label>
+                    <Input id="tel-bill-amt" className="mt-1" type="number" min="0" step="0.01" value={form.billedUsd} onChange={(e) => set("billedUsd", e.target.value)} />
+                  </div>
+                </div>
+              </fieldset>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>
@@ -478,6 +602,87 @@ export default function TelecomServicesSection({ siteId }: { siteId: number }) {
             </Button>
             <Button onClick={submit} disabled={upsert.isPending}>
               {upsert.isPending ? "Saving…" : form.id ? "Save changes" : "Add service"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* TEL-1: bill history for one service */}
+      <Dialog open={billsFor != null} onOpenChange={(o) => !o && setBillsFor(null)}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg" data-testid="tel-bills-dialog">
+          <DialogHeader>
+            <DialogTitle>Bills · {billsFor?.label}</DialogTitle>
+            <DialogDescription>
+              Add each bill's service period and amount. Bills of different lengths are converted to a standard month (30.4 days)
+              so they compare fairly. Two bills that rise by at least $5 and 10% a month show up in Ranked opportunities.
+            </DialogDescription>
+          </DialogHeader>
+          {billsFor && (() => {
+            const hs = [...(historyByService.get(billsFor.id) ?? [])].reverse();
+            const days = billDays(billForm.start, billForm.end);
+            const amt = num(billForm.amount);
+            return (
+              <div className="grid gap-4">
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div>
+                    <label htmlFor="bill-start" className="text-xs font-medium text-muted-foreground">First day</label>
+                    <Input id="bill-start" className="mt-1" type="date" value={billForm.start} onChange={(e) => setBillForm((f) => ({ ...f, start: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label htmlFor="bill-end" className="text-xs font-medium text-muted-foreground">Last day</label>
+                    <Input id="bill-end" className="mt-1" type="date" value={billForm.end} onChange={(e) => setBillForm((f) => ({ ...f, end: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label htmlFor="bill-amt" className="text-xs font-medium text-muted-foreground">Amount billed ($)</label>
+                    <Input id="bill-amt" className="mt-1" type="number" min="0" step="0.01" value={billForm.amount} onChange={(e) => setBillForm((f) => ({ ...f, amount: e.target.value }))} />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] text-muted-foreground" data-testid="bill-preview">
+                    {days != null && amt != null
+                      ? `${days} day${days === 1 ? "" : "s"} · ${usd2((amt / days) * (365.2425 / 12))} per standard month`
+                      : "Enter both dates and the amount."}
+                  </p>
+                  <Button
+                    size="sm"
+                    disabled={addBill.isPending || !billForm.start || !billForm.end || amt == null}
+                    onClick={() => addBill.mutate({ serviceId: billsFor.id, startDate: billForm.start, endDate: billForm.end, billedUsd: amt! })}
+                  >
+                    {addBill.isPending ? "Saving…" : "Save bill"}
+                  </Button>
+                </div>
+                {hs.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-border/60 px-3 py-2 text-xs text-muted-foreground">No bills saved yet.</p>
+                ) : (
+                  <ul className="divide-y divide-border/60 rounded-md border border-border/60" data-testid="bill-list">
+                    {hs.map((r) => (
+                      <li key={r.id} className="flex items-center gap-2 px-3 py-2 text-xs">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-medium">{r.periodLabel}</p>
+                          <p className="text-muted-foreground">
+                            <span className="font-mono text-foreground">{usd2(r.billedUsd)}</span> · {usd2(r.normalizedMonthlyUsd)} per standard month · {SOURCE_LABEL[r.source] ?? "entered"}
+                          </p>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => removeBill.mutate({ id: r.id })}
+                          disabled={removeBill.isPending}
+                          aria-label={`Remove bill ${r.periodLabel}`}
+                        >
+                          <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBillsFor(null)}>
+              Done
             </Button>
           </DialogFooter>
         </DialogContent>

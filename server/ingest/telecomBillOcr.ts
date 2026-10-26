@@ -40,6 +40,10 @@ export interface ExtractedTelecomBill {
   dataAllowanceGb: ExtractedTelecomField<number>;
   unlimitedData: ExtractedTelecomField<boolean>;
   actualDataUsedGb: ExtractedTelecomField<number>;
+  /** TEL-1: the statement's service period and the amount billed for it. */
+  statementStartDate: ExtractedTelecomField<string>; // YYYY-MM-DD
+  statementEndDate: ExtractedTelecomField<string>; // YYYY-MM-DD (inclusive)
+  amountBilledUsd: ExtractedTelecomField<number>;
   overallConfidence: number;
 }
 
@@ -62,6 +66,9 @@ const TELECOM_SCHEMA = {
     dataAllowanceGb: { type: "number", description: "monthly data allowance in GB for capped plans" },
     unlimitedData: { type: "boolean", description: "true if the plan is advertised as unlimited data" },
     actualDataUsedGb: { type: "number", description: "actual data used this cycle in GB if shown" },
+    statementStartDate: { type: "string", description: "YYYY-MM-DD first day of the service period this bill covers, if stated" },
+    statementEndDate: { type: "string", description: "YYYY-MM-DD last day (inclusive) of the service period this bill covers, if stated" },
+    amountBilledUsd: { type: "number", description: "total new charges billed for that service period in USD (not past-due balance), if stated" },
     fieldConfidences: {
       type: "object",
       description: "0-1 confidence per field name",
@@ -159,6 +166,9 @@ export async function extractTelecomBill(
         dataAllowanceGb: field<number>("dataAllowanceGb"),
         unlimitedData: field<boolean>("unlimitedData"),
         actualDataUsedGb: field<number>("actualDataUsedGb"),
+        statementStartDate: field<string>("statementStartDate"),
+        statementEndDate: field<string>("statementEndDate"),
+        amountBilledUsd: field<number>("amountBilledUsd"),
         overallConfidence: 0,
       };
       const critical = [bill.serviceType, bill.provider, bill.monthlyCostUsd];

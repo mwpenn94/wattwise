@@ -26,7 +26,7 @@ import { intervals, meters as metersTable, uploads } from "../drizzle/schema";
 import { storageGetSignedUrl } from "./storage";
 import { parseWorkbookInWorker, preflightWorkbookZip } from "./ingest/hardening";
 import { workbookSheetNames } from "./ingest/xlsxSubset";
-import { parseSheetRows, type IntervalClock, type ParsedMeterSeries } from "./ingest/parsers";
+import { applyCommodityHint, parseSheetRows, type IntervalClock, type ParsedMeterSeries } from "./ingest/parsers";
 import { writeIntervals } from "./ingest/writer";
 import { reclaimMemory } from "./ingest/memory";
 import { extractSheetHeaderMeta, parseServiceAddress } from "./bulkImportCore";
@@ -384,12 +384,15 @@ async function runSheets(
       try {
         for (const ser of series) {
           if (ser.points.length === 0) continue;
-          const commodity = s.commodityHint ?? ser.commodity;
+          // TEL-1: the utility chosen on Upload applies unless the file states its unit.
+          const hinted = applyCommodityHint(ser, s.commodityHint);
+          if (hinted.note) ser.validation.notes.push(hinted.note);
+          const commodity = hinted.commodity;
           const label = ser.sourceKey;
           let meter = (await h.listMeters(ctx.siteId, ctx.userId)).find((m) => m.label === label && m.commodity === commodity);
           if (!meter) {
             const meterId = await h.createMeter({
-              siteId: ctx.siteId, userId: ctx.userId, commodity, label, usageUnit: ser.usageUnit, demandUnit: ser.demandUnit,
+              siteId: ctx.siteId, userId: ctx.userId, commodity, label, usageUnit: hinted.usageUnit, demandUnit: hinted.demandUnit,
               timezone: s.clock.timeZone, timestampBasis: ser.timestampBasis ?? s.clock.timestampBasis,
             }, ctx.userId);
             s.createdMeterIds.push(meterId);

@@ -28,6 +28,10 @@ export interface ParsedMeterSeries {
   sourceKey: string;
   commodity: "electric" | "gas" | "water";
   usageUnit: string;
+  /** TEL-1: true when the unit (and so the utility) is stated by the file
+   * itself — a unit-named usage column or a Green Button reading type — rather
+   * than defaulted. A user's utility choice never overrides a stated unit. */
+  unitFromFile?: boolean;
   demandUnit: string | null;
   points: Array<{ ts: number; durationMin: number; usage: number; demand: number | null }>;
   /** workbook footer totals for validation (D2 rows are excluded from data but retained) */
@@ -333,6 +337,7 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock, prebuilt
   else if (/cubic\s*feet/.test(usageColLower)) usageUnit = "cf";
   else if (/m3/.test(usageColLower)) usageUnit = "m3";
   else usageUnit = commodity === "electric" ? "kWh" : commodity === "gas" ? "therms" : "gal";
+  const unitFromFile = kwhCol != null || /ccf|mcf|therm|hcf|gallon|^gal$|gal\b|cubic\s*feet|m3|(^|[^a-z])k?wh\b/.test(usageColLower);
   // Batch-15 (pass 144): a bare "Wh" usage header (matched by the generic
   // usage/energy regex, NOT the kwh regex) would be ingested as-is yet labeled
   // kWh — a 1000× unit error. Detect Watt-hour headers and convert to kWh.
@@ -432,6 +437,7 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock, prebuilt
     sourceKey: name,
     commodity,
     usageUnit,
+    unitFromFile,
     // Cycle 10 (pass 554) + Batch-13 (pass 64): report kW ONLY when demand
     // values were actually ingested — a kW-labeled header whose cells are all
     // empty/non-numeric must not claim demand data exists (matches ESPI's
@@ -632,6 +638,7 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
       sourceKey: "espi_usage_point",
       commodity,
       usageUnit,
+      unitFromFile: sawReadingType,
       demandUnit: espiHasDemand ? "kW" : null,
       points,
       footerTotals: { raw: [] },
@@ -667,4 +674,30 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
       rowsSkipped: skippedReadings, // Batch-36 (pass 1374): was hardcoded 0
     },
   ];
+}
+
+const COMMODITY_WORD: Record<"electric" | "gas" | "water", string> = { electric: "Electric", gas: "Natural gas", water: "Water" };
+const DEFAULT_UNIT: Record<"electric" | "gas" | "water", string> = { electric: "kWh", gas: "therms", water: "gal" };
+/**
+ * TEL-1: reconcile the utility the user chose on Upload with what the file
+ * says. A unit stated by the file always wins (a kWh column is never stored
+ * as gas); otherwise the chosen utility applies with its standard unit, so a
+ * generic "Usage" column chosen as Natural gas is stored in therms, not kWh.
+ * Demand (kW) is kept only for electric. Any difference is disclosed.
+ */
+export function applyCommodityHint(
+  ser: Pick<ParsedMeterSeries, "commodity" | "usageUnit" | "demandUnit" | "unitFromFile">,
+  hint: "electric" | "gas" | "water" | null | undefined,
+): { commodity: "electric" | "gas" | "water"; usageUnit: string; demandUnit: string | null; note: string | null } {
+  if (!hint || hint === ser.commodity) return { commodity: ser.commodity, usageUnit: ser.usageUnit, demandUnit: ser.demandUnit, note: null };
+  if (ser.unitFromFile) {
+    return {
+      commodity: ser.commodity, usageUnit: ser.usageUnit, demandUnit: ser.demandUnit,
+      note: `This file states its usage in ${ser.usageUnit}, so it was imported as ${COMMODITY_WORD[ser.commodity]}, not ${COMMODITY_WORD[hint]} as chosen.`,
+    };
+  }
+  return {
+    commodity: hint, usageUnit: DEFAULT_UNIT[hint], demandUnit: hint === "electric" ? ser.demandUnit : null,
+    note: `Imported as ${COMMODITY_WORD[hint]} as chosen; the file does not state a unit, so usage is read as ${DEFAULT_UNIT[hint]}.`,
+  };
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNotNull, lte } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, lte } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { auditLog, baselines, measureImplementations, meters, opportunities as opportunityTable, recommendationStates, sites } from "../drizzle/schema";
 import { savingsRangeFromEstimate, type SavingsConfidence, type SavingsRangeUsd } from "../shared/savingsRange";
@@ -35,6 +35,8 @@ export interface RecommendationItem {
 export interface RecommendationQueue {
   /** OPEN-2: completed measures newer than the last analysis — remaining estimates refresh on the next run. */
   refreshSuggested?: { measures: string[] } | null;
+  /** TEL-1: connectivity services or bills changed after the latest analysis. */
+  connectivityChanged?: boolean;
   active: RecommendationItem[]; next: RecommendationItem[]; completed: RecommendationItem[];
   inactive: RecommendationItem[]; needsReview: RecommendationItem[]; landlord: RecommendationItem[];
   progress: {
@@ -152,7 +154,12 @@ export async function getSiteQueue(siteId: number, userId: number, now = Date.no
   const lastRunAt = latest?.createdAt ? new Date(latest.createdAt as unknown as string | number | Date).getTime() : null;
   const completedAt = new Map(states.filter(st => st.status === "completed").map(st => [st.measure, st.changedAt]));
   const fresh = lastRunAt == null ? [] : queue.completed.filter(i => (completedAt.get(i.measure) ?? 0) > lastRunAt).map(i => i.title);
-  return { ...queue, refreshSuggested: fresh.length && queue.active.length ? { measures: fresh } : null };
+  // TEL-1: a connectivity service or bill entered after the analysis is not in
+  // the ranked feed yet (findings are persisted by the analysis run).
+  const connectivityChanged = lastRunAt == null ? false : (await db.select({ id: auditLog.id }).from(auditLog)
+    .where(and(eq(auditLog.userId, userId), eq(auditLog.action, "telecom_change"), eq(auditLog.entityId, String(siteId)), gt(auditLog.createdAt, new Date(lastRunAt))))
+    .limit(1)).length > 0;
+  return { ...queue, refreshSuggested: fresh.length && queue.active.length ? { measures: fresh } : null, connectivityChanged };
 }
 
 /** OPEN-2: completed measures exactly as the queue shows them (reopen/undo/reset

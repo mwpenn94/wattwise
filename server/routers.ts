@@ -33,7 +33,7 @@ import { ensureSeeded } from "./seed/runSeeders";
 import { STATE_PROFILES } from "./seed/nationalData";
 import { preParseGate, rejectXxe, withParseTimeout } from "./ingest/hardening";
 import { extractZipMembers } from "./ingest/archive";
-import { parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, type ParsedMeterSeries } from "./ingest/parsers";
+import { applyCommodityHint, parseCsvIntervals, parseEspiXml, parseExcelIntervals, PARSER_VERSION, type ParsedMeterSeries } from "./ingest/parsers";
 import { writeIntervals } from "./ingest/writer";
 import { extractBill } from "./ingest/billOcr";
 import { extractTelecomBill } from "./ingest/telecomBillOcr";
@@ -91,6 +91,7 @@ import {
   upsertTelecomService,
 } from "./telecom";
 import { resolveTelecomMarket } from "./telecomMarket";
+import * as telecomHistory from "./telecomPriceHistory";
 import { registerGeometryCacheDb } from "./geometryCacheDb";
 import { assessSeedFreshness, recordParseOutcome, recordUnknownTariff, sweepUnverifiedTariffs } from "./seedLifecycle";
 import { incentiveEconomics } from "./incentives";
@@ -2182,7 +2183,10 @@ export const appRouter = router({
         // marked 'parsed' — catch, record the partial-write state, and fail.
         try {
           for (const s of series.filter((x) => x.points.length > 0)) {
-            const commodity = input.commodityHint ?? s.commodity;
+            // TEL-1: the utility chosen on Upload applies unless the file states its unit.
+            const hinted = applyCommodityHint(s, input.commodityHint);
+            if (hinted.note) s.validation.notes.push(hinted.note);
+            const commodity = hinted.commodity;
             const label = s.sourceKey;
             let meter = existing.find((m) => m.label === label && m.commodity === commodity);
             if (!meter) {
@@ -2192,8 +2196,8 @@ export const appRouter = router({
                   userId: ctx.user.id,
                   commodity,
                   label,
-                  usageUnit: s.usageUnit,
-                  demandUnit: s.demandUnit,
+                  usageUnit: hinted.usageUnit,
+                  demandUnit: hinted.demandUnit,
                   // R2 #2: the new meter records the SOURCE clock the file was
                   // parsed with (site/meter timezone + START/END basis).
                   timezone: sourceClock.timeZone,
@@ -3603,12 +3607,76 @@ export const appRouter = router({
           billPeriodEnd: z.number().int().positive().nullish(),
           billedUsd: z.number().positive().max(100000).nullish(),
           billSource: z.enum(["entered_bill", "ocr_confirmed", "manual"]).optional(),
+          /** TEL-1: the bill's inclusive service period as YYYY-MM-DD (preferred over ms). */
+          billStartDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
+          billEndDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
         }),
       )
-      .mutation(({ ctx, input }) => upsertTelecomService(ctx.user.id, input)),
+      .mutation(async ({ ctx, input: raw }) => {
+        const { billStartDate, billEndDate, ...input } = raw;
+        if (billStartDate || billEndDate) {
+          if (!billStartDate || !billEndDate) throw new TRPCError({ code: "BAD_REQUEST", message: "To save a bill, enter its first day, last day and amount — or leave all three empty." });
+          const p = telecomHistory.billPeriodFromDates(billStartDate, billEndDate);
+          input.billPeriodStart = p.periodStart; // NaN on an impossible date → plain message below
+          input.billPeriodEnd = p.periodEnd;
+        }
+        if (input.billPeriodStart != null || input.billPeriodEnd != null || input.billedUsd != null) {
+          if (input.billPeriodStart == null || input.billPeriodEnd == null || input.billedUsd == null)
+            throw new TRPCError({ code: "BAD_REQUEST", message: "To save a bill, enter its first day, last day and amount — or leave all three empty." });
+          const problem = telecomHistory.billObservationProblem(input.billPeriodStart, input.billPeriodEnd, input.billedUsd);
+          if (problem) throw new TRPCError({ code: "BAD_REQUEST", message: problem });
+        }
+        const id = await upsertTelecomService(ctx.user.id, input);
+        await h.audit(ctx.user.id, "telecom_change", "site", String(input.siteId), { serviceId: id, op: input.id ? "update" : "add", bill: input.billedUsd != null });
+        return id;
+      }),
     remove: protectedProcedure
       .input(z.object({ id: z.number() }))
-      .mutation(({ ctx, input }) => removeTelecomService(input.id, ctx.user.id)),
+      .mutation(async ({ ctx, input }) => {
+        const owned = (await listAllTelecomServices(ctx.user.id)).find((s) => s.id === input.id);
+        await removeTelecomService(input.id, ctx.user.id);
+        if (owned) await h.audit(ctx.user.id, "telecom_change", "site", String(owned.siteId), { serviceId: owned.id, op: "remove" });
+      }),
+    /** TEL-1: bill history (price observations) for every service on a site. */
+    history: protectedProcedure
+      .input(z.object({ siteId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const site = await h.getSite(input.siteId, ctx.user.id);
+        if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
+        const rows = await telecomHistory.listTelecomPriceHistoryForSite(site.id, ctx.user.id);
+        return rows.map((r) => ({ ...r, periodLabel: telecomHistory.billPeriodLabel(r.periodStart, r.periodEnd) }));
+      }),
+    /** TEL-1: record one bill (dates are the bill's inclusive service period).
+     * Re-entering the same period replaces that bill instead of duplicating it. */
+    addObservation: protectedProcedure
+      .input(
+        z.object({
+          serviceId: z.number().int().positive(),
+          startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+          endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+          billedUsd: z.number().positive().max(100000),
+          source: z.enum(["entered_bill", "ocr_confirmed", "manual"]).default("entered_bill"),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const owned = (await listAllTelecomServices(ctx.user.id)).find((s) => s.id === input.serviceId);
+        if (!owned) throw new TRPCError({ code: "NOT_FOUND", message: "Service not found" });
+        const { periodStart, periodEnd } = telecomHistory.billPeriodFromDates(input.startDate, input.endDate);
+        const problem = telecomHistory.billObservationProblem(periodStart, periodEnd, input.billedUsd);
+        if (problem) throw new TRPCError({ code: "BAD_REQUEST", message: problem });
+        const replaced = await telecomHistory.priceObservationExists(owned.id, ctx.user.id, periodStart, periodEnd);
+        const id = await telecomHistory.recordTelecomPriceObservation(ctx.user.id, { serviceId: owned.id, periodStart, periodEnd, billedUsd: input.billedUsd, source: input.source });
+        await h.audit(ctx.user.id, "telecom_change", "site", String(owned.siteId), { serviceId: owned.id, op: replaced ? "bill_replaced" : "bill_added" });
+        return { id, replaced, normalizedMonthlyUsd: telecomHistory.normalizeMonthlyPrice(input.billedUsd, periodStart, periodEnd) };
+      }),
+    removeObservation: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const siteId = await telecomHistory.removeTelecomPriceObservation(input.id, ctx.user.id);
+        if (siteId == null) throw new TRPCError({ code: "NOT_FOUND", message: "Bill not found" });
+        await h.audit(ctx.user.id, "telecom_change", "site", String(siteId), { op: "bill_removed" });
+        return { ok: true as const };
+      }),
     analyze: protectedProcedure
       .input(z.object({ siteId: z.number().optional() }))
       .query(async ({ ctx, input }) => {

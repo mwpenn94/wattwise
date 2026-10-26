@@ -43,6 +43,8 @@ import {
   productionSeries,
   recommendationStates,
   importSiteGroups,
+  telecomServices,
+  telecomPriceHistory,
 } from "../drizzle/schema";
 import type { Alert } from "../drizzle/schema";
 
@@ -235,6 +237,9 @@ export async function deleteSite(siteId: number, userId: number) {
   await db.delete(measureImplementations).where(eq(measureImplementations.siteId, siteId));
   await db.delete(planBaskets).where(eq(planBaskets.siteId, siteId));
   await db.delete(alerts).where(eq(alerts.siteId, siteId));
+  // TEL-1: connectivity services and their bill history belong to the site.
+  await db.delete(telecomPriceHistory).where(eq(telecomPriceHistory.siteId, siteId));
+  await db.delete(telecomServices).where(eq(telecomServices.siteId, siteId));
   await db.delete(meters).where(eq(meters.siteId, siteId));
   // uploads keep their file provenance but detach from the deleted site
   await db.update(uploads).set({ siteId: null }).where(eq(uploads.siteId, siteId));
@@ -271,6 +276,8 @@ export async function deleteAllUserData(userId: number) {
   await db.delete(alerts).where(eq(alerts.userId, userId));
   await db.delete(recommendationStates).where(eq(recommendationStates.userId, userId));
   await db.delete(measureImplementations).where(eq(measureImplementations.userId, userId));
+  await db.delete(telecomPriceHistory).where(eq(telecomPriceHistory.userId, userId));
+  await db.delete(telecomServices).where(eq(telecomServices.userId, userId));
   await db.delete(auditLog).where(eq(auditLog.userId, userId));
   await db.insert(auditLog).values({
     userId,

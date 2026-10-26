@@ -611,7 +611,7 @@
 - [ ] BILL-2: Stripe test-mode prices + hosted flow E2E (owner decisions: prices, tax, terms) — no live Stripe
 - [ ] RATE-2: Adjudicate change_detected sources (SW Gas, UNS Gas, TEP, Phoenix Water, LG&E/KU, APS/TEP dockets, 4 telecom benchmarks) → /home/ubuntu/work/run/rate-adjudication-2026-10.md
 - [ ] RATE-3: Oct 3 monthly verification posted no findings; schedule expiry repaired Oct 24 (next run Nov 3 07:30 UTC) — confirm Nov run posts
-- [ ] TEL-1: Telecom "Add bill observation" UI for price history; Upload ?commodity preselect acceptance; print visual acceptance; Connectivity league-table tests
+- [x] TEL-1: Telecom "Add bill observation" UI for price history; Upload ?commodity preselect acceptance; print visual acceptance; Connectivity league-table tests (Oct 26: Bills dialog + history line + dated price-increase finding + "Update estimates" notice; Upload Utility selector from ?commodity, file-stated unit always wins; gas/water manual bills; delete cascades; tests telecomBillHistory 12/12, commodityHint 3/3; full vitest 931/0 failed; E2E 22/22 incl. print KPI)
 - [ ] PF-2: Official county parcel adapters beyond Mohave (start with Pima for the owner's Tucson sites); FEMA structures-only fallback is live and disclosed
 
 ## Oct 24 evening — completed and validated (checkpoint after 23:36 PT)
