@@ -475,6 +475,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
   let meterRateReview: MeterRateReview | null = null;
   // Oct 25: estimated full bill (LFCR + taxes) as a range, separate from the subtotal.
   let fullBillEstimate: FullBillEstimate | null = null;
+  // OPEN-3 (Oct 26): per-account demand inputs for the campus peak-management
+  // opportunity (each account is billed on its own demand determinant).
+  const campusPeakAccounts: Array<{ label: string; peakKw: number; loadFactor: number; demandCostUsd: number; ratchet: boolean }> = [];
+  let campusPeakShaveKw: number | null = null;
   let comparisons: TariffComparison[] = [];
   if (costPoints.length > 0) {
     // Commodity-aware sweep: a water/gas meter must never be costed on electric
@@ -701,6 +705,8 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     );
     const { inTerritory: territoryTariffs } = partitionByTerritory(allTariffs, territoryRes);
     const components: AccountPricingComponent[] = [];
+    const componentLoadFactorById = new Map<number, number>();
+    const componentPeakById = new Map<number, number>();
     for (const component of componentMeters) {
       const componentPoints = (await h.getIntervalPoints(component.id, userId)).map((row) => ({
         ts: row.ts,
@@ -709,7 +715,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         demand: row.demand,
       }));
       if (componentPoints.length === 0) throw new Error(`Account ${component.id} has no intervals; partial campus pricing is withheld.`);
-      const peakKw = computeDemandAnalytics(componentPoints, 4, [6, 7, 8, 9], component.timezone ?? tz)?.peakKw ?? null;
+      const componentDemand = computeDemandAnalytics(componentPoints, 4, [6, 7, 8, 9], component.timezone ?? tz);
+      const peakKw = componentDemand?.peakKw ?? null;
+      const componentLoadFactor = componentDemand?.loadFactor ?? null;
+      if (componentLoadFactor != null) componentLoadFactorById.set(component.id, componentLoadFactor);
+      if (peakKw != null) componentPeakById.set(component.id, peakKw);
       const componentMonthlyKwh = monthlyImportedKwh(componentPoints, component.timezone ?? tz);
       const assigned = component.currentTariffId ? await h.getTariff(component.currentTariffId) : undefined;
       const assignedElectric = assigned?.commodity === "electric" ? assigned : undefined;
@@ -767,6 +777,20 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     requireAlignedCampusSeries(components.map(component => component.points));
     if (components.length > 0) {
       const priced = priceAccountsSeparately(components, tz);
+      components.forEach((component, i) => {
+        const cost = priced.accountCosts[i];
+        const lf = componentLoadFactorById.get(component.meterId);
+        const pk = componentPeakById.get(component.meterId);
+        if (cost && lf != null && pk != null && pk > 0) {
+          campusPeakAccounts.push({
+            label: component.label,
+            peakKw: pk,
+            loadFactor: lf,
+            demandCostUsd: cost.breakdown.demand,
+            ratchet: cost.monthlyDetails.some((m) => m.ratchetApplied),
+          });
+        }
+      });
       currentCost = priced.combined;
       const billUtility = components.every((c) => sameAccountProvider(c.utilityName, components[0].utilityName)) ? components[0].utilityName : null;
       fullBillEstimate = estimateFullBill({ accounts: priced.accountCosts, utilityName: billUtility, city: site.city, state: site.state, residential: sectorClass === "residential" });
@@ -1724,6 +1748,41 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       });
     }
   }
+  if (meter?.meterRole === "virtual_total" && campusPeakAccounts.length > 0) {
+    // OPEN-3 (Oct 26): same rule as a single account, applied to each
+    // separately billed account at its own demand rate, load factor and
+    // ratchet, then summed. The campus total's combined peak is never billed.
+    let lo = 0;
+    let hi = 0;
+    const counted: string[] = [];
+    let anyRatchet = false;
+    for (const a of campusPeakAccounts) {
+      const rate = a.demandCostUsd > 0 ? a.demandCostUsd / 12 / a.peakKw : 0;
+      if (a.loadFactor >= 0.45 || rate <= 0) continue;
+      const achievable = a.peakKw * 0.1 * (a.ratchet ? 0.5 : 1);
+      lo += achievable * rate * 12 * 0.5;
+      hi += achievable * rate * 12;
+      campusPeakShaveKw = (campusPeakShaveKw ?? 0) + a.peakKw * 0.1;
+      counted.push(a.label);
+      if (a.ratchet) anyRatchet = true;
+    }
+    if (hi > 0) {
+      const names = counted.length <= 4 ? counted.join(", ") : `${counted.slice(0, 3).join(", ")} and ${counted.length - 3} more`;
+      oppCands.push({
+        key: "peak_management",
+        title: "Peak demand management (staggered starts, load scheduling)",
+        category: "demand",
+        annualSavingsUsdLo: lo,
+        annualSavingsUsdHi: hi,
+        capexBand: "low",
+        confidence: "medium",
+        rationale:
+          `Counted on ${counted.length === 1 ? "1 account" : `${counted.length} accounts`} with peaky load and a demand charge (${names})${campusPeakAccounts.length > counted.length ? "; the other accounts have steady load or no demand charge" : ""}. Each account is billed on its own peak, so ~10% of each account's monthly peak is priced at that account's demand rate and the results are added.` +
+          (anyRatchet ? " Where an account's schedule has a ratchet, only half of the shave is counted until the ratchet window rolls off." : ""),
+        disclosures: [MODELED_ESTIMATES_DISCLAIMER],
+      });
+    }
+  }
   if (endUseFractions?.cooling && annualUsage != null && endUseFractions.cooling > 0.25) {
     const coolKwh = annualUsage * endUseFractions.cooling;
     oppCands.push({
@@ -2012,7 +2071,14 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       estCostSavingsPerYr: (c.annualSavingsUsdLo + c.annualSavingsUsdHi) / 2,
       estEnergySavingsPerYr: c.estUnitsSavedPerYr ?? null,
       energyUnit: c.unit ?? COMMODITY_UNITS.electric.usageUnit,
-      estDemandSavingsKw: c.key === "peak_management" && demand ? demand.peakKw * 0.1 : null,
+      estDemandSavingsKw:
+        c.key === "peak_management"
+          ? meter?.meterRole === "virtual_total"
+            ? campusPeakShaveKw
+            : demand
+              ? demand.peakKw * 0.1
+              : null
+          : null,
       paybackBandYears: c.capexBand === "none" ? "immediate" : c.capexBand === "low" ? "0.5–2 yr" : "2–6 yr",
       confidence: c.confidence,
       disaggregationMethod: disaggMethod,

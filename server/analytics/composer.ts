@@ -88,6 +88,31 @@ export interface ComposedResult {
 
 const cap = (v: number) => Math.round(v * 100) / 100;
 
+/**
+ * Basket payback (Oct 26: extracted unchanged so campus plans compute payback
+ * once on campus-level savings). Accuracy pass (Jul 20): savings uncertainty
+ * ±15% (high) / ±25% (medium) / ±40% (low), anchored to the ASHRAE G14
+ * CV(RMSE) ≤25% monthly-model gate; bounds are capex ÷ (savings × (1±u)).
+ */
+export function basketPayback(
+  basketCapexUsd: number,
+  composedSavings: number,
+  weakest: "low" | "medium" | "high",
+): { paybackYears: number | null; paybackBand: string | null; disclosure: string | null } {
+  if (basketCapexUsd === 0 && composedSavings > 1) return { paybackYears: 0, paybackBand: "immediate — no upfront cost", disclosure: null };
+  if (basketCapexUsd > 0 && composedSavings > 1) {
+    const u = weakest === "high" ? 0.15 : weakest === "medium" ? 0.25 : 0.4;
+    const lo = basketCapexUsd / (composedSavings * (1 + u));
+    const hi = basketCapexUsd / (composedSavings * (1 - u));
+    return {
+      paybackYears: cap(basketCapexUsd / composedSavings),
+      paybackBand: `${lo.toFixed(1)}–${hi.toFixed(1)} years`,
+      disclosure: `Basket payback band is derived from the basket's ${weakest}-confidence chip (savings uncertainty ±${Math.round(u * 100)}%, anchored to the ASHRAE G14 CV(RMSE) ≤25% M&V gate); excludes incentives, financing, degradation, and rate escalation.`,
+    };
+  }
+  return { paybackYears: null, paybackBand: null, disclosure: null };
+}
+
 export function composeMeasures(
   baselineHourly: number[],
   measures: PlanMeasure[],
@@ -147,7 +172,10 @@ export function composeMeasures(
 
   // efficiency first (reduces the load everything else acts on)
   const effMeasures = measures.filter((m) => m.kind === "efficiency" && m.efficiencyReductions);
-  if (effMeasures.length > 0 && endUseFractions) {
+  // Oct 26 fix: whole-building keys ("all"/"overall") apply to all load (share 1).
+  const WHOLE_BUILDING = new Set(["all", "overall"]);
+  const effHasWholeBuilding = effMeasures.some((m) => Object.keys(m.efficiencyReductions!).some((k) => WHOLE_BUILDING.has(k)));
+  if (effMeasures.length > 0 && (endUseFractions || effHasWholeBuilding)) {
     // Merge reductions per end use, capping each end use at 90% (API bound) and
     // the aggregate at 100% — two measures cannot remove more than all of an
     // end use's load.
@@ -159,7 +187,7 @@ export function composeMeasures(
     }
     let totalReduction = 0;
     for (const [endUse, frac] of Object.entries(merged)) {
-      totalReduction += (endUseFractions[endUse] ?? 0) * frac;
+      totalReduction += (WHOLE_BUILDING.has(endUse) ? 1 : (endUseFractions?.[endUse] ?? 0)) * frac;
     }
     if (totalReduction > 1) {
       disclosures.push("Combined efficiency reductions were capped at 100% of load — treat as a theoretical maximum.");
@@ -264,27 +292,11 @@ export function composeMeasures(
     extrapolated ? "low" : baselineConfidence === "low" ? "low" : "medium",
   );
 
-  let basketPaybackYears: number | null = null;
-  let basketPaybackBand: string | null = null;
-  if (basketCapexUsd === 0 && composedSavings > 1) {
-    basketPaybackYears = 0;
-    basketPaybackBand = "immediate — no upfront cost";
-  } else if (basketCapexUsd > 0 && composedSavings > 1) {
-    basketPaybackYears = cap(basketCapexUsd / composedSavings);
-    // Accuracy pass (Jul 20): the old 75%–150% spread was a fixed heuristic
-    // regardless of how well the basket was modeled. Use the same
-    // confidence-derived proportional spread convention as the scenario
-    // engine: savings uncertainty ≈ ±15% (high) / ±25% (medium) / ±40% (low),
-    // anchored to the ASHRAE G14 CV(RMSE) ≤25% monthly-model gate; payback
-    // bounds are capex ÷ (savings × (1±u)).
-    const u = weakest === "high" ? 0.15 : weakest === "medium" ? 0.25 : 0.4;
-    const lo = basketCapexUsd / (composedSavings * (1 + u));
-    const hi = basketCapexUsd / (composedSavings * (1 - u));
-    basketPaybackBand = `${lo.toFixed(1)}–${hi.toFixed(1)} years`;
-    disclosures.push(
-      `Basket payback band is derived from the basket's ${weakest}-confidence chip (savings uncertainty ±${Math.round(u * 100)}%, anchored to the ASHRAE G14 CV(RMSE) ≤25% M&V gate); excludes incentives, financing, degradation, and rate escalation.`,
-    );
-  }
+  // Oct 26: payback math lives in basketPayback (shared with campus plans).
+  const bp = basketPayback(basketCapexUsd, composedSavings, weakest);
+  const basketPaybackYears = bp.paybackYears;
+  const basketPaybackBand = bp.paybackBand;
+  if (bp.disclosure) disclosures.push(bp.disclosure);
 
   /* ---- 5. rate re-sweep on the composed profile (§3c: rate last) ---- */
   const rateSweep = candidateTariffs.map((t) => {

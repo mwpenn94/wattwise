@@ -27,6 +27,7 @@ import { fmtUsd, fmtNum } from "@/lib/wattwiseUi";
 import { ConfidenceBadge, DisclaimerBanner, ProvChip } from "@/components/Honesty";
 import { ProvenanceBadge, classifyBasis } from "@/components/ProvenanceBadge";
 import BillBuilder from "@/components/BillBuilder";
+import { CampusAccountTable } from "@/components/CampusAccountTable";
 import { useActiveSite } from "@/hooks/useActiveSite";
 import type { ScenarioResults } from "@shared/wattwise";
 
@@ -72,9 +73,20 @@ export default function Scenarios() {
 
   const [kind, setKind] = useState<(typeof KINDS)[number]["kind"]>(() => (deepLink.measure ? measureToKind(deepLink.measure) ?? "efficiency" : "efficiency"));
   const [params, setParams] = useState({ solarKwDc: "10", batteryKwh: "20", batteryKw: "10", reduction: "15", evAnnualKwh: "3500", capexUsd: "" });
+  // OPEN-3: campuses (2+ separately billed electric accounts) are priced
+  // account by account; solar/battery/EV attach to one chosen account.
+  const meters = trpc.sites.meters.useQuery({ siteId: activeSiteId! }, { enabled: activeSiteId != null });
+  const campusAccounts = useMemo(
+    () => (meters.data ?? []).filter((m) => m.commodity === "electric" && m.meterRole === "main"),
+    [meters.data],
+  );
+  const isCampus = campusAccounts.length >= 2;
+  const [accountMeterId, setAccountMeterId] = useState<string>("auto");
+  const attachesToOneAccount = ["solar", "battery", "solar_battery", "ev_load"].includes(kind);
   useEffect(() => {
     setKind(deepLink.measure ? measureToKind(deepLink.measure) ?? "efficiency" : "efficiency");
     setParams({ solarKwDc: "10", batteryKwh: "20", batteryKw: "10", reduction: "15", evAnnualKwh: "3500", capexUsd: "" });
+    setAccountMeterId("auto");
   }, [activeSiteId, deepLink.measure]);
 
   const run = trpc.scenariosApi.run.useMutation({
@@ -105,6 +117,7 @@ export default function Scenarios() {
             : undefined,
       evAnnualKwh: kind === "ev_load" ? Number(params.evAnnualKwh) : undefined,
       capexUsd: params.capexUsd ? Number(params.capexUsd) : undefined,
+      accountMeterId: isCampus && attachesToOneAccount && accountMeterId !== "auto" ? Number(accountMeterId) : undefined,
     });
   }
 
@@ -162,6 +175,31 @@ export default function Scenarios() {
               </div>
             </div>
 
+            {isCampus && (
+              <div className="rounded-md border border-border/70 bg-muted/30 p-2.5" data-testid="campus-scenario-note">
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  This campus has {campusAccounts.length} separately billed accounts. Each account is priced on its own rate schedule and the results are added.
+                </p>
+                {attachesToOneAccount && (
+                  <div className="mt-2">
+                    <Label htmlFor="p-account" className="text-xs">Account it connects to</Label>
+                    <Select value={accountMeterId} onValueChange={setAccountMeterId}>
+                      <SelectTrigger id="p-account" className="mt-1" data-testid="campus-account-picker">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">Largest account by annual use (default)</SelectItem>
+                        {campusAccounts.map((m) => (
+                          <SelectItem key={m.id} value={String(m.id)}>
+                            {m.facilityLabel ?? m.label ?? `Account ${m.id}`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+              </div>
+            )}
             {["solar", "solar_battery"].includes(kind) && (
               <div>
                 <Label htmlFor="p-solar">System size (kW DC)</Label>
@@ -211,7 +249,9 @@ export default function Scenarios() {
         </Card>
 
         <div className="space-y-4">
-          {activeSiteId != null && <BillBuilder key={activeSiteId} siteId={activeSiteId} />}
+          {activeSiteId != null && (
+            <BillBuilder key={activeSiteId} siteId={activeSiteId} accountMeterId={isCampus && accountMeterId !== "auto" ? Number(accountMeterId) : undefined} />
+          )}
           {scenarios.isLoading && <Skeleton className="h-40" />}
           {(scenarios.data ?? []).map((s) => {
             const r = s.results as unknown as ScenarioResults | null;
@@ -266,6 +306,7 @@ export default function Scenarios() {
                         </div>
                       </div>
                       <ImplementerSavings results={r} />
+                      <CampusAccountTable results={r} />
                       {r.disclosures.length > 0 && (
                         <ul className="mt-4 space-y-1 border-t border-border pt-3">
                           {r.disclosures.map((d, i) => (

@@ -9,6 +9,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { trpc } from "@/lib/trpc";
+import { CampusAccountTable } from "@/components/CampusAccountTable";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -66,7 +67,7 @@ function CountUpUsd({ value }: { value: number }) {
   return <span className="tabular-nums">${Math.round(display).toLocaleString()}</span>;
 }
 
-export default function BillBuilder({ siteId }: { siteId: number }) {
+export default function BillBuilder({ siteId, accountMeterId }: { siteId: number; accountMeterId?: number }) {
   const presets = trpc.scenariosApi.presets.useQuery({ siteId });
   // §3m plan persistence — saved baskets survive the session and feed the
   // My Energy Plan report. Saving is the Plus unlock; composing stays free.
@@ -106,13 +107,13 @@ export default function BillBuilder({ siteId }: { siteId: number }) {
     if (selected.size === 0) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      compose.mutate({ siteId, measures: Array.from(selected.values()) });
+      compose.mutate({ siteId, measures: Array.from(selected.values()), accountMeterId });
     }, 250);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, siteId]);
+  }, [selected, siteId, accountMeterId]);
 
   function toggle(m: Measure) {
     setSelected((prev) => {
@@ -229,7 +230,9 @@ export default function BillBuilder({ siteId }: { siteId: number }) {
                 {/* secondary composed outputs */}
                 <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
                   <div>
-                    <p className="font-mono text-[10px] uppercase text-muted-foreground">Peak kW</p>
+                    <p className="font-mono text-[10px] uppercase text-muted-foreground">
+                      {(r as { campus?: unknown }).campus ? "Sum of account peaks, kW" : "Peak kW"}
+                    </p>
                     <p className="font-mono text-sm">
                       {r.baselinePeakKw.toFixed(1)} → {r.composedPeakKw.toFixed(1)}
                     </p>
@@ -249,6 +252,7 @@ export default function BillBuilder({ siteId }: { siteId: number }) {
                     <p className="font-mono text-sm">{selected.size} selected</p>
                   </div>
                 </div>
+                <CampusAccountTable results={r} />
                 {/* rate re-sweep (§3c: rate choice evaluated last, automatically) */}
                 {r.ratePlanOvertake && (
                   <p className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs">

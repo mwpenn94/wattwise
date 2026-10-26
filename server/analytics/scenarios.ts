@@ -345,6 +345,39 @@ export interface ScenarioInput {
   capexUsd?: number;
 }
 
+/**
+ * Scenario payback (Oct 26: extracted unchanged so campus scenarios compute
+ * payback once, on campus-level savings, with the same rules).
+ * Cycle 10 (pass 553): negligible savings (< $1/yr) produce astronomically
+ * long, meaningless payback figures, so payback is suppressed.
+ * Batch-18 (pass 419): zero upfront cost + positive savings = immediate payback.
+ * Accuracy pass (Jul 20): the band derives from the scenario's confidence tier,
+ * anchored to the M&V gates (mv.ts ASHRAE G14 CV(RMSE) ≤25%):
+ *   medium → ±25% savings; low → -40%/+30% (savings shortfall dominates on
+ *   weak baselines). Payback ∝ 1/savings, so the band inverts the multipliers.
+ */
+export function scenarioPayback(
+  capexUsd: number | undefined,
+  deltaCost: number,
+  confidence: "low" | "medium" | "high",
+): { paybackYears: number | null; paybackBand: string | null; disclosure: string | null } {
+  if ((capexUsd == null || capexUsd === 0) && deltaCost < -1) {
+    return { paybackYears: 0, paybackBand: "immediate — no upfront cost", disclosure: null };
+  }
+  if (capexUsd && deltaCost < -1) {
+    const paybackYears = capexUsd / -deltaCost;
+    const spread = confidence === "medium" ? { savLo: 0.75, savHi: 1.25, pct: "±25%" } : { savLo: 0.6, savHi: 1.3, pct: "-40%/+30%" };
+    const lo = paybackYears / spread.savHi;
+    const hi = paybackYears / spread.savLo;
+    return {
+      paybackYears,
+      paybackBand: `${lo.toFixed(1)}–${hi.toFixed(1)} years`,
+      disclosure: `Payback band is derived from this scenario's ${confidence}-confidence baseline (savings uncertainty ${spread.pct}, anchored to the ASHRAE G14 CV(RMSE) ≤25% M&V gate); excludes incentives, financing, degradation, and rate escalation.`,
+    };
+  }
+  return { paybackYears: null, paybackBand: null, disclosure: null };
+}
+
 export function runScenario(
   baselineHourly: number[],
   input: ScenarioInput,
@@ -361,10 +394,16 @@ export function runScenario(
   let hourly = [...baselineHourly];
   let dispatchMethod: "sequential" | "co_optimized" | undefined;
 
-  if (input.kind === "efficiency" && input.efficiencyReductions && input.endUseFractions) {
+  // Oct 26 fix: the Scenarios page's "Efficiency retrofit" sends a
+  // whole-building reduction as { all: x } ({ overall: x } for gas/water). Those
+  // keys have no end-use share, so they used to compute $0. A whole-building
+  // key applies to all load (share 1) and needs no end-use breakdown.
+  const wholeBuildingKeys = new Set(["all", "overall"]);
+  const hasWholeBuilding = Object.keys(input.efficiencyReductions ?? {}).some((k) => wholeBuildingKeys.has(k));
+  if (input.kind === "efficiency" && input.efficiencyReductions && (input.endUseFractions || hasWholeBuilding)) {
     let totalReduction = 0;
     for (const [endUse, frac] of Object.entries(input.efficiencyReductions)) {
-      const share = input.endUseFractions[endUse] ?? 0;
+      const share = wholeBuildingKeys.has(endUse) ? 1 : (input.endUseFractions?.[endUse] ?? 0);
       totalReduction += share * frac;
     }
     // Batch-36 (pass 1383): a summed reduction > 1 would flip (1 - totalReduction)
@@ -479,46 +518,17 @@ export function runScenario(
   const basePeak = baselineHourly.length > 0 ? Math.max(0, ...baselineHourly) : 0;
   const scenPeak = hourly.length > 0 ? Math.max(0, ...hourly) : 0;
 
-  let paybackYears: number | null = null;
-  let paybackBand: string | null = null;
-  // Cycle 10 (pass 553): negligible savings (< $1/yr) produce astronomically
-  // long, meaningless payback figures — suppress the payback rather than show
-  // a 50,000-year number.
-  // Batch-18 (pass 419): a NO-CAPEX scenario with real savings must not read as
-  // "no financial benefit" — null payback on a $0-capex change (rate switch,
-  // operational baseload trim) misleads in the opposite direction from the
-  // 50,000-year problem. Zero upfront cost + positive savings = immediate payback.
-  if ((input.capexUsd == null || input.capexUsd === 0) && deltaCost < -1) {
-    paybackYears = 0;
-    paybackBand = "immediate — no upfront cost";
-  }
-
   // Batch-26 (passes 903/913): a scenario inherits its baseline's confidence,
   // capped at "medium" (a modeled counterfactual is never "high" even on a
   // high-confidence baseline); extrapolation always forces "low". The previous
   // ternary collapsed medium baselines to low with no cause, understating
   // reliability.
   const confidence = extrapolated || scenarioIndicative ? "low" : baselineConfidence === "low" ? "low" : "medium";
-  if (paybackYears == null && input.capexUsd && deltaCost < -1) {
-    paybackYears = input.capexUsd / -deltaCost;
-    // Accuracy pass (owner directive Jul 20, "as accurate/precise/justified as
-    // possible"): the band now DERIVES from the scenario's stated confidence
-    // tier instead of one fixed 75–150% spread. Tier → savings-uncertainty
-    // half-width, anchored to the M&V machinery's own gates (mv.ts applies the
-    // ASHRAE G14 CV(RMSE) ≤25% payability gate; proveIt.ts assumes 25% CV when
-    // no fit exists; extrapolated/archetype baselines carry more):
-    //   medium (best a modeled counterfactual can be) → ±25% savings
-    //   low (extrapolated span or archetype baseline)  → -40%/+30% (asymmetric:
-    //        savings shortfall is the dominant failure mode on weak baselines).
-    // Payback ∝ 1/savings, so the payback band inverts the savings multipliers.
-    const spread = confidence === "medium" ? { savLo: 0.75, savHi: 1.25, pct: "±25%" } : { savLo: 0.6, savHi: 1.3, pct: "-40%/+30%" };
-    const lo = paybackYears / spread.savHi;
-    const hi = paybackYears / spread.savLo;
-    paybackBand = `${lo.toFixed(1)}–${hi.toFixed(1)} years`;
-    disclosures.push(
-      `Payback band is derived from this scenario's ${confidence}-confidence baseline (savings uncertainty ${spread.pct}, anchored to the ASHRAE G14 CV(RMSE) ≤25% M&V gate); excludes incentives, financing, degradation, and rate escalation.`,
-    );
-  }
+  // Oct 26: payback math lives in scenarioPayback (shared with campus scenarios).
+  const payback = scenarioPayback(input.capexUsd, deltaCost, confidence);
+  const paybackYears = payback.paybackYears;
+  const paybackBand = payback.paybackBand;
+  if (payback.disclosure) disclosures.push(payback.disclosure);
   return {
     perCommodity: {
       electric: { deltaUsage, deltaDemandKw: scenPeak - basePeak, deltaCost, deltaCo2eLb },

@@ -23,6 +23,7 @@ import {
   quickStartAssumptions,
   QUICK_START_DEFAULTS,
   type TariffStructure,
+  type ScenarioResults,
 } from "@shared/wattwise";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -66,6 +67,7 @@ import { evaluateImplementation, buildMonthlyActuals } from "./analytics/proveIt
 import { routeQuestion, ASK_ROUTE_EST_COST_USD, buildAskCard } from "./askWattwise";
 import { runScenario, hourlyToPoints, type ScenarioInput } from "./analytics/scenarios";
 import { composeMeasures, presetBaskets, type PlanMeasure } from "./analytics/composer";
+import { runCampusScenario, composeCampusMeasures, type CampusAccountBasis } from "./analytics/campusScenario";
 import { costOnTariff } from "./analytics/tariffEngine";
 import { recordMeterEvent, assertFreeTierCostCap, monthToDateLlmSpend, llmBudgetAllows } from "./analytics/costModel";
 import { parse as parseCookieHeader } from "cookie";
@@ -3029,6 +3031,8 @@ export const appRouter = router({
           // no-capex scenario (Batch-18 gives it paybackYears=0, "immediate — no
           // upfront cost"); positive() silently rejected it at the API boundary.
           capexUsd: z.number().min(0).optional(),
+          /** OPEN-3: campus only — the service agreement solar/battery/EV attach to. */
+          accountMeterId: z.number().int().positive().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -3083,8 +3087,12 @@ export const appRouter = router({
           await h.audit(ctx.user.id, "scenario_run", "scenario", String(idGw), { kind: input.kind, siteId: site.id });
           return { id: idGw, results: gw.results };
         }
+        // OPEN-3 (Oct 26): a campus with several separately billed service
+        // agreements is priced account by account (never on the summed load).
+        const campusBasis = await loadCampusScenarioBasis(site, ctx.user.id);
         // Build baseline hourly profile: measured intervals if available, else archetype
-        const { hourly, loadBasis, confidence, extrapolated, structure, co2eLbPerMwh, climateZone, tariffBasisDisclosure, archetypeZoneDisclosure, nem } = await buildScenarioBasis(site, ctx.user.id);
+        const singleBasis = campusBasis ? null : await buildScenarioBasis(site, ctx.user.id);
+        const loadBasis = campusBasis ? campusBasis.loadBasis : singleBasis!.loadBasis;
         const t0 = Date.now();
         const scenarioInput: ScenarioInput = {
           kind: input.kind,
@@ -3096,7 +3104,20 @@ export const appRouter = router({
           evAnnualKwh: input.evAnnualKwh,
           capexUsd: input.capexUsd,
         };
-        const results = runScenario(hourly, scenarioInput, structure, climateZone, co2eLbPerMwh, confidence, extrapolated, nem);
+        let results: ScenarioResults;
+        if (campusBasis) {
+          try {
+            results = runCampusScenario(campusBasis.accounts, scenarioInput, campusBasis.climateZone, campusBasis.co2eLbPerMwh, input.accountMeterId);
+          } catch (e) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: e instanceof Error ? e.message : "Campus scenario failed" });
+          }
+          results.disclosures.push(...campusBasis.disclosures);
+        } else {
+          const b = singleBasis!;
+          results = runScenario(b.hourly, scenarioInput, b.structure, b.climateZone, b.co2eLbPerMwh, b.confidence, b.extrapolated, b.nem);
+        }
+        const tariffBasisDisclosure = singleBasis?.tariffBasisDisclosure ?? null;
+        const archetypeZoneDisclosure = singleBasis?.archetypeZoneDisclosure ?? null;
         // AC15 — incentives layer: attach live (never-expired) incentive matches
         // with pre- AND post-incentive paybacks, named sources, and who-pays/
         // who-benefits. Tenure-honest: renters never see owner-only credits.
@@ -3159,7 +3180,7 @@ export const appRouter = router({
             userId: ctx.user.id,
             name: input.name,
             transform: input.kind === "solar" ? "solar" : input.kind === "battery" || input.kind === "solar_battery" ? "battery_peak_shave" : input.kind === "efficiency" ? "led_equipment" : "ev_charging",
-            params: scenarioInput as unknown as Record<string, unknown>,
+            params: (campusBasis ? { ...scenarioInput, accountMeterId: (results as { campus?: { targetMeterId: number | null } }).campus?.targetMeterId ?? null } : scenarioInput) as unknown as Record<string, unknown>,
             loadBasis,
             results: results as unknown as Record<string, unknown>,
             status: "complete",
@@ -3202,6 +3223,8 @@ export const appRouter = router({
             )
             .min(1)
             .max(12),
+          /** OPEN-3: campus only — the service agreement solar/battery attach to. */
+          accountMeterId: z.number().int().positive().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -3218,9 +3241,23 @@ export const appRouter = router({
         }
         const site = await h.getSite(input.siteId, ctx.user.id);
         if (!site) throw new TRPCError({ code: "NOT_FOUND", message: "Site not found" });
-        const basis = await buildScenarioBasis(site, ctx.user.id);
         const endUse = await endUseForSite(site);
         const sectorClass = site.buildingType && ["single_family", "multifamily"].includes(site.buildingType) ? "residential" : "commercial";
+        // OPEN-3 (Oct 26): campus plans are composed account by account.
+        const campusBasis = await loadCampusScenarioBasis(site, ctx.user.id);
+        if (campusBasis) {
+          const tc = Date.now();
+          let campusResult;
+          try {
+            campusResult = composeCampusMeasures(campusBasis.accounts, input.measures as PlanMeasure[], campusBasis.climateZone, campusBasis.co2eLbPerMwh, endUse?.fractions, sectorClass, site.hasSolar ?? false, input.accountMeterId);
+          } catch (e) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: e instanceof Error ? e.message : "Campus plan failed" });
+          }
+          campusResult.disclosures.push(...campusBasis.disclosures);
+          await recordMeterEvent({ userId: ctx.user.id, kind: "scenario_run", computeMs: Date.now() - tc, tier });
+          return { result: campusResult, loadBasis: campusBasis.loadBasis };
+        }
+        const basis = await buildScenarioBasis(site, ctx.user.id);
         const t0 = Date.now();
         const result = composeMeasures(
           basis.hourly,
@@ -3304,12 +3341,28 @@ export const appRouter = router({
             continue;
           }
           try {
-            const basis = await buildScenarioBasis(site, ctx.user.id);
             const endUse = await endUseForSite(site);
             const sectorClass =
               site.buildingType && ["single_family", "multifamily"].includes(site.buildingType)
                 ? "residential"
                 : "commercial";
+            // OPEN-3 (Oct 26): campuses compose per service agreement (solar/
+            // battery on the default account: most annual kWh).
+            const campusBasis = await loadCampusScenarioBasis(site, ctx.user.id);
+            if (campusBasis) {
+              const cr = composeCampusMeasures(campusBasis.accounts, [input.measure as PlanMeasure], campusBasis.climateZone, campusBasis.co2eLbPerMwh, endUse?.fractions, sectorClass, site.hasSolar ?? false);
+              perSite.push({
+                siteId,
+                siteName: site.name,
+                ok: true,
+                annualSavingsUsd: cr.composedSavings,
+                co2eDeltaLb: cr.deltaCo2eLb,
+                confidence: cr.confidence,
+                loadBasis: campusBasis.loadBasis,
+              });
+              continue;
+            }
+            const basis = await buildScenarioBasis(site, ctx.user.id);
             const result = composeMeasures(
               basis.hourly,
               [input.measure as PlanMeasure],
@@ -4169,6 +4222,74 @@ async function buildScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.
   };
 }
 
+/**
+ * OPEN-3 (Oct 26): campus scenario basis. Returns null unless the site's
+ * analysis meter is a campus total (several separately billed service
+ * agreements). Each account keeps the exact schedule the latest analysis
+ * priced it on (the per-account rate review in Explore), so scenario and
+ * plan figures reconcile with Explore. Nothing is priced on the summed load.
+ */
+async function loadCampusScenarioBasis(site: NonNullable<Awaited<ReturnType<typeof h.getSite>>>, userId: number) {
+  // Read-only: a campus is any site with two or more main electric service
+  // agreements (the same rule that creates its campus total). The campus total
+  // itself is never priced or rebuilt here.
+  const meters = await h.listMeters(site.id, userId);
+  const mains = meters.filter((m) => m.commodity === "electric" && m.meterRole === "main");
+  if (mains.length < 2) return null;
+  const insightRows = await h.listInsights(site.id, userId);
+  const summary = [...insightRows].reverse().find((i) => i.kind === "summary");
+  const review = (summary?.metrics as { meterRateReview?: { perMeter?: Array<{ meterId: number; label: string; tariffId: number }> } } | null)?.meterRateReview;
+  const reviewByMeter = new Map((review?.perMeter ?? []).map((r) => [r.meterId, r]));
+  const zoneInference = inferClimateZoneWithSource(site.zip ?? undefined, site.state ?? undefined);
+  const climateZone = site.climateZone ?? zoneInference.zone;
+  const accounts: CampusAccountBasis[] = [];
+  const disclosures: string[] = [];
+  for (const m of mains) {
+    const reviewed = reviewByMeter.get(m.id);
+    const tariffId = reviewed?.tariffId ?? m.currentTariffId ?? null;
+    if (tariffId == null) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "Run the analysis for this campus first. Campus scenarios price each service agreement on the schedule its analysis used.",
+      });
+    }
+    const tariff = await h.getTariff(tariffId);
+    if (!tariff || tariff.commodity !== "electric") {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "An account's rate schedule is no longer available. Re-run the analysis for this campus." });
+    }
+    const pts = await h.getIntervalPoints(m.id, userId);
+    if (pts.length < 24 * 30) {
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: `${reviewed?.label ?? m.facilityLabel ?? m.label ?? `Account ${m.id}`} has less than 30 days of readings. Campus scenarios need readings for every service agreement.`,
+      });
+    }
+    const spanDays = (pts[pts.length - 1].ts - pts[0].ts) / 86_400_000;
+    accounts.push({
+      meterId: m.id,
+      label: reviewed?.label ?? m.facilityLabel ?? m.label ?? `Account ${m.id}`,
+      hourly: measuredTo8760(pts),
+      structure: tariff.structure as TariffStructure,
+      tariffId: tariff.id,
+      tariffName: tariff.name,
+      utilityName: tariff.utilityName,
+      nem: {
+        banking: (tariff as { nemBanking?: string | null }).nemBanking ?? null,
+        creditExpiry: (tariff as { nemCreditExpiry?: string | null }).nemCreditExpiry ?? null,
+      },
+      confidence: spanDays >= 270 ? "high" : spanDays >= 120 ? "medium" : "low",
+      extrapolated: spanDays < 270,
+    });
+  }
+  if (accounts.length < 2) return null;
+  if (!review) disclosures.push("This campus has not been analyzed since its accounts were set up, so each account is priced on its assigned rate.");
+  if (zoneInference.source === "us_median_fallback" && site.climateZone == null) {
+    disclosures.push(`Climate zone ${climateZone} is the US-median assumption (it could not be resolved from this site's location fields) — solar yield estimates may not match your climate; add or correct the state/ZIP to fix this.`);
+  }
+  const zip3 = (site.zip ?? "").slice(0, 3);
+  const ef = await h.getEmissionsFactor(zip3, site.state);
+  return { accounts, climateZone, co2eLbPerMwh: ef.factor?.co2eLbPerMwh ?? 727.9, disclosures, loadBasis: "measured_intervals" as const };
+}
 async function endUseForSite(site: { buildingType: string | null; climateZone: string | null; vintage: number | null; zip?: string | null; state?: string | null }) {
   if (!site.buildingType) return null;
   // Cycle 9 (pass 505): infer zone from ZIP/state rather than assuming 2B.
