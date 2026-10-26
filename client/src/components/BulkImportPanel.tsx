@@ -119,7 +119,7 @@ export function BulkImportPanel() {
         try {
           setStaging(`Saving ${f.name}…`);
           // Raw bytes stream to storage; staging then reads them server-side.
-          const { sourceRef }=await uploadRaw(f,(n,max)=>setStaging(`Saving ${f.name}… (server busy, retrying ${n}/${max})`));
+          const { sourceRef }=await uploadRaw(f,(n,max)=>setStaging(`Saving ${f.name}… (connection interrupted, retrying ${n}/${max}; saved parts are kept)`),(sent,total)=>setStaging(total>0&&sent<total?`Saving ${f.name}… ${Math.floor(100*sent/total)}%`:`Saving ${f.name}…`));
           // Staging is idempotent per batch (same bytes => same staged file),
           // so a transient server error is retried automatically.
           let r: Awaited<ReturnType<typeof uploadClient.bulkImport.stageFile.mutate>> | null = null;

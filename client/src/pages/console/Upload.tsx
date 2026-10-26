@@ -120,7 +120,11 @@ export default function Upload() {
         try {
           // Raw bytes stream to storage (no base64 copy in the browser or server).
           setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: "Uploading file…" });
-          const { sourceRef } = await uploadRaw(f, (n, max) => setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: `Server busy — retrying upload (${n}/${max})…` }));
+          const { sourceRef } = await uploadRaw(
+            f,
+            (n, max) => setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: `Connection interrupted — retrying (${n}/${max}); saved parts are kept…` }),
+            (sent, total) => setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: total > 0 && sent < total ? `Uploading file… ${Math.floor((100 * sent) / total)}%` : "Uploading file…" }),
+          );
           if (!isCurrent()) return;
           setImporting({ filename: f.name, sheetsDone: 0, sheetsTotal: 0, note: "Reading workbook…" });
           const res = await driveIngest(f.name, () => uploadClient.uploads.ingest.mutate({ siteId: Number(siteId), filename: f.name, format: fmt, sourceRef, timestampBasis: clockBasis, askOnMultiAddress: true }), isCurrent);

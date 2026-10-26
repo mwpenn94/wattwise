@@ -11,7 +11,7 @@ import { serveStatic, setupVite } from "./vite";
 import { digestHandler, refreshReferenceHandler } from "../scheduledHandlers";
 import { rateVerifyHandler } from "../rateVerifyHandler";
 import { stripeWebhookHandler } from "../stripeBilling";
-import { rawUploadHandler } from "../rawUpload";
+import { rawUploadCompleteHandler, rawUploadHandler, rawUploadPartHandler, rawUploadStartHandler } from "../rawUpload";
 import { startMemoryWatchdog } from "../ingest/memory";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -47,6 +47,10 @@ async function startServer() {
   // Oct 25: interval workbooks arrive as raw bytes streamed to storage (see
   // server/rawUpload.ts); mounted before any body parser so nothing buffers them.
   app.post("/api/uploads/raw", rawUploadHandler);
+  // Oct 26: resumable part uploads for slow connections (same signed reference at the end).
+  app.post("/api/uploads/raw/start", express.json({ limit: "16kb" }), rawUploadStartHandler);
+  app.post("/api/uploads/raw/part", rawUploadPartHandler);
+  app.post("/api/uploads/raw/complete", express.json({ limit: "64kb" }), rawUploadCompleteHandler);
   // Configure body parser with larger size limit for file uploads
   app.use("/api/trpc", (req, res, next) => {
     if (req.path.includes("bulkImport.stageFile") && (req.path !== "/bulkImport.stageFile" || req.query.batch != null)) {

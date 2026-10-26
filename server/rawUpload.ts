@@ -20,7 +20,7 @@ import { TRPCError } from "@trpc/server";
 import { sdk } from "./_core/sdk";
 import { ENV } from "./_core/env";
 import { storageGetSignedUrl, storagePutStream } from "./storage";
-import { MAX_UPLOAD_BYTES } from "../shared/wattwise";
+import { MAX_UPLOAD_BYTES, RAW_UPLOAD_PART_BYTES } from "../shared/wattwise";
 
 const REF_TTL_MS = 6 * 3600_000;
 const MAX_IN_FLIGHT = 3;
@@ -121,3 +121,178 @@ export async function rawUploadHandler(req: Request, res: Response) {
     inFlight--;
   }
 }
+
+/* ------------------------------------------------------------------------
+ * Oct 26 — resumable uploads for slow or unreliable connections.
+ *
+ * A single POST must finish within the platform's ~180 s request limit and
+ * restarts from zero if the connection drops. Large files are therefore sent
+ * in RAW_UPLOAD_PART_BYTES parts:
+ *   POST /api/uploads/raw/start    {bytes, filename}  -> signed session
+ *   POST /api/uploads/raw/part?n=i (X-Upload-Session)  -> signed part receipt
+ *   POST /api/uploads/raw/complete {session, receipts} -> the same v1 sourceRef
+ * A dropped connection only re-sends the part in flight. "complete" streams
+ * the stored parts, in order, into one object while re-checking every part's
+ * checksum (constant memory), so imports downstream are unchanged.
+ * ---------------------------------------------------------------------- */
+type SessionPayload = { v: 1; u: number; i: string; b: number; p: number; n: number; e: number };
+type ReceiptPayload = { v: 1; u: number; i: string; n: number; s: string; b: number };
+const signAs = (domain: string, body: string) => b64u(createHmac("sha256", secret()).update(`${domain}:${body}`).digest());
+function seal(domain: string, payload: object): string {
+  const body = b64u(Buffer.from(JSON.stringify(payload)));
+  return `${body}.${signAs(domain, body)}`;
+}
+function unseal<T>(domain: string, token: unknown): T | null {
+  if (typeof token !== "string" || token.length > 2048) return null;
+  const [body, sig, extra] = token.split(".");
+  if (!body || !sig || extra !== undefined) return null;
+  const want = Buffer.from(signAs(domain, body)), got = Buffer.from(sig);
+  if (want.length !== got.length || !timingSafeEqual(want, got)) return null;
+  try { return JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as T; } catch { return null; }
+}
+const SESSION_DOMAIN = "raw-upload-session:v1", RECEIPT_DOMAIN = "raw-upload-part:v1";
+export const partCount = (bytes: number, partBytes = RAW_UPLOAD_PART_BYTES) => Math.ceil(bytes / partBytes);
+export const partSize = (sess: { b: number; p: number; n: number }, n: number) => (n < sess.n - 1 ? sess.p : sess.b - sess.p * (sess.n - 1));
+const partKey = (u: number, i: string, n: number) => `raw-uploads/${u}/${i}/p${n}.bin`;
+type SessionCheck = { ok: true; sess: SessionPayload } | { ok: false; status: number; error: string; restart?: boolean };
+export function verifySession(userId: number, token: unknown, now = Date.now()): SessionCheck {
+  const p = unseal<SessionPayload>(SESSION_DOMAIN, token);
+  if (!p || p.v !== 1 || p.u !== userId || !/^[0-9a-f-]{36}$/.test(p.i) || !Number.isSafeInteger(p.b) || p.b <= 0 || p.b > MAX_UPLOAD_BYTES || p.p !== RAW_UPLOAD_PART_BYTES || p.n !== partCount(p.b, p.p))
+    return { ok: false, status: 400, error: "This upload session is not valid. Choose the file again.", restart: true };
+  if (!(p.e > now)) return { ok: false, status: 400, error: "This upload session expired. Starting the upload again.", restart: true };
+  return { ok: true, sess: p };
+}
+async function authed(req: Request, res: Response): Promise<{ id: number } | null> {
+  try {
+    const u = await sdk.authenticateRequest(req);
+    if (u.isCron) { json(res, 403, { error: "Not available for scheduled tasks." }); return null; }
+    return u;
+  } catch { json(res, 401, { error: "Your session has expired. Sign in again, then choose the file again." }); return null; }
+}
+/** POST /api/uploads/raw/start — JSON {bytes, filename}. */
+export async function rawUploadStartHandler(req: Request, res: Response) {
+  const user = await authed(req, res); if (!user) return;
+  const bytes = Number((req.body as { bytes?: unknown } | undefined)?.bytes);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return json(res, 400, { error: "The upload did not include its size. Please try again." });
+  if (bytes > MAX_UPLOAD_BYTES) return json(res, 413, { error: "This file is larger than the 50 MiB limit. Split it into smaller files (for example by date range) and upload again." });
+  const sess: SessionPayload = { v: 1, u: user.id, i: randomUUID(), b: bytes, p: RAW_UPLOAD_PART_BYTES, n: partCount(bytes), e: Date.now() + REF_TTL_MS };
+  return json(res, 200, { session: seal(SESSION_DOMAIN, sess), partBytes: sess.p, parts: sess.n, expiresAt: sess.e });
+}
+/** POST /api/uploads/raw/part?n=<index> — header X-Upload-Session, body: exactly that part's bytes. */
+export async function rawUploadPartHandler(req: Request, res: Response) {
+  const user = await authed(req, res); if (!user) { req.resume(); return; }
+  const chk = verifySession(user.id, req.headers["x-upload-session"]);
+  if (!chk.ok) { req.resume(); return json(res, chk.status, { error: chk.error, restart: chk.restart }); }
+  const { sess } = chk;
+  const n = Number((req.query as Record<string, unknown> | undefined)?.n);
+  if (!Number.isSafeInteger(n) || n < 0 || n >= sess.n) { req.resume(); return json(res, 400, { error: "This part number is not valid for the upload." }); }
+  const expected = partSize(sess, n);
+  const declared = Number(req.headers["content-length"]);
+  if (declared !== expected) { req.resume(); return json(res, 400, { error: "This part is not the expected size. Please try again.", retryable: true }); }
+  if (inFlight >= MAX_IN_FLIGHT) { req.resume(); res.setHeader("Retry-After", "3"); return json(res, 503, { error: "The server is receiving other files. Retrying shortly.", retryable: true }); }
+  inFlight++;
+  try {
+    const hash = createHash("sha256");
+    let seen = 0;
+    const meter = new Transform({
+      transform(chunk: Buffer, _enc, cb) {
+        seen += chunk.length;
+        if (seen > expected) return cb(new Error("Part is larger than its declared size"));
+        hash.update(chunk); cb(null, chunk);
+      },
+    });
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 170_000);
+    req.on("aborted", () => ac.abort());
+    req.pipe(meter);
+    meter.on("error", () => ac.abort());
+    try {
+      await storagePutStream(partKey(user.id, sess.i, n), Readable.toWeb(meter) as ReadableStream<Uint8Array>, expected, "application/octet-stream", ac.signal);
+    } finally { clearTimeout(timer); }
+    if (seen !== expected) return json(res, 400, { error: "The upload was interrupted. Please try again.", retryable: true });
+    const s = hash.digest("hex");
+    const receipt: ReceiptPayload = { v: 1, u: user.id, i: sess.i, n, s, b: expected };
+    return json(res, 200, { receipt: seal(RECEIPT_DOMAIN, receipt), n, sha256: s, bytes: expected });
+  } catch (e) {
+    console.error("[rawUpload] part failed", e instanceof Error ? e.message : e);
+    req.unpipe(); req.resume();
+    return json(res, 503, { error: "This part could not be saved just now. Retrying shortly.", retryable: true });
+  } finally {
+    inFlight--;
+  }
+}
+class PartMismatch extends Error {}
+/** POST /api/uploads/raw/complete — JSON {session, receipts[]}; returns {sourceRef, sha256, bytes}. */
+export async function rawUploadCompleteHandler(req: Request, res: Response) {
+  const user = await authed(req, res); if (!user) return;
+  const body = (req.body ?? {}) as { session?: unknown; receipts?: unknown };
+  const chk = verifySession(user.id, body.session);
+  if (!chk.ok) return json(res, chk.status, { error: chk.error, restart: chk.restart });
+  const { sess } = chk;
+  const raw = Array.isArray(body.receipts) ? body.receipts : [];
+  const receipts: ReceiptPayload[] = [];
+  const missing: number[] = [];
+  for (let n = 0; n < sess.n; n++) {
+    const r = unseal<ReceiptPayload>(RECEIPT_DOMAIN, raw[n]);
+    if (!r || r.v !== 1 || r.u !== user.id || r.i !== sess.i || r.n !== n || r.b !== partSize(sess, n) || !/^[0-9a-f]{64}$/.test(r.s)) missing.push(n);
+    else receipts.push(r);
+  }
+  if (missing.length) return json(res, 400, { error: "Some parts of the file have not arrived yet. Resuming the upload.", missing, retryable: true });
+  if (inFlight >= MAX_IN_FLIGHT) { res.setHeader("Retry-After", "3"); return json(res, 503, { error: "The server is receiving other files. Retrying shortly.", retryable: true }); }
+  inFlight++;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 170_000);
+  let mismatch: string | null = null;
+  const mismatchSeen = (e: unknown): string | null => mismatch ?? ((e as { cause?: unknown })?.cause instanceof PartMismatch ? String((e as { cause: Error }).cause.message) : null);
+  try {
+    const whole = createHash("sha256");
+    let total = 0, part = 0;
+    // fetch() may wrap errors thrown inside the body stream, so record the reason directly.
+    const fail = (why: string) => { mismatch = why; return new PartMismatch(why); };
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+    let partHash = createHash("sha256"), partSeen = 0;
+    const finishPart = () => {
+      const r = receipts[part]!;
+      if (partSeen !== r.b || partHash.digest("hex") !== r.s) throw fail(`part ${part}`);
+      part++; reader = null; partHash = createHash("sha256"); partSeen = 0;
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(ctrl) {
+        for (;;) {
+          if (part >= receipts.length) { ctrl.close(); return; }
+          if (!reader) {
+            const resp = await fetch(await storageGetSignedUrl(partKey(user.id, sess.i, part)), { signal: ac.signal });
+            if (!resp.ok || !resp.body) throw fail(`part ${part} unavailable (${resp.status})`);
+            reader = resp.body.getReader();
+          }
+          const { done, value } = await reader.read();
+          if (done) { finishPart(); continue; }
+          partSeen += value.length; total += value.length;
+          if (partSeen > receipts[part]!.b) throw fail(`part ${part} too large`);
+          partHash.update(value); whole.update(value);
+          ctrl.enqueue(value); return;
+        }
+      },
+      cancel() { ac.abort(); },
+    });
+    const key = `raw-uploads/${user.id}/${sess.i}.bin`;
+    try {
+      await storagePutStream(key, stream, sess.b, "application/octet-stream", ac.signal);
+    } finally { clearTimeout(timer); }
+    if (total !== sess.b) throw fail("size");
+    const sha256 = whole.digest("hex");
+    return json(res, 200, { sourceRef: signSourceRef({ u: user.id, k: key, s: sha256, b: sess.b }), sha256, bytes: sess.b });
+  } catch (e) {
+    clearTimeout(timer); ac.abort();
+    const why = e instanceof PartMismatch ? e.message : mismatchSeen(e);
+    if (why) {
+      console.warn("[rawUpload] complete mismatch", why);
+      return json(res, 400, { error: "A stored part did not match what was sent. Starting the upload again.", restart: true });
+    }
+    console.error("[rawUpload] complete failed", e instanceof Error ? e.message : e);
+    return json(res, 503, { error: "The file could not be assembled just now. Retrying shortly.", retryable: true });
+  } finally {
+    inFlight--;
+  }
+}
+

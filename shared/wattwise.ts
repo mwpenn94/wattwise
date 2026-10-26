@@ -24,6 +24,8 @@ export const FREE_TIER_MAX_UPLOADS_PER_MONTH = 12;
 export const ANALYSIS_TIMEOUT_MS = 60_000;
 export const PARSE_TIMEOUT_MS = 45_000;
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+/** Oct 26: large files upload in parts this size, so a dropped connection only re-sends the part in flight. */
+export const RAW_UPLOAD_PART_BYTES = 4 * 1024 * 1024;
 
 /* ---------- Timezone-aware local time parts (deliverable cycle 3) ----------
  * All interval timestamps are UTC ms. TOU matching, demand windows, heatmaps

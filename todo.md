@@ -632,3 +632,6 @@
 - [x] Friendly errors: non-JSON 5xx / network drops retry automatically with calm progress notes; no raw parser text
 - [ ] Deployed production verification after Publish (isolated fixture)
 - [x] Analysis re-run on a large campus no longer OOMs the 512 MiB container: reclaim at pipeline start/end/failure, pressure relief at stage boundaries, process-wide memory watchdog (non-development only). Validated: 5 consecutive + 2 concurrent analyses of the 9- and 6-meter KUSD campuses under the cgroup, peak 323 MiB, oom 0 (was OOM on the 2nd run).
+- [x] UPL-R1 (Oct 26): Resumable raw uploads for slow connections: files >4 MiB upload in 4 MiB parts (start/part/complete, signed session + part receipts, checksums re-verified on assembly, same sourceRef downstream); a dropped connection re-sends only the part in flight; choosing the same file again within 6 h continues from saved parts; % progress on Upload and bulk setup. Verified: 7 new tests, real-storage 19.2 MB KUSD workbook with a dropped part (sha match), browser 10/10, both workbooks concurrently on the 512 MiB/1 vCPU build (peak 168 MiB, 0 OOM), full suite 857 passed.
+- [x] EIA live drift check (Oct 26): the morning 403 was an EIA-side outage; the feed returns data again and the live test passes.
+
