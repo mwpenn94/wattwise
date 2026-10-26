@@ -34,7 +34,16 @@ import { Link } from "wouter";
 import { Printer } from "lucide-react";
 import SiteInsightsReport, { type InsightsPrintData } from "@/components/print/SiteInsightsReport";
 import { ProvenanceBadge, classifyBasis } from "@/components/ProvenanceBadge";
-import { formatSavingsRangeUsd } from "@shared/savingsRange";
+import { formatSavingsRangeUsd, savingsRangeFromEstimate } from "@shared/savingsRange";
+/** R2: the printed card shows the same yearly range as the queue (the card's
+ * own modeled range when it has one, otherwise the confidence band). */
+function printSavingsRange(o: { estCostSavingsPerYr?: number | null; confidence?: string | null; provenance?: unknown }) {
+  const r = (o.provenance as { savingsRange?: unknown } | null)?.savingsRange;
+  if (Array.isArray(r) && r.length === 2 && r.every((v) => typeof v === "number" && Number.isFinite(v)) && r[0] < r[1] && r[1] > 0) {
+    return { low: Math.max(0, r[0] as number), high: r[1] as number };
+  }
+  return savingsRangeFromEstimate(o.estCostSavingsPerYr ?? null, o.confidence ?? "medium");
+}
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ProveItStatusChip } from "@/components/ProveIt";
 
@@ -344,6 +353,7 @@ export default function Dashboard() {
             title: o.title,
             description: o.description ?? null,
             estCostSavingsPerYr: o.estCostSavingsPerYr ?? null,
+            savingsRangeUsd: printSavingsRange(o),
             estEnergySavingsPerYr: o.estEnergySavingsPerYr ?? null,
             energyUnit: o.energyUnit ?? null,
             paybackBandYears: o.paybackBandYears ?? null,

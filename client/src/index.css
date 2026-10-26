@@ -226,11 +226,45 @@
     color: #000 !important;
     margin: 0 !important;
     padding: 14mm 12mm !important;
+    /* Repeat the top/bottom inset on every printed page, not only the first
+       and last (the page itself has zero margin so no URL/title is printed). */
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+  }
+  /* Long report tables may continue on the next page (rows stay whole and the
+     header row repeats); headings stay with the content that follows. */
+  section.print-flow {
+    break-inside: auto !important;
+  }
+  .print-report thead {
+    display: table-header-group;
+  }
+  .print-report h2,
+  .print-report h3 {
+    break-after: avoid;
   }
   .print-report,
   .print-report * {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
+  }
+  /* The desktop sidebar reserves its width with a separate spacer element
+     (data-slot="sidebar-gap"); hide the whole sidebar block so the report
+     uses the full page width, and print the content area flat and white. */
+  [data-slot="sidebar"],
+  [data-slot="sidebar-gap"],
+  [data-slot="sidebar-container"] {
+    display: none !important;
+  }
+  [data-slot="sidebar-inset"],
+  [data-slot="sidebar-wrapper"] {
+    margin: 0 !important;
+    padding: 0 !important;
+    min-height: 0 !important;
+    background: #fff !important;
+    box-shadow: none !important;
+    border: 0 !important;
+    border-radius: 0 !important;
   }
   /* App chrome never belongs on paper: sidebar, headers, toasts, floating UI */
   aside,

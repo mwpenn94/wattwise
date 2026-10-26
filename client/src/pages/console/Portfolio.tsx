@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
-import { AlertTriangle, BadgeCheck, Building2, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, Plus, Tags, Trash2, Trophy, Wallet, Zap } from "lucide-react";
+import { AlertTriangle, BadgeCheck, Building2, ChevronDown, Download, FileCheck2, FolderKanban, Gauge, Leaf, PiggyBank, Plus, Printer, Tags, Trash2, Trophy, Wallet, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -26,6 +26,7 @@ import { MapPin } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { formatSavingsRangeUsd } from "@shared/savingsRange";
 import { siteHref, useActiveSite } from "@/hooks/useActiveSite";
+import PortfolioReport, { type PortfolioReportData } from "@/components/print/PortfolioReport";
 
 export default function Portfolio() {
   const { activeSiteId, sites: selectableSites, setActiveSite } = useActiveSite();
@@ -105,6 +106,42 @@ export default function Portfolio() {
     onError: error => toast.error(error.message),
   });
 
+  // R1 (Oct 26): printable report covers exactly the sites in view (owner /
+  // group filter). Its priorities query uses the same input as the "All sites"
+  // scope, so the two share one cached request.
+  const reportPriorities = trpc.recommendations.portfolioPriorities.useQuery(
+    { groupId: null, siteIds: pageFiltered ? inViewSiteIds : null },
+    { enabled: !pageFiltered || portfolio.data != null },
+  );
+  const scopeLabel = [
+    filter === "all" ? "All sites" : filter === "none" ? "Ungrouped sites" : (entities.find((en) => String(en.id) === filter)?.name ?? "Portfolio"),
+    activeGroup ? activeGroup.name : null,
+  ].filter(Boolean).join(" · ");
+  const reportData: PortfolioReportData | null = portfolio.data && reportPriorities.data
+    ? {
+        scopeLabel,
+        generatedAt: Date.now(),
+        sites: rows.map((r) => ({
+          siteId: r.siteId,
+          name: r.name,
+          analyzed: r.analyzed,
+          annualCostUsd: r.annualCostUsd ?? null,
+          fullBillRangeUsd: (r as { fullBillRangeUsd?: { low: number; high: number } | null }).fullBillRangeUsd ?? null,
+          euiKwhPerSqft: r.euiKwhPerSqft ?? null,
+          meterCount: (r as { meterCount?: number | null }).meterCount ?? null,
+          topOpportunityTitle: r.topOpportunityTitle ?? null,
+          topOpportunityRange: r.topOpportunityRange ?? null,
+        })),
+        actions: reportPriorities.data.items.map((i) => ({
+          siteId: i.siteId, siteName: i.siteName, title: i.title, savingsRangeUsd: i.savingsRangeUsd,
+          paybackBandYears: i.paybackBandYears, confidence: i.confidence, status: i.status,
+        })),
+        byMeasure: reportPriorities.data.byMeasure,
+        openSavingsRangeUsd: reportPriorities.data.progress.projectedRangeUsd,
+        inPlanRangeUsd: reportPriorities.data.progress.committedRangeUsd,
+        progress: { completed: reportPriorities.data.progress.completed, totalIdentified: reportPriorities.data.progress.totalIdentified },
+      }
+    : null;
   // §3i-2 exception-first ranking: dollar opportunity + anomaly severity.
   // Anomalies get a large additive bump so a flagged site outranks a merely
   // expensive one; within each class, biggest open $ first.
@@ -115,6 +152,13 @@ export default function Portfolio() {
 
   return (
     <div className="container max-w-6xl py-8">
+      {/* R1: print-grade report — the only content visible when printing */}
+      {reportData && (
+        <div className="hidden print:block">
+          <PortfolioReport data={reportData} />
+        </div>
+      )}
+      <div className="screen-only">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl font-bold tracking-tight">Portfolio</h1>
@@ -158,6 +202,16 @@ export default function Portfolio() {
               </SelectContent>
             </Select>
           )}
+          <Button
+            size="sm"
+            className="print-hide"
+            data-testid="portfolio-print"
+            disabled={!reportData}
+            onClick={() => window.print()}
+            title="Print this portfolio or choose Save as PDF in the print dialog"
+          >
+            <Printer className="mr-1.5 h-3.5 w-3.5" /> {reportData ? "Print / Save PDF" : "Preparing report…"}
+          </Button>
           <PortfolioExports />
         </div>
       </div>
@@ -181,25 +235,29 @@ export default function Portfolio() {
               value={totals?.annualCostUsd != null ? fmtUsd(totals.annualCostUsd) : "—"}
               sub={
                 totals
-                  ? `${totals.analyzedCount}/${totals.siteCount} sites analyzed${totals.demandCostUsd != null ? ` · ${fmtUsd(totals.demandCostUsd)} demand/CP` : ""}${
+                  ? `${totals.analyzedCount}/${totals.siteCount} sites analyzed${
                       totals.fullBillRangeUsd
-                        ? ` · Estimated full bill with LFCR and taxes ${fmtUsd(totals.fullBillRangeUsd.low)}–${fmtUsd(totals.fullBillRangeUsd.high)} (${totals.fullBillSiteCount} site${totals.fullBillSiteCount === 1 ? "" : "s"}; not bill-confirmed)`
+                        ? ` · full bill est. ${fmtUsd(totals.fullBillRangeUsd.low)}–${fmtUsd(totals.fullBillRangeUsd.high)} with LFCR and taxes`
                         : ""
                     }${
                       /* TUX-5: all-services line — modeled utility + entered telecom,
                          labeled distinctly so the two bases never blend. */
                       (totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd != null && ((totals as { telecomAnnualUsd?: number | null }).telecomAnnualUsd ?? 0) > 0
-                        ? ` · Connectivity shown separately on its entered annual basis`
+                        ? ` · connectivity shown separately`
                         : ""
                     }`
                   : ""
               }
             />
             <TotalCard
-              icon={<BadgeCheck className="h-4 w-4" />}
-              label="Savings attribution"
-              value="Inconclusive"
-              sub="Amounts withheld until immutable baselines and unique site/month allocation are available."
+              icon={<PiggyBank className="h-4 w-4" />}
+              label="Open savings / yr"
+              value={reportPriorities.data?.progress.projectedRangeUsd ? formatSavingsRangeUsd(reportPriorities.data.progress.projectedRangeUsd) : reportPriorities.isLoading ? "…" : "—"}
+              sub={
+                reportPriorities.data
+                  ? `${reportPriorities.data.items.length} open action${reportPriorities.data.items.length === 1 ? "" : "s"}${reportPriorities.data.progress.committedRangeUsd ? ` · ${formatSavingsRangeUsd(reportPriorities.data.progress.committedRangeUsd)} in plan` : ""}`
+                  : ""
+              }
             />
             <TotalCard
               icon={<Gauge className="h-4 w-4" />}
@@ -277,11 +335,16 @@ export default function Portfolio() {
                     <div><span className="font-medium">Progress</span><br />{priorities.data.progress.completed}/{priorities.data.progress.totalIdentified} complete ({priorities.data.progress.completionPct}%)</div>
                     <div><span className="text-muted-foreground">In plan</span><br />{priorities.data.progress.planned + priorities.data.progress.inProgress} actions</div>
                     <div data-testid="priorities-combined"><span className="text-muted-foreground">Combined open / yr</span><br /><span title={priorities.data.progress.savingsBasis}>{priorities.data.progress.projectedRangeUsd ? formatSavingsRangeUsd(priorities.data.progress.projectedRangeUsd) : "No open ranges"}</span></div>
-                    <div><span className="text-muted-foreground">Savings attribution</span><br />Inconclusive</div>
+                    <div data-testid="priorities-in-plan"><span className="text-muted-foreground">In plan / yr</span><br />{priorities.data.progress.committedRangeUsd ? formatSavingsRangeUsd(priorities.data.progress.committedRangeUsd) : "Nothing in plan yet"}</div>
                   </div>
-                  <p className="text-xs text-muted-foreground">{priorities.data.progress.savingsBasis}</p>
-                  <p className="text-xs text-muted-foreground">{priorities.data.progress.verificationBasis}</p>
-                  <p className="text-xs text-muted-foreground">Ranking: {priorities.data.rankingBasis}</p>
+                  <details className="text-xs text-muted-foreground" data-testid="priorities-basis">
+                    <summary className="cursor-pointer select-none">How these numbers work</summary>
+                    <div className="mt-1.5 space-y-1">
+                      <p>{priorities.data.progress.savingsBasis}</p>
+                      <p>Measured savings: {priorities.data.progress.verificationBasis}</p>
+                      <p>Order: {priorities.data.rankingBasis}</p>
+                    </div>
+                  </details>
                   {priorityItemSelection.size > 0 && (
                     <div className="flex items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
                       <span>{priorityItemSelection.size} selected</span>
@@ -337,9 +400,9 @@ export default function Portfolio() {
                   {priorities.data.inactive.length > 0 && <details className="border-t pt-3 text-xs"><summary className="cursor-pointer">Completed, deferred, dismissed and needs review ({priorities.data.inactive.length})</summary><div className="mt-2 space-y-2">{priorities.data.inactive.map(item => <div key={`${item.siteId}:${item.measure}`} className="flex items-center justify-between gap-2"><span>{item.siteName} · {item.title} · {item.status.replace(/_/g, " ")}{item.deferUntil && item.status === "deferred" ? ` until ${new Date(item.deferUntil).toLocaleDateString()}` : ""}</span><Button size="sm" variant="ghost" disabled={reopenPriority.isPending} onClick={() => reopenPriority.mutate({siteId:item.siteId,measure:item.measure})}>Reopen</Button></div>)}</div></details>}
                   {priorities.data.byMeasure.length > 0 && (
                     <div className="border-t border-border/60 pt-3">
-                      <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">By measure</p>
+                      <p className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">By action type · savings across sites</p>
                       <div className="mt-2 grid gap-2 md:grid-cols-2">
-                        {priorities.data.byMeasure.map((measure) => <div key={measure.measure} className="rounded-md border border-border/60 p-2 text-xs"><span className="font-medium">{measure.title}</span> · {measure.sites.length} site{measure.sites.length === 1 ? "" : "s"}<span className="float-right text-muted-foreground">Combined amount withheld</span><p className="mt-1 text-[10px] text-muted-foreground">{measure.sites.map((site) => site.siteName).join(", ")}</p></div>)}
+                        {priorities.data.byMeasure.map((measure) => <div key={measure.measure} className="rounded-md border border-border/60 p-2 text-xs"><span className="font-medium">{measure.title}</span> · {measure.sites.length} site{measure.sites.length === 1 ? "" : "s"}<span className="float-right font-medium" data-testid="by-measure-range">{measure.savingsRangeUsd ? `${formatSavingsRangeUsd(measure.savingsRangeUsd)}/yr` : "—"}</span><p className="mt-1 text-[10px] text-muted-foreground">{measure.sites.map((site) => site.siteName).join(", ")}</p></div>)}
                       </div>
                     </div>
                   )}
@@ -541,6 +604,7 @@ export default function Portfolio() {
           <GroupsManager sites={rows.map((r) => ({ siteId: r.siteId, name: r.name }))} />
         </>
       )}
+      </div>
     </div>
   );
 }
@@ -664,9 +728,9 @@ function PortfolioVerifiedDialog({ open, onClose }: { open: boolean; onClose: ()
           <div>
             <div className="rounded-lg border border-border/70 bg-muted/40 p-4">
               <p className="text-xs uppercase tracking-wide text-muted-foreground">Cumulative verified savings</p>
-              <p className="mt-1 font-display text-3xl font-bold">Attribution inconclusive</p>
+              <p className="mt-1 font-display text-3xl font-bold">Not yet measured</p>
               <p className="mt-1 text-xs text-muted-foreground">
-                {data.data.analyzedCount}/{data.data.siteCount} sites analyzed · historical amounts withheld: unique site/month allocation and immutable pre-change baselines are required.
+                {data.data.analyzedCount}/{data.data.siteCount} sites analyzed · measured savings appear here once each completed action has enough after-change data against a locked baseline. Modeled savings ranges are on the Portfolio page.
               </p>
             </div>
             {data.data.perSite.length === 0 ? (
@@ -678,7 +742,7 @@ function PortfolioVerifiedDialog({ open, onClose }: { open: boolean; onClose: ()
                 <div key={s.siteId} className="mt-4">
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-semibold">{s.siteName}</p>
-                    <Badge variant="secondary" className="text-[10px]">Attribution inconclusive</Badge>
+                    <Badge variant="secondary" className="text-[10px]">Measuring</Badge>
                   </div>
                   <Table className="mt-1.5">
                     <TableHeader>
@@ -694,9 +758,9 @@ function PortfolioVerifiedDialog({ open, onClose }: { open: boolean; onClose: ()
                       {s.verdicts.map((v, i) => (
                         <TableRow key={i}>
                           <TableCell className="text-xs">{v.measure.replace(/_/g, " ")}</TableCell>
-                          <TableCell className="text-xs">{v.status === "awaiting_data" ? "awaiting data" : "inconclusive"}</TableCell>
+                          <TableCell className="text-xs">{v.status === "awaiting_data" ? "collecting data" : "not yet measurable"}</TableCell>
                           <TableCell className="text-xs">{v.months}</TableCell>
-                          <TableCell className="text-right text-xs">{"Withheld"}</TableCell>
+                          <TableCell className="text-right text-xs">{"Not yet measured"}</TableCell>
                           <TableCell className="text-xs">{v.chip}</TableCell>
                         </TableRow>
                       ))}

@@ -214,6 +214,7 @@ describe("atomic lifecycle and portfolio scope",()=>{
     const bulk=await caller.recommendations.bulkSetState({status:"planned",items:[{siteId,measure:"hvac",title:"HVAC"},{siteId,measure:"hvac",title:"HVAC"}]});
     expect(bulk.results).toHaveLength(1);
     const custom=await caller.recommendations.portfolioPriorities({siteIds:[siteId,siteId,-1]});
+    for(const g of custom.byMeasure){const ranged=g.sites.filter(x=>x.savingsRangeUsd);expect(g.savingsRangeUsd).toEqual(ranged.length?{low:ranged.reduce((a,x)=>a+x.savingsRangeUsd!.low,0),high:ranged.reduce((a,x)=>a+x.savingsRangeUsd!.high,0)}:null);}
     expect(custom.siteCount).toBe(1);expect(custom.progress.projectedRangeUsd).toEqual((await caller.recommendations.queue({siteId})).progress.projectedRangeUsd);
     expect((await caller.recommendations.portfolioPriorities({siteIds:[]})).siteCount).toBe(0);
     await expect(caller.recommendations.portfolioPriorities({groupId:-1})).rejects.toThrow("Portfolio group not found");

@@ -333,11 +333,15 @@ export async function portfolioPriorities(input:{userId:number;siteIds?:number[]
   if(input.siteIds != null){const requested=new Set(input.siteIds);scopedIds=new Set(Array.from(scopedIds).filter(id=>requested.has(id)));}
   const perSite=await Promise.all(ownedSites.filter(s=>scopedIds.has(s.id)).map(async site=>({site,queue:await getSiteQueue(site.id,input.userId)})));
   const items=perSite.flatMap(({site,queue})=>queue.active.map(item=>({...item,siteId:site.id,siteName:site.name}))).sort(comparePriority);
-  const grouped=new Map<string,{measure:string;title:string;savingsRangeUsd:null;sites:Array<{siteId:number;siteName:string;status:RecommendationItem["status"]}>}>();
-  for(const item of items){const g=grouped.get(item.measure) ?? {measure:item.measure,title:item.title,savingsRangeUsd:null,sites:[]};g.sites.push({siteId:item.siteId,siteName:item.siteName,status:item.status});grouped.set(item.measure,g);}
+  // R2 (Oct 26): each action type shows its savings across sites. One site
+  // contributes at most one item per measure and different sites are
+  // independent, so the per-measure figure is a plain sum of site ranges.
+  const grouped=new Map<string,{measure:string;title:string;savingsRangeUsd:SavingsRangeUsd|null;sites:Array<{siteId:number;siteName:string;status:RecommendationItem["status"];savingsRangeUsd:SavingsRangeUsd|null}>}>();
+  for(const item of items){const g=grouped.get(item.measure) ?? {measure:item.measure,title:item.title,savingsRangeUsd:null,sites:[]};g.sites.push({siteId:item.siteId,siteName:item.siteName,status:item.status,savingsRangeUsd:item.savingsRangeUsd});grouped.set(item.measure,g);}
+  for(const g of Array.from(grouped.values())) g.savingsRangeUsd=sumSiteRanges(g.sites.map(x=>x.savingsRangeUsd));
   const count=(key:"totalIdentified"|"planned"|"inProgress"|"completed"|"dismissed"|"deferred")=>perSite.reduce((sum,s)=>sum+s.queue.progress[key],0);
   const totalIdentified=count("totalIdentified"), completed=count("completed");
-  return {items,byMeasure:Array.from(grouped.values()),siteCount:perSite.length,
+  return {items,byMeasure:Array.from(grouped.values()).sort((a,b)=>(b.savingsRangeUsd?.high ?? -1)-(a.savingsRangeUsd?.high ?? -1)),siteCount:perSite.length,
     inactive:perSite.flatMap(({site,queue})=>[...queue.inactive,...queue.needsReview,...queue.completed].map(item=>({...item,siteId:site.id,siteName:site.name}))),
     rankingBasis:"Descending standalone range midpoint, then confidence, then numeric payback. Not an additive portfolio forecast.",
     progress:{totalIdentified,completed,planned:count("planned"),inProgress:count("inProgress"),dismissed:count("dismissed"),deferred:count("deferred"),completionPct:totalIdentified ? Math.round(completed/totalIdentified*100):0,projectedRangeUsd:sumSiteRanges(perSite.map(s=>s.queue.progress.projectedRangeUsd)),committedRangeUsd:sumSiteRanges(perSite.map(s=>s.queue.progress.committedRangeUsd)),verifiedSavingsUsd:null,savingsBasis:SAVINGS_BASIS,verificationBasis:VERIFICATION_BASIS},

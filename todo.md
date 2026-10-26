@@ -599,7 +599,7 @@
 - [x] CONCEPT-1: docs/concepts/2026-10-24-partner-monitoring-and-relationship-billing.md (partner monitoring, relationship-aware billing, per-persona billing) — concept only
 - [x] QA-1: Gates green (710 tests passed / 10 skipped, 91 files; build OK); authenticated browser E2E 37/38 (only fail = Google Maps proxy 401 on non-production origins)
 - [x] OPEN-1: Re-run analysis after an address edit — DONE Oct 24 (server/siteReanalysis.ts: property-facts refresh + background re-analysis queued by sites.update; Explore polls and shows "re-analyzing")
-- [ ] OPEN-2: Residual recomputation after a completed measure (combined amounts currently withheld + disclosed) — FD R4#1
+- [x] OPEN-2 (done Oct 26, checkpoint aed044c1): Residual recomputation after a completed measure (combined amounts currently withheld + disclosed) — FD R4#1
 - [x] OPEN-3: Campus scenarios/composed plans for virtual-total sites (currently blocked with PRECONDITION_FAILED) and account-level peak dollars (withheld) — FD R4#9/#10
 - [ ] OPEN-4: Bulk import for limited plans (Free/Plus) needs atomic site-capacity reservation — FE F8
 - [ ] OPEN-5: EGMGSQ official mapping — owner/utility confirmation only (D-2). Since Oct 24 the inferred EGMGS family shows indicative savings ranges with conditions (no longer gated)
@@ -636,4 +636,6 @@
 - [x] EIA live drift check (Oct 26): the morning 403 was an EIA-side outage; the feed returns data again and the live test passes.
 - [x] OPEN-3 (Oct 26): Campus scenarios and plans priced account by account. Efficiency applies to every account; solar, battery and EV attach to one account (default: most annual kWh, or the user's choice). Totals are exact sums of the account rows, and payback is computed once at campus level. "By account" table on Scenarios and Bill Builder. Campus peak-management card is priced per account at its own demand rate. Tests: campusScenario 11/11. API check 22/22, browser check 14/14.
 - [x] FIX (Oct 26): "Efficiency retrofit" on the Scenarios page always showed $0 savings because the whole-building reduction ("all") was ignored. Both engines now apply it to the whole building (single-site example: -$4,278/yr, previously $0).
+- [x] R1 (Oct 26): Portfolio report — "Print / Save PDF" on Portfolio (same print pipeline as the site report: no URL header/footer, always white), summary-first (modeled cost, estimated full bill range, open savings range, sites/meters), top actions with savings ranges, savings by action type, sites at a glance, short notes last; long tables continue across pages with repeated headers; sidebar/controls never printed.
+- [x] R2 (Oct 26): Reporting readability — Open savings tile replaces "Amounts withheld"; per-action-type summed ranges; plain verified-savings wording; site print shows each action's savings range; basis/notes collapsed under "How these numbers work" / "Where this comes from".
 

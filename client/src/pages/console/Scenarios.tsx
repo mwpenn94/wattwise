@@ -308,13 +308,18 @@ export default function Scenarios() {
                       <ImplementerSavings results={r} />
                       <CampusAccountTable results={r} />
                       {r.disclosures.length > 0 && (
-                        <ul className="mt-4 space-y-1 border-t border-border pt-3">
-                          {r.disclosures.map((d, i) => (
-                            <li key={i} className="text-[11px] leading-relaxed text-muted-foreground">
-                              • {d}
-                            </li>
-                          ))}
-                        </ul>
+                        <details className="mt-4 border-t border-border pt-3" data-testid="scenario-notes">
+                          <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground">
+                            Where this comes from ({r.disclosures.length} note{r.disclosures.length === 1 ? "" : "s"})
+                          </summary>
+                          <ul className="mt-2 space-y-1">
+                            {r.disclosures.map((d, i) => (
+                              <li key={i} className="text-[11px] leading-relaxed text-muted-foreground">
+                                • {d}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
                       )}
                     </>
                   ) : (

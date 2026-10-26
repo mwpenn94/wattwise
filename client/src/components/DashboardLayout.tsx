@@ -338,7 +338,7 @@ function DashboardLayoutContent({
 
       <SidebarInset>
         {isMobile && (
-          <div className="flex border-b h-14 items-center justify-between bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:backdrop-blur sticky top-0 z-40">
+          <div className="flex border-b h-14 items-center justify-between bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:backdrop-blur sticky top-0 z-40 print:hidden">
             <div className="flex items-center gap-2">
               <SidebarTrigger className="h-9 w-9 rounded-lg bg-background" />
               <div className="flex items-center gap-3">
@@ -356,7 +356,7 @@ function DashboardLayoutContent({
           </div>
         )}
         {!isMobile && (
-          <div className="pointer-events-none sticky top-0 z-40 flex h-0 justify-end">
+          <div className="pointer-events-none sticky top-0 z-40 flex h-0 justify-end print:hidden">
             <div className="pointer-events-auto mr-4 mt-3 flex items-center gap-1">
               <ThemeToggle className="h-9 w-9 rounded-full border border-border bg-card/90 shadow-sm backdrop-blur" />
               <AlertsInbox />
@@ -366,7 +366,7 @@ function DashboardLayoutContent({
         <EsTranslateTip />
         <main className="flex-1 p-4">{children}</main>
         {/* §5c-1b: privacy/terms/contact reachable from every page, console included */}
-        <footer className="border-t border-border/60 px-4 py-3">
+        <footer className="border-t border-border/60 px-4 py-3 print:hidden">
           <div className="flex flex-wrap items-center gap-4 text-[11px] text-muted-foreground">
             <a href="/legal#privacy" className="hover:text-foreground">Privacy policy</a>
             <a href="/legal#terms" className="hover:text-foreground">Terms of use</a>

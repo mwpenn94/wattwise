@@ -70,6 +70,8 @@ export interface InsightsPrintData {
     title: string;
     description: string | null;
     estCostSavingsPerYr: number | null;
+    /** Same yearly range the recommendation queue shows (R2: ranges, not points). */
+    savingsRangeUsd?: { low: number; high: number } | null;
     estEnergySavingsPerYr: number | null;
     energyUnit: string | null;
     paybackBandYears: string | null;
@@ -485,7 +487,7 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
               <div className="flex items-baseline justify-between">
                 <div className="font-semibold text-[11px]">{o.title}</div>
                 <div className="font-semibold text-[11px]">
-                  {o.estCostSavingsPerYr != null ? `${usd(o.estCostSavingsPerYr)}/yr` : "—"}
+                  {o.savingsRangeUsd ? `${usd(o.savingsRangeUsd.low)}–${usd(o.savingsRangeUsd.high)}/yr` : o.estCostSavingsPerYr != null ? `${usd(o.estCostSavingsPerYr)}/yr` : "—"}
                   <PChip label={o.confidence} />
                 </div>
               </div>
@@ -506,7 +508,7 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
               <div className="flex items-baseline justify-between">
                 <div className="font-semibold text-[11px]">{o.title}</div>
                 <div className="font-semibold text-[11px]">
-                  {o.estCostSavingsPerYr != null ? `${usd(o.estCostSavingsPerYr)}/yr` : "—"}
+                  {o.savingsRangeUsd ? `${usd(o.savingsRangeUsd.low)}–${usd(o.savingsRangeUsd.high)}/yr` : o.estCostSavingsPerYr != null ? `${usd(o.estCostSavingsPerYr)}/yr` : "—"}
                   <PChip label={o.confidence} />
                 </div>
               </div>
