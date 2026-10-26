@@ -1299,9 +1299,18 @@ export default function Dashboard() {
                     <div className="grid gap-2 rounded-md border border-border/70 bg-muted/30 p-3 text-xs sm:grid-cols-4">
                       <div><span className="font-medium">Your progress</span><br />{progress.completed} of {progress.totalIdentified} completed ({progress.completionPct}%)</div>
                       <div title={progress.verificationBasis}><span className="text-muted-foreground">Verified to date</span><br />{progress.verifiedSavingsUsd == null ? "Not verified yet" : fmtUsd(progress.verifiedSavingsUsd)}</div>
-                      <div><span className="text-muted-foreground">Committed / yr</span><br />{formatSavingsRangeUsd(progress.committedRangeUsd)}</div>
-                      <div><span className="text-muted-foreground">Open / yr</span><br />{formatSavingsRangeUsd(progress.projectedRangeUsd)}</div>
+                      <div title={progress.savingsBasis}><span className="text-muted-foreground">Committed / yr (combined)</span><br />{formatSavingsRangeUsd(progress.committedRangeUsd)}</div>
+                      <div title={progress.savingsBasis}><span className="text-muted-foreground">Open / yr (combined)</span><br />{formatSavingsRangeUsd(progress.projectedRangeUsd)}</div>
                     </div>
+                    <p className="text-[11px] text-muted-foreground" data-testid="queue-savings-basis">{progress.savingsBasis}</p>
+                    {queue.refreshSuggested && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs" data-testid="queue-refresh-suggested">
+                        <span>You completed {queue.refreshSuggested.measures.join(" and ")} since the last analysis. Re-run it to re-estimate what remains.</span>
+                        <Button size="sm" variant="outline" disabled={run.isPending || activeSiteId == null} onClick={() => activeSiteId != null && run.mutate({ siteId: activeSiteId })}>
+                          {run.isPending ? "Re-estimating…" : "Update estimates"}
+                        </Button>
+                      </div>
+                    )}
                     {queue.active.map((item) => (
                       <div key={item.measure} className="rounded-md border border-border/70 bg-card p-4">
                         <div className="flex flex-wrap items-start justify-between gap-3">

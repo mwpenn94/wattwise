@@ -48,12 +48,13 @@ import { deriveBillVerifiedRate } from "../billCalibration";
 import { resolveTerritoryUnified, partitionByTerritory } from "../serviceTerritory";
 import { effectiveSchedules } from "../operatingHours";
 import { isVirtualTotalMeter, requireAlignedCampusSeries } from "../virtualTotal";
-import { replaceRecommendationOpportunities } from "../recommendations";
+import { replaceRecommendationOpportunities, listCompletedMeasuresForResidual } from "../recommendations";
 import { resolveRateCode } from "../rateCodes";
 import { tariffMatchesSiteUtility } from "../utilityMatch";
 import { pickSizeFitBasis } from "./basisSelect";
 import { perMeterRateReview, priceAccountsSeparately, type MeterRateReview, type AccountPricingComponent, sameAccountProvider, RATE_RANGE_BASIS, INDICATIVE_RATE_RANGE_BASIS } from "./multiMeter";
 import { estimateFullBill, type FullBillEstimate } from "./fullBill";
+import { applyCompletedMeasures, type CompletedMeasure } from "./residual";
 import type { Site, Meter } from "../../drizzle/schema";
 import { reclaimMemory, relieveMemoryPressure } from "../ingest/memory";
 
@@ -1783,8 +1784,57 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       });
     }
   }
+  /* OPEN-2 (R4 #1): completed measures change what remains. The analysis
+     window's readings from BEFORE each completion still contain the load the
+     measure removed, so the remaining efficiency cards are re-estimated on the
+     residual load (shared helper, midpoint of each completed measure's band,
+     pro-rated by the share of readings that predate it). Fail-open: if
+     completion state cannot be read, the standalone estimates stand. */
+  let completedForResidual: CompletedMeasure[] = [];
+  try {
+    completedForResidual = await listCompletedMeasuresForResidual(site.id, userId);
+  } catch (e) {
+    narrate(`Residual re-estimate skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const residualWindowStart = hasIntervals && points.length ? points[0].ts : null;
+  const residualWindowEnd = hasIntervals && points.length
+    ? points[points.length - 1].ts + (points[points.length - 1].durationMin ?? 15) * 60000
+    : null;
+  const residualBaseloadKw = demand && annualUsage != null ? overnightBaseload(points, tz) : null;
+  const residualHours = demand && annualUsage != null && residualBaseloadKw != null
+    ? await effectiveSchedules(site.id, site.buildingType ?? null)
+    : null;
+  const residual = applyCompletedMeasures(
+    {
+      lightingKwh: annualUsage != null && endUseFractions?.lighting ? annualUsage * endUseFractions.lighting : 0,
+      coolingKwh: annualUsage != null && endUseFractions?.cooling ? annualUsage * endUseFractions.cooling : 0,
+      baseloadKw: residualBaseloadKw,
+    },
+    {
+      // Without interval timestamps every completion is treated as after the data (no adjustment).
+      completed: residualWindowStart != null ? completedForResidual : [],
+      windowStartMs: residualWindowStart ?? 0,
+      windowEndMs: residualWindowEnd ?? 0,
+      lightingFraction: endUseFractions?.lighting ?? 0,
+      coolingFraction: endUseFractions?.cooling ?? 0,
+      unoccupiedHoursPerYear: Math.max(residualHours?.unoccupiedHoursPerYear ?? 0, 0),
+    },
+  );
+  if (residual.note) narrate(`Residual re-estimate: ${residual.applied.map((a) => `${a.measure} ${(a.shareBefore * 100).toFixed(0)}% pre-change`).join(", ")}`);
+  // The note goes only on cards whose inputs the completed work actually
+  // changed (an LED retrofit does not change modeled cooling energy).
+  const residualBase = {
+    lightingKwh: annualUsage != null && endUseFractions?.lighting ? annualUsage * endUseFractions.lighting : 0,
+    coolingKwh: annualUsage != null && endUseFractions?.cooling ? annualUsage * endUseFractions.cooling : 0,
+  };
+  const residualChanged = {
+    cooling: Math.abs(residual.coolingKwh - residualBase.coolingKwh) > 0.5,
+    lighting: Math.abs(residual.lightingKwh - residualBase.lightingKwh) > 0.5,
+    baseload: residualBaseloadKw != null && residual.baseloadKw != null && Math.abs(residual.baseloadKw - residualBaseloadKw) > 1e-6,
+  };
+  const withResidualNote = (d: string[], changed: boolean) => (residual.note && changed ? [residual.note, ...d] : d);
   if (endUseFractions?.cooling && annualUsage != null && endUseFractions.cooling > 0.25) {
-    const coolKwh = annualUsage * endUseFractions.cooling;
+    const coolKwh = residual.coolingKwh;
     oppCands.push({
       key: "hvac_tuneup",
       title: "HVAC tune-up / smart thermostat scheduling",
@@ -1794,11 +1844,11 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       capexBand: "low",
       confidence: disaggMethod === "archetype_prior_only" ? "low" : "medium",
       rationale: `Cooling is an estimated ${(endUseFractions.cooling * 100).toFixed(0)}% of annual use (${dis.label}). The 5–15% cooling-savings band spans ENERGY STAR's smart-thermostat field finding (~8% of HVAC energy) and ACEEE/LBNL retro-commissioning ranges for setpoint and schedule optimization.`,
-      disclosures: rateIsFallback ? [dis.disclaimer, fallbackRateDisclosure] : [dis.disclaimer],
+      disclosures: withResidualNote(rateIsFallback ? [dis.disclaimer, fallbackRateDisclosure] : [dis.disclaimer], residualChanged.cooling),
     });
   }
   if (endUseFractions?.lighting && annualUsage != null && endUseFractions.lighting > 0.1) {
-    const lightKwh = annualUsage * endUseFractions.lighting;
+    const lightKwh = residual.lightingKwh;
     oppCands.push({
       key: "led_retrofit",
       title: "LED lighting retrofit",
@@ -1808,18 +1858,20 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       capexBand: "medium",
       confidence: disaggMethod === "archetype_prior_only" ? "low" : "medium",
       rationale: `Lighting is an estimated ${(endUseFractions.lighting * 100).toFixed(0)}% of annual use (${dis.label}). The 30–55% band reflects DOE Solid-State Lighting program findings for LED conversion from mixed fluorescent/HID stock (upper end with occupancy controls).`,
-      disclosures: rateIsFallback ? [dis.disclaimer, fallbackRateDisclosure] : [dis.disclaimer],
+      disclosures: withResidualNote(rateIsFallback ? [dis.disclaimer, fallbackRateDisclosure] : [dis.disclaimer], residualChanged.lighting),
     });
   }
   if (demand && annualUsage != null) {
     // overnight baseload from interval data (regression_split evidence)
-    const baseloadKw = overnightBaseload(points, tz);
-    if (baseloadKw != null && demand.avgKw > 0 && baseloadKw / demand.avgKw > 0.55) {
+    // Eligibility uses the MEASURED baseload; the dollars use the residual.
+    const baseloadKw = residualBaseloadKw;
+    const residualKw = residual.baseloadKw ?? baseloadKw;
+    if (baseloadKw != null && residualKw != null && demand.avgKw > 0 && baseloadKw / demand.avgKw > 0.55) {
       // HRS-1: unoccupied hours come from the site's operating schedules (user
       // rows or archetype default) instead of the flat 4,900 h single-shift
       // constant — an overnight-measured baseload cannot be "saved" during
       // occupied hours, and a 24/7 site has (honestly) near-zero such hours.
-      const hrs = await effectiveSchedules(site.id, site.buildingType ?? null);
+      const hrs = residualHours ?? (await effectiveSchedules(site.id, site.buildingType ?? null));
       const unoccHours = Math.max(hrs.unoccupiedHoursPerYear, 0);
       const hoursNote = hrs.userConfirmed
         ? `your schedule (${hrs.disclosure})`
@@ -1832,12 +1884,12 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
           // Batch-15 (pass 149): the low estimate maps directly to the 10% reduction
           // named in the rationale — the earlier extra ×0.5 made the displayed range
           // inconsistent with the stated 10–25% reduction band.
-          annualSavingsUsdLo: baseloadKw * 0.1 * unoccHours * kWhRate,
-          annualSavingsUsdHi: baseloadKw * 0.25 * unoccHours * kWhRate,
+          annualSavingsUsdLo: residualKw * 0.1 * unoccHours * kWhRate,
+          annualSavingsUsdHi: residualKw * 0.25 * unoccHours * kWhRate,
           capexBand: "none",
           confidence: hrs.userConfirmed ? "medium" : "low",
           rationale: `Overnight baseload averages ${baseloadKw.toFixed(1)} kW — ${((baseloadKw / demand.avgKw) * 100).toFixed(0)}% of your average load runs 24/7. Measured directly from your interval data. Savings estimated over ~${unoccHours.toLocaleString()} unoccupied hours/year based on ${hoursNote}.`,
-          disclosures: rateIsFallback ? [MODELED_ESTIMATES_DISCLAIMER, fallbackRateDisclosure] : [MODELED_ESTIMATES_DISCLAIMER],
+          disclosures: withResidualNote(rateIsFallback ? [MODELED_ESTIMATES_DISCLAIMER, fallbackRateDisclosure] : [MODELED_ESTIMATES_DISCLAIMER], residualChanged.baseload),
         });
       }
     }

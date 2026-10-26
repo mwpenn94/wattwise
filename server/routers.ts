@@ -1792,10 +1792,11 @@ export const appRouter = router({
         const entitySubtotals =
           allEntities.length > 0
             ? (() => {
-                const byEntity = new Map<number | null, { annualCostUsd: number; annualUsageKwh: number; siteCount: number; analyzedCount: number; openOpportunityUsd: number; telecomAnnualUsd: number }>();
+                const byEntity = new Map<number | null, { annualCostUsd: number; annualUsageKwh: number; siteCount: number; analyzedCount: number; openOpportunityUsd: number; telecomAnnualUsd: number; ranges: Array<SavingsRangeUsd | null> }>();
                 for (const r of siteRollupsWithTelecom) {
                   const key = r.entityId ?? null;
-                  const cur = byEntity.get(key) ?? { annualCostUsd: 0, annualUsageKwh: 0, siteCount: 0, analyzedCount: 0, openOpportunityUsd: 0, telecomAnnualUsd: 0 };
+                  const cur = byEntity.get(key) ?? { annualCostUsd: 0, annualUsageKwh: 0, siteCount: 0, analyzedCount: 0, openOpportunityUsd: 0, telecomAnnualUsd: 0, ranges: [] };
+                  cur.ranges.push(r.topOpportunityRange ?? null);
                   cur.annualCostUsd += r.annualCostUsd ?? 0;
                   cur.annualUsageKwh += r.annualUsageKwh ?? 0;
                   cur.siteCount += 1;
@@ -1814,6 +1815,8 @@ export const appRouter = router({
                     annualCostUsd: Math.round(v.annualCostUsd),
                     annualUsageKwh: Math.round(v.annualUsageKwh),
                     openOpportunityUsd: Math.round(v.openOpportunityUsd),
+                    // OPEN-2: independent sites add; null when no site has a range.
+                    openOpportunityRangeUsd: v.ranges.some((x) => x) ? addSavingsRanges(v.ranges) : null,
                     telecomAnnualUsd: Math.round(v.telecomAnnualUsd),
                   }))
                   .sort((a, b) => b.annualCostUsd - a.annualCostUsd);

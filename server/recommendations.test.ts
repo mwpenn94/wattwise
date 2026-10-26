@@ -76,7 +76,13 @@ describe("buildRecommendationQueue", () => {
     );
     expect(result.active.every((item) => item.savingsRangeUsd == null || item.savingsRangeUsd.low < item.savingsRangeUsd.high)).toBe(true);
     expect(result.progress).toMatchObject({ totalIdentified: 3, planned: 1, inProgress: 1, completed: 1, completionPct: 33, verifiedSavingsUsd: null });
-    expect(result.progress.committedRangeUsd).toBeNull();
+    // OPEN-2: committed = planned + in-progress, combined as an overlap-aware
+    // bound (best single low; high adds each high). No open items → null.
+    const committedItems = result.active.filter((i) => i.status === "planned" || i.status === "in_progress");
+    expect(result.progress.committedRangeUsd).toEqual({
+      low: Math.max(...committedItems.map((i) => i.savingsRangeUsd!.low)),
+      high: committedItems.reduce((a, i) => a + i.savingsRangeUsd!.high, 0),
+    });
     expect(result.progress.projectedRangeUsd).toBeNull();
   });
 
@@ -149,8 +155,16 @@ describe("review regression safety", () => {
   it("never sums repeated whole-site proof credit or overlapping standalone savings", () => {
     const q=buildRecommendationQueue([opportunity("led",1),opportunity("hvac",2)],[],["led","hvac"].map((measure,i)=>({id:i+1,measure,title:measure,status:"verified" as const,verifiedSavingsUsd:150,implementedAt:NOW})),NOW);
     expect(q.progress.verifiedSavingsUsd).toBeNull();
+    // Both measures are completed: nothing is open, so no combined open amount.
+    expect(q.active).toHaveLength(0);
     expect(q.progress.projectedRangeUsd).toBeNull();
     expect(q.progress.committedRangeUsd).toBeNull();
+    // Two open, overlapping same-utility measures: the low end is never summed.
+    const open2 = buildRecommendationQueue([opportunity("led",1,100),opportunity("hvac",2,200)],[],[],NOW);
+    const lows = open2.active.map((i) => i.savingsRangeUsd!.low);
+    expect(open2.progress.projectedRangeUsd!.low).toBe(Math.max(...lows));
+    expect(open2.progress.projectedRangeUsd!.low).toBeLessThan(lows.reduce((a, b) => a + b, 0));
+    expect(open2.progress.projectedRangeUsd!.high).toBe(open2.active.reduce((a, i) => a + i.savingsRangeUsd!.high, 0));
     expect(q.progress.verificationBasis).toContain("inconclusive");
     expect(q.completed.every(i=>i.implementation?.status==="inconclusive")).toBe(true);
   });
@@ -200,7 +214,7 @@ describe("atomic lifecycle and portfolio scope",()=>{
     const bulk=await caller.recommendations.bulkSetState({status:"planned",items:[{siteId,measure:"hvac",title:"HVAC"},{siteId,measure:"hvac",title:"HVAC"}]});
     expect(bulk.results).toHaveLength(1);
     const custom=await caller.recommendations.portfolioPriorities({siteIds:[siteId,siteId,-1]});
-    expect(custom.siteCount).toBe(1);expect(custom.progress.projectedRangeUsd).toBeNull();
+    expect(custom.siteCount).toBe(1);expect(custom.progress.projectedRangeUsd).toEqual((await caller.recommendations.queue({siteId})).progress.projectedRangeUsd);
     expect((await caller.recommendations.portfolioPriorities({siteIds:[]})).siteCount).toBe(0);
     await expect(caller.recommendations.portfolioPriorities({groupId:-1})).rejects.toThrow("Portfolio group not found");
   });

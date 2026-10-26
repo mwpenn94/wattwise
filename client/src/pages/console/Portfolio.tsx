@@ -223,7 +223,7 @@ export default function Portfolio() {
                     <Zap className="h-4 w-4 text-primary" /> Portfolio priorities
                   </CardTitle>
                   <CardDescription>
-                    Standalone before-change screening estimates. Prioritize actions across sites; combined savings are not modeled.
+                    Screening estimates, re-estimated after completed measures. Combined amounts are an overlap-aware bound, not a simple sum.
                     {priorityScope === "all" && pageFiltered && (
                       <> Scoped to the {inViewSiteIds.length} site{inViewSiteIds.length === 1 ? "" : "s"} shown by the filter above.</>
                     )}
@@ -276,7 +276,7 @@ export default function Portfolio() {
                   <div className="grid gap-2 rounded-md border border-border/60 bg-muted/30 p-3 text-xs sm:grid-cols-4">
                     <div><span className="font-medium">Progress</span><br />{priorities.data.progress.completed}/{priorities.data.progress.totalIdentified} complete ({priorities.data.progress.completionPct}%)</div>
                     <div><span className="text-muted-foreground">In plan</span><br />{priorities.data.progress.planned + priorities.data.progress.inProgress} actions</div>
-                    <div><span className="text-muted-foreground">Combined savings</span><br /><span title="Measures overlap (for example, LED lighting lowers the savings from HVAC scheduling), so adding their ranges would overstate the total.">Not summed — measures overlap; see each range</span></div>
+                    <div data-testid="priorities-combined"><span className="text-muted-foreground">Combined open / yr</span><br /><span title={priorities.data.progress.savingsBasis}>{priorities.data.progress.projectedRangeUsd ? formatSavingsRangeUsd(priorities.data.progress.projectedRangeUsd) : "No open ranges"}</span></div>
                     <div><span className="text-muted-foreground">Savings attribution</span><br />Inconclusive</div>
                   </div>
                   <p className="text-xs text-muted-foreground">{priorities.data.progress.savingsBasis}</p>
@@ -402,7 +402,7 @@ export default function Portfolio() {
                               : "—"}
                           </td>
                           <td className="py-1.5 pr-3 tabular-nums">{e.annualUsageKwh > 0 ? `${fmtNum(e.annualUsageKwh)} kWh` : "—"}</td>
-                          <td className="py-1.5 tabular-nums">{"Combined amount withheld"}</td>
+                          <td className="py-1.5 tabular-nums" title="Sum of each site's next recommended action (sites are independent).">{e.openOpportunityRangeUsd ? formatSavingsRangeUsd(e.openOpportunityRangeUsd) : "—"}</td>
                         </tr>
                       ))}
                     </tbody>

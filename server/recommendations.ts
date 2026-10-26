@@ -8,7 +8,7 @@ import * as h from "./dbHelpers";
 import { pickSiteAnalysisMeter } from "./virtualTotal";
 
 const DAY_MS = 86_400_000;
-export const SAVINGS_BASIS = "Standalone before-change screening estimates, not additive. Measures overlap, so their ranges are not added together, and savings remaining after a completed measure are not yet re-estimated. Completion is a count of identified actions, not energy savings or a fixed plan percentage.";
+export const SAVINGS_BASIS = "Combined amounts are a bound, not a sum. Measures on the same utility overlap (for example, LED lighting lowers what HVAC scheduling can save), so the low end is the best single action on each utility and the high end adds every action's high estimate, which real combined savings stay below when actions overlap. Different utilities and different sites are independent and are added. Each remaining estimate is re-estimated on the load left after completed measures where those measures changed it. Completion is a count of identified actions, not energy savings.";
 export const VERIFICATION_BASIS = "Attribution inconclusive: immutable pre-change evidence and a unique site/commodity/month allocation are required. A whole-site reduction is never credited to more than one measure, so no verified dollar amount is shown until that evidence exists.";
 export type RecommendationStatus = "planned" | "in_progress" | "completed" | "deferred" | "dismissed";
 type VerdictStatus = "awaiting_data" | "on_track" | "verified" | "underperforming" | "inconclusive";
@@ -33,6 +33,8 @@ export interface RecommendationItem {
   implementation: { id: number; status: VerdictStatus; verifiedSavingsUsd: null; implementedAt: number } | null;
 }
 export interface RecommendationQueue {
+  /** OPEN-2: completed measures newer than the last analysis — remaining estimates refresh on the next run. */
+  refreshSuggested?: { measures: string[] } | null;
   active: RecommendationItem[]; next: RecommendationItem[]; completed: RecommendationItem[];
   inactive: RecommendationItem[]; needsReview: RecommendationItem[]; landlord: RecommendationItem[];
   progress: {
@@ -50,7 +52,7 @@ function snapshot(value: unknown): QueueOpportunity | undefined {
 export function opportunityMeta(opportunity: QueueOpportunity | undefined) {
   const provenance = opportunity?.provenance && typeof opportunity.provenance === "object" ? opportunity.provenance as Record<string, unknown> : {};
   const disclosures = Array.isArray(provenance.disclosures) ? provenance.disclosures.filter((d): d is string => typeof d === "string") : [];
-  const basis = ["Standalone before-change estimate; not completion-adjusted.", typeof provenance.basis === "string" ? provenance.basis : null, ...disclosures].filter(Boolean).join(" ");
+  const basis = ["Standalone estimate for this action on its own.", typeof provenance.basis === "string" ? provenance.basis : null, ...disclosures].filter(Boolean).join(" ");
   const sourceRange = Array.isArray(provenance.savingsRange) && provenance.savingsRange.length === 2 && provenance.savingsRange.every(v => typeof v === "number" && Number.isFinite(v)) && Number(provenance.savingsRange[0]) < Number(provenance.savingsRange[1])
     ? { low: Number(provenance.savingsRange[0]), high: Number(provenance.savingsRange[1]) } : null;
   return { commodity: typeof provenance.commodity === "string" ? provenance.commodity : "unknown", audience: provenance.audience === "landlord" ? "landlord" : "occupant", disclosures, basis, sourceRange };
@@ -74,6 +76,29 @@ function itemFrom(current: QueueOpportunity | undefined, state: QueueState | und
     deferUntil: state?.deferUntil ?? null, note: state?.note ?? null,
     implementation: implementation ? { id: implementation.id, status: implementation.status === "awaiting_data" ? "awaiting_data" : "inconclusive", verifiedSavingsUsd: null, implementedAt: implementation.implementedAt } : null,
   };
+}
+/** OPEN-2: combined bound for overlapping measures. Same-utility actions
+ * overlap, so the low end is the largest single low per utility (summed across
+ * independent utilities) and the high end adds every high estimate. Never a
+ * plain sum presented as achievable; null when no item has a range. */
+export function combineOverlappingRanges(items: Array<{ commodity: string; savingsRangeUsd: SavingsRangeUsd | null }>): SavingsRangeUsd | null {
+  const ranged = items.filter((i) => i.savingsRangeUsd && Number.isFinite(i.savingsRangeUsd.low) && Number.isFinite(i.savingsRangeUsd.high));
+  if (!ranged.length) return null;
+  const bestLow = new Map<string, number>();
+  let high = 0;
+  for (const i of ranged) {
+    const r = i.savingsRangeUsd!;
+    bestLow.set(i.commodity, Math.max(bestLow.get(i.commodity) ?? 0, Math.max(0, r.low)));
+    high += Math.max(0, r.high);
+  }
+  const low = Array.from(bestLow.values()).reduce((a, b) => a + b, 0);
+  return high > 0 ? { low: Math.min(low, high), high } : null;
+}
+/** Independent sites add. */
+export function sumSiteRanges(ranges: Array<SavingsRangeUsd | null>): SavingsRangeUsd | null {
+  const r = ranges.filter((x): x is SavingsRangeUsd => x != null);
+  if (!r.length) return null;
+  return { low: r.reduce((a, x) => a + x.low, 0), high: r.reduce((a, x) => a + x.high, 0) };
 }
 export function buildRecommendationQueue(opportunities: QueueOpportunity[], states: QueueState[], implementations: QueueImplementation[], now: number): RecommendationQueue {
   const byMeasure = new Map(opportunities.map(o => [o.measure, o]));
@@ -101,7 +126,9 @@ export function buildRecommendationQueue(opportunities: QueueOpportunity[], stat
       inProgress: active.filter(i => i.status === "in_progress").length, completed: completed.length,
       dismissed: inactive.filter(i => i.status === "dismissed").length, deferred: inactive.filter(i => i.status === "deferred").length,
       completionPct: controlled.length ? Math.round(completed.length / controlled.length * 100) : 0,
-      projectedRangeUsd: null, committedRangeUsd: null, verifiedSavingsUsd: null, savingsBasis: SAVINGS_BASIS, verificationBasis: VERIFICATION_BASIS,
+      projectedRangeUsd: combineOverlappingRanges(active.filter(i => i.status === "open")),
+      committedRangeUsd: combineOverlappingRanges(active.filter(i => i.status === "planned" || i.status === "in_progress")),
+      verifiedSavingsUsd: null, savingsBasis: SAVINGS_BASIS, verificationBasis: VERIFICATION_BASIS,
     },
   };
 }
@@ -117,9 +144,25 @@ export async function getSiteQueue(siteId: number, userId: number, now = Date.no
     const d = event.detail as {siteId?:number;measure?:string;reopenedAt?:number} | null;
     if (d?.siteId === siteId && typeof d.measure === "string" && typeof d.reopenedAt === "number") reopenedAt.set(d.measure,Math.max(reopenedAt.get(d.measure) ?? 0,d.reopenedAt));
   }
-  return buildRecommendationQueue(opportunities, states, implementations.map(i => ({...i,reopened:(reopenedAt.get(i.measure) ?? 0) > i.implementedAt})), now);
+  const queue = buildRecommendationQueue(opportunities, states, implementations.map(i => ({...i,reopened:(reopenedAt.get(i.measure) ?? 0) > i.implementedAt})), now);
+  // OPEN-2: a measure completed after the latest analysis started has not yet
+  // been applied to the remaining estimates; say so instead of silently
+  // showing before-change numbers.
+  const latest = await h.getLatestAnalysis(siteId, userId).catch(() => null);
+  const lastRunAt = latest?.createdAt ? new Date(latest.createdAt as unknown as string | number | Date).getTime() : null;
+  const completedAt = new Map(states.filter(st => st.status === "completed").map(st => [st.measure, st.changedAt]));
+  const fresh = lastRunAt == null ? [] : queue.completed.filter(i => (completedAt.get(i.measure) ?? 0) > lastRunAt).map(i => i.title);
+  return { ...queue, refreshSuggested: fresh.length && queue.active.length ? { measures: fresh } : null };
 }
 
+/** OPEN-2: completed measures exactly as the queue shows them (reopen/undo/reset
+ * respected), with the user's completion date, for re-estimating what remains. */
+export async function listCompletedMeasuresForResidual(siteId: number, userId: number): Promise<Array<{ measure: string; title: string; implementedAt: number }>> {
+  const queue = await getSiteQueue(siteId, userId);
+  return queue.completed
+    .filter((i) => i.implementation != null && Number.isFinite(i.implementation.implementedAt))
+    .map((i) => ({ measure: i.measure, title: i.title, implementedAt: i.implementation!.implementedAt }));
+}
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 export interface StateInput {
@@ -297,6 +340,6 @@ export async function portfolioPriorities(input:{userId:number;siteIds?:number[]
   return {items,byMeasure:Array.from(grouped.values()),siteCount:perSite.length,
     inactive:perSite.flatMap(({site,queue})=>[...queue.inactive,...queue.needsReview,...queue.completed].map(item=>({...item,siteId:site.id,siteName:site.name}))),
     rankingBasis:"Descending standalone range midpoint, then confidence, then numeric payback. Not an additive portfolio forecast.",
-    progress:{totalIdentified,completed,planned:count("planned"),inProgress:count("inProgress"),dismissed:count("dismissed"),deferred:count("deferred"),completionPct:totalIdentified ? Math.round(completed/totalIdentified*100):0,projectedRangeUsd:null,committedRangeUsd:null,verifiedSavingsUsd:null,savingsBasis:SAVINGS_BASIS,verificationBasis:VERIFICATION_BASIS},
+    progress:{totalIdentified,completed,planned:count("planned"),inProgress:count("inProgress"),dismissed:count("dismissed"),deferred:count("deferred"),completionPct:totalIdentified ? Math.round(completed/totalIdentified*100):0,projectedRangeUsd:sumSiteRanges(perSite.map(s=>s.queue.progress.projectedRangeUsd)),committedRangeUsd:sumSiteRanges(perSite.map(s=>s.queue.progress.committedRangeUsd)),verifiedSavingsUsd:null,savingsBasis:SAVINGS_BASIS,verificationBasis:VERIFICATION_BASIS},
   };
 }
