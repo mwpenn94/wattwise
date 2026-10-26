@@ -536,7 +536,7 @@ export default function SiteInsightsReport({ data, token, origin }: { data: Insi
       <footer className="border-t border-neutral-400 pt-2 mt-6 text-[9px] text-neutral-500 break-inside-avoid">
         <p>{data.disclaimer}</p>
         <p className="mt-1">
-          Verify this report is current: {origin}/verify/{token} · Generated {printed} · Meterly — Utility Data Intelligence
+          Report ID {token} · Generated {printed} · Meterly — Utility Data Intelligence
         </p>
       </footer>
     </div>
