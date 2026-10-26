@@ -5,18 +5,20 @@
  */
 import DashboardLayout from "@/components/DashboardLayout";
 import { Route, Switch, useSearch } from "wouter";
-import Dashboard from "./console/Dashboard";
-import HomeFeed from "./console/HomeFeed";
-import Sites from "./console/Sites";
-import Portfolio from "./console/Portfolio";
-import Upload from "./console/Upload";
-import Wizard from "./console/Wizard";
-import Scenarios from "./console/Scenarios";
-import Tariffs from "./console/Tariffs";
 import { Redirect } from "wouter";
-import Account from "./console/Account";
-import Reports from "./console/Reports";
-import ConvergencePanel from "./console/ConvergencePanel";
+import { lazyPage } from "@/lib/lazyPage";
+// Oct 26 (OPEN-6): each console page downloads the first time it is opened.
+const Dashboard = lazyPage(() => import("./console/Dashboard"));
+const HomeFeed = lazyPage(() => import("./console/HomeFeed"));
+const Sites = lazyPage(() => import("./console/Sites"));
+const Portfolio = lazyPage(() => import("./console/Portfolio"));
+const Upload = lazyPage(() => import("./console/Upload"));
+const Wizard = lazyPage(() => import("./console/Wizard"));
+const Scenarios = lazyPage(() => import("./console/Scenarios"));
+const Tariffs = lazyPage(() => import("./console/Tariffs"));
+const Account = lazyPage(() => import("./console/Account"));
+const Reports = lazyPage(() => import("./console/Reports"));
+const ConvergencePanel = lazyPage(() => import("./console/ConvergencePanel"));
 
 function TelecomRedirect() {
   const search = useSearch();

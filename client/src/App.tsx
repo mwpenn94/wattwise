@@ -5,10 +5,13 @@ import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
-import AppShell from "./pages/AppShell";
-import Convergence from "./pages/Convergence";
-import Legal from "./pages/Legal";
-import Verify from "./pages/Verify";
+import { lazyPage } from "./lib/lazyPage";
+// Oct 26 (OPEN-6): the console and secondary public pages load on first use;
+// the landing page stays in the main bundle for a fast first paint.
+const AppShell = lazyPage(() => import("./pages/AppShell"));
+const Convergence = lazyPage(() => import("./pages/Convergence"));
+const Legal = lazyPage(() => import("./pages/Legal"));
+const Verify = lazyPage(() => import("./pages/Verify"));
 
 function Router() {
   return (

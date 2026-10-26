@@ -603,7 +603,7 @@
 - [ ] OPEN-3: Campus scenarios/composed plans for virtual-total sites (currently blocked with PRECONDITION_FAILED) and account-level peak dollars (withheld) — FD R4#9/#10
 - [ ] OPEN-4: Bulk import for limited plans (Free/Plus) needs atomic site-capacity reservation — FE F8
 - [ ] OPEN-5: EGMGSQ official mapping — owner/utility confirmation only (D-2). Since Oct 24 the inferred EGMGS family shows indicative savings ranges with conditions (no longer gated)
-- [ ] OPEN-6: Production route-split (1.57 MB JS bundle) — performance
+- [x] OPEN-6: Production route-split — DONE Oct 26: pages load on first use (client/src/lib/lazyPage.tsx). Landing page now downloads 1 JS file of 534 KB / 161 KB gzip, down from 1,633 KB / 424 KB gzip. Explore loads its 606 KB file on demand. A page file missing after a Publish reloads once (at most once per minute, so no loops), then shows the normal error screen. Verified on the production build: route-split E2E 8/8, rate review 59/59, theme/contrast 53/53 (0 violations, 12 pages × 2 themes)
 ## Carry-over queue (from Sept 26 handoff, still open)
 - [ ] BILL-1: Migrate requireTier/tierOf gates to effectiveEntitlement; constrain account.setTier; server/stripeBilling.test.ts
 - [ ] BILL-2: Stripe test-mode prices + hosted flow E2E (owner decisions: prices, tax, terms) — no live Stripe
