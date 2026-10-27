@@ -38,7 +38,7 @@ describe("official UNS SGS-family schedules (sheets 202–204)", () => {
       expect(s(id).optionalSchedule).toBe(true);
       expect(resolveRateCode("UNS Electric", code)).toMatchObject({ urdbId: id, match: "exact" });
     }
-    expect(SEED_VERSION).toBe("2026.10.5");
+    expect(SEED_VERSION).toBe("2026.10.6");
   });
 
   it("SGS-TOU prices each delivery block at the filed sheet 202-1 totals", () => {

@@ -169,8 +169,10 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     utilityName: "Louisville Gas and Electric (LG&E)",
     commodity: "electric",
     state: "KY",
-    sourceUrl: "https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Electric-Rates-072126.pdf",
-    sourceLabel: "LG&E P.S.C. Electric No. 13 (KY PSC filed)",
+    // RATE-2 (Oct 26): current book (P.S.C. Electric No. 14, eff 2026-09-01),
+    // linked from https://lge-ku.com/regulatory/rates-and-tariffs.
+    sourceUrl: "https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Electric-Rates-083126.pdf",
+    sourceLabel: "LG&E P.S.C. Electric No. 14 (KY PSC filed)",
     governsUrdbIds: ["lge-rs", "lge-rtod-energy", "lge-gs"],
     adjustorCycle: "annual",
     verifyCadenceDays: 120,
@@ -180,7 +182,8 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     utilityName: "Louisville Gas and Electric (LG&E)",
     commodity: "gas",
     state: "KY",
-    sourceUrl: "https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Gas-Rates-062226.pdf",
+    // RATE-2 (Oct 26): current book (Gas No. 14; rates eff 2026-08-14, GSCC 2026-08-01).
+    sourceUrl: "https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Gas-Rates-082726.pdf",
     sourceLabel: "LG&E P.S.C. Gas No. 14 (KY PSC filed; GSC files quarterly)",
     governsUrdbIds: ["lge-rgs", "lge-cgs"],
     adjustorCycle: "quarterly_gsc",
@@ -321,6 +324,14 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
   },
 ];
 
+/** RATE-2: when the registry points a source at a different document, the
+ * stored fingerprint belongs to the old page — clear it (exactly as the
+ * agent's source_moved path does) so the next sweep re-baselines instead of
+ * raising a false "change detected". Same URL → no runtime-state change. */
+export function registryUrlChangeReset(prevUrl: string | null | undefined, nextUrl: string):
+  { contentFingerprint: null; fingerprintAt: null; consecutiveFailures: 0 } | Record<string, never> {
+  return prevUrl !== nextUrl ? { contentFingerprint: null, fingerprintAt: null, consecutiveFailures: 0 } : {};
+}
 /** Idempotent boot/refresh registration: missing sources are added; existing
  * rows keep their runtime state (fingerprints, failure counts) but URL/label/
  * governs lists are re-asserted so seed edits propagate. */
@@ -358,6 +369,10 @@ export async function registerRateSources(): Promise<{ inserted: number; updated
           adjustorCycle: s.adjustorCycle,
           verifyCadenceDays: s.verifyCadenceDays,
           sourceKind: s.sourceKind ?? "tariff",
+          // RATE-2: a corrected URL is a different document — drop the old
+          // page's fingerprint (as source_moved does) so the next sweep
+          // re-baselines instead of reporting a false "change detected".
+          ...registryUrlChangeReset(existing[0].sourceUrl, s.sourceUrl),
         })
         .where(eq(rateSources.sourceKey, s.sourceKey));
       updated++;

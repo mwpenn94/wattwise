@@ -594,6 +594,9 @@ interface MonthScan {
 
 export function costOnTariff(points: IntervalPoint[], structure: TariffStructure, opts?: TariffPricingOptions): CostResult {
   const tz = opts?.tz ?? DEFAULT_TZ;
+  // RATE-2: TOU energy periods may be filed on a fixed clock (LG&E RTOD: EST
+  // year-round); months and demand windows stay on the meter's clock.
+  const touTz = structure.touTimezone ?? tz;
   const disclosures: string[] = [];
   const touFallback = { used: false };
   // Oct 26 (performance, identical results): the observed-only re-pricing
@@ -712,14 +715,14 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       for (const p of pts) {
         if (p.usage >= 0) {
           sImportedKwh += p.usage;
-          if (!structure.energyBlocks?.length) sEnergy += p.usage * touRate(structure, p.ts, tz, scanFallback);
+          if (!structure.energyBlocks?.length) sEnergy += p.usage * touRate(structure, p.ts, touTz, scanFallback);
         } else {
           // Cycle 5: export asymmetry — credit at export rate only
           const er = structure.exportRate;
           if (!er || er.type === "zero") {
             // no credit
           } else if (er.type === "net_metering_retail") {
-            sExport += -p.usage * touRate(structure, p.ts, tz, scanFallback);
+            sExport += -p.usage * touRate(structure, p.ts, touTz, scanFallback);
           } else {
             sExport += -p.usage * er.ratePerKwh;
           }
@@ -736,7 +739,10 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
     // Oct 25: TOU schedules whose delivery price steps by monthly usage block
     // (UNS SGS-TOU) carry the top block in their TOU rates; the ≤0 block
     // adjustments bring each month's kWh back to its filed block price.
-    if (!structure.energyBlocks?.length && structure.energyBlockAdjustments?.length) {
+    // RATE-2: adjustments may be limited to filed months (LG&E CGS Apr–Oct).
+    const adjMonths = structure.energyBlockAdjustmentMonths;
+    if (!structure.energyBlocks?.length && structure.energyBlockAdjustments?.length &&
+        (!adjMonths?.length || adjMonths.includes(Number(mk.slice(5, 7))))) {
       mEnergy += monthlyBlockCharge(mImportedKwh, structure.energyBlockAdjustments);
     }
     // Demand charges: each charge computes its OWN windowed peak (windowPeak is

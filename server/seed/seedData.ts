@@ -13,7 +13,8 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.10.5"; // Oct 25: official UNS SGS-TOU / SGS-Demand / SGS-Demand-TOU (sheets 202–204, Decision 79277)
+export const SEED_VERSION = "2026.10.6"; // Oct 26 (RATE-2): Southwest Gas G-5 (378th Rev Sheet 11, eff 2026-09-01) and LG&E RS/RTOD-Energy/GS (Electric No. 14, eff 2026-09-01) + RGS/CGS (Gas No. 14, eff 2026-08-14; GSCC 2026-08-01) re-read from the official sheets
+// previous: Oct 25: official UNS SGS-TOU / SGS-Demand / SGS-Demand-TOU (sheets 202–204, Decision 79277)
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
 export const EGRID_FACTORS: Array<{
@@ -955,30 +956,35 @@ export const SEED_TARIFFS: SeedTariff[] = [
     source: UNS_OFFICIAL_SOURCE,
   },
   /* -------------------- LG&E (Louisville Gas and Electric, KY) ----------- */
-  // Verified against LG&E's filed electric tariff (P.S.C. Electric No. 13),
-  // rates effective with service on/after Feb 16 2026, published Jul 2026:
-  // https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Electric-Rates-072126.pdf
+  // RATE-2 (Oct 26): re-verified against LG&E's current filed electric tariff
+  // (P.S.C. Electric No. 14), rates for service on/after Sept 1 2026 (KY PSC
+  // Case 2025-00341, Aug 18 2026 FAC order raised base energy by $0.00127/kWh;
+  // the increase is IN these sheets). Current book (linked from
+  // https://lge-ku.com/regulatory/rates-and-tariffs):
+  // https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Electric-Rates-083126.pdf
+  // Monthly FAC/OSS (Oct 2026 billed $0.00099/kWh), DSM, ECR and other
+  // adjustment clauses are billed separately and are not in these rows.
   // Basic Service Charges are filed PER DAY; the engine's fixedMonthly uses
   // the average-month equivalent (×30.437 days) — disclosed in labels.
   {
     urdbId: "lge-rs",
     utilityName: "Louisville Gas and Electric (LG&E)",
-    name: "Residential Service (RS) — $0.47/day BSC billed monthly-equivalent",
+    name: "Residential Service (RS) — $0.48/day BSC billed monthly-equivalent",
     sector: "residential",
     commodity: "electric",
     state: "KY",
     peakKwMin: null,
     peakKwMax: null,
     structure: {
-      fixedMonthly: 14.31, // $0.47/day × 30.437 avg days
+      fixedMonthly: 14.61, // $0.48/day × 30.437 avg days (Sheet No. 5, 2nd Rev)
       energy: [
-        // Filed total $0.11362/kWh = infrastructure $0.07476 + variable $0.03886.
-        { label: "All energy (infra $0.07476 + variable $0.03886)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.11362 },
+        // Filed total $0.11499/kWh = infrastructure $0.07481 + variable $0.04018.
+        { label: "All energy (infra $0.07481 + variable $0.04018)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.11499 },
       ],
       demand: [],
     },
     freshness: "urdb_stale",
-    effectiveDate: "2026-02-16",
+    effectiveDate: "2026-09-01",
   },
   {
     urdbId: "lge-rtod-energy",
@@ -990,81 +996,101 @@ export const SEED_TARIFFS: SeedTariff[] = [
     peakKwMin: null,
     peakKwMax: null,
     structure: {
-      fixedMonthly: 14.31, // $0.47/day × 30.437 avg days
+      fixedMonthly: 14.61, // $0.48/day × 30.437 avg days (Sheet No. 6, 2nd Rev)
+      // Sheet No. 6.1: rating periods are Eastern Standard Time year-round, so
+      // during daylight time each period runs one clock hour later. A legal
+      // holiday on a weekday is treated as a weekday (no holiday exclusions).
+      touTimezone: "Etc/GMT+5",
       energy: [
-        // LG&E RTOD on-peak: 1pm–7pm weekdays (filed hours); off-peak all other hours.
-        { label: "On-peak 1-7pm wkdy", months: ALL_MONTHS, daysOfWeek: WEEKDAYS, hourStart: 13, hourEnd: 19, ratePerUnit: 0.19172 },
-        { label: "Off-peak", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.09177 },
+        // On-peak periods first (the dispatch signal takes the first match).
+        { label: "On-peak Apr–Oct wkdy 1–5 pm EST", months: [4, 5, 6, 7, 8, 9, 10], daysOfWeek: WEEKDAYS, hourStart: 13, hourEnd: 17, ratePerUnit: 0.19307 },
+        { label: "On-peak Nov–Mar wkdy 6–10 am EST", months: [11, 12, 1, 2, 3], daysOfWeek: WEEKDAYS, hourStart: 6, hourEnd: 10, ratePerUnit: 0.19307 },
+        { label: "On-peak Nov–Mar wkdy 6–10 pm EST", months: [11, 12, 1, 2, 3], daysOfWeek: WEEKDAYS, hourStart: 18, hourEnd: 22, ratePerUnit: 0.19307 },
+        // Off-peak $0.09312 = infrastructure $0.05294 + variable $0.04018; on-peak $0.15289 + $0.04018.
+        { label: "Off-peak (all other hours; weekends)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.09312 },
       ],
       demand: [],
+      notes: ["LG&E files RTOD-Energy hours in Eastern Standard Time all year: during daylight saving time, on-peak runs 2–6 pm (April–October) on the clock."],
     },
     freshness: "urdb_stale",
-    effectiveDate: "2026-02-16",
+    effectiveDate: "2026-09-01",
   },
   {
     urdbId: "lge-gs",
     utilityName: "Louisville Gas and Electric (LG&E)",
-    name: "General Service (GS) single-phase — $1.29/day BSC billed monthly-equivalent",
+    name: "General Service (GS) single-phase — $1.35/day BSC billed monthly-equivalent",
     sector: "commercial",
     commodity: "electric",
     state: "KY",
     peakKwMin: null,
     peakKwMax: 50,
     structure: {
-      fixedMonthly: 39.26, // $1.29/day single-phase × 30.437 avg days ($2.05/day three-phase not modeled)
+      fixedMonthly: 41.09, // $1.35/day single-phase × 30.437 avg days ($2.10/day three-phase not modeled; Sheet No. 10, 2nd Rev)
       energy: [
-        // Filed total $0.13248/kWh = infrastructure $0.09353 + variable $0.03895.
-        { label: "All energy (infra $0.09353 + variable $0.03895)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.13248 },
+        // Filed total $0.13390/kWh = infrastructure $0.09360 + variable $0.04030.
+        { label: "All energy (infra $0.09360 + variable $0.04030)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.1339 },
       ],
       demand: [],
     },
     freshness: "urdb_stale",
-    effectiveDate: "2026-02-16",
+    effectiveDate: "2026-09-01",
   },
-  // Verified against LG&E's filed gas tariff (P.S.C. Gas No. 14), rates
-  // effective with service on/after May 1 2026 (Case No. 2026-00064):
-  // https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Gas-Rates-062226.pdf
+  // RATE-2 (Oct 26): re-verified against LG&E's current filed gas tariff
+  // (P.S.C. Gas No. 14), rates for service on/after Aug 14 2026 (KY PSC Case
+  // 2025-00114 reconsideration order). Gas Supply Cost Component (Sheet No. 85,
+  // 2nd Rev) $0.57318/Ccf effective Aug 1 2026; it is refiled every three
+  // months (Feb/May/Aug/Nov 1) — re-verify at the quarterly GSC cadence.
+  // https://lge-ku.com/sites/default/files/media/files/downloads/LGE-Gas-Rates-082726.pdf
   // Filed unit is $ per 100 cubic feet (Ccf); the engine prices gas meters in
   // THERMS, so rates are converted at 1 Ccf ≈ 1.037 therms — disclosed in labels.
   {
     urdbId: "lge-rgs",
     utilityName: "Louisville Gas and Electric (LG&E)",
-    name: "Residential Gas Service (RGS) — filed $1.20620/Ccf priced per therm",
+    name: "Residential Gas Service (RGS) — filed $1.21230/Ccf priced per therm",
     sector: "residential",
     commodity: "gas",
     state: "KY",
     peakKwMin: null,
     peakKwMax: null,
     structure: {
-      fixedMonthly: 21.91, // $0.72/day per delivery point × 30.437 avg days
+      fixedMonthly: 21.91, // $0.72/day per delivery point × 30.437 avg days (Sheet No. 5, 3rd Rev)
       energy: [
-        // $1.20620/Ccf (distribution $0.63684 + gas supply $0.56936) ÷ 1.037 therms/Ccf.
-        { label: "All gas ($1.20620/Ccf ÷ 1.037 therms/Ccf; incl. gas supply cost component)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 1.1632 },
+        // $1.21230/Ccf (distribution $0.63912 + gas supply $0.57318) ÷ 1.037 therms/Ccf.
+        { label: "All gas ($1.21230/Ccf ÷ 1.037 therms/Ccf; incl. gas supply cost component)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 1.169 },
       ],
       demand: [],
     },
     freshness: "urdb_stale",
-    effectiveDate: "2026-05-01",
+    effectiveDate: "2026-08-14",
   },
   {
     urdbId: "lge-cgs",
     utilityName: "Louisville Gas and Electric (LG&E)",
-    name: "Firm Commercial Gas Service (CGS) <5,000 cf/hr — filed $1.00700/Ccf priced per therm",
+    name: "Firm Commercial Gas Service (CGS) <5,000 cf/hr — filed $1.01178/Ccf priced per therm",
     sector: "commercial",
     commodity: "gas",
     state: "KY",
     peakKwMin: null,
     peakKwMax: null,
     structure: {
-      fixedMonthly: 88.27, // $2.90/day per delivery point (<5,000 cf/hr meters) × 30.437 avg days
+      fixedMonthly: 88.88, // $2.92/day per delivery point (<5,000 cf/hr meters) × 30.437 avg days (Sheet No. 10.1, 3rd Rev)
       energy: [
-        // $1.00700/Ccf (distribution $0.43764 + gas supply $0.56936) ÷ 1.037 therms/Ccf.
-        { label: "All gas ($1.00700/Ccf ÷ 1.037 therms/Ccf; incl. gas supply cost component)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.9711 },
+        // $1.01178/Ccf (distribution $0.43860 + gas supply $0.57318) ÷ 1.037 therms/Ccf.
+        { label: "All gas ($1.01178/Ccf ÷ 1.037 therms/Ccf; incl. gas supply cost component)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.9757 },
       ],
+      // Sheet No. 10.1: in the April–October billing periods, distribution on
+      // monthly usage over 100,000 cubic feet (1,000 Ccf ≈ 1,037 therms) is
+      // reduced by $0.05/Ccf (≈ $0.0482/therm).
+      energyBlockAdjustments: [
+        { upToKwh: 1037, ratePerUnit: 0 },
+        { upToKwh: null, ratePerUnit: -0.0482 },
+      ],
+      energyBlockAdjustmentMonths: [4, 5, 6, 7, 8, 9, 10],
       demand: [],
+      notes: ["April–October: usage over 100,000 cubic feet a month (about 1,037 therms) is billed $0.05 per 100 cubic feet less for distribution, per LG&E Sheet No. 10.1."],
     },
     freshness: "urdb_stale",
-    effectiveDate: "2026-05-01",
+    effectiveDate: "2026-08-14",
   },
   /* -------------------- UNS Gas (UniSource, AZ) --------------------------- */
   // Verified against the UNS Gas Statement of Rates (Tariff Sheet 1.1,
@@ -1118,6 +1144,14 @@ export const SEED_TARIFFS: SeedTariff[] = [
   {
     // stable id so the swgas-az-gas currency source's governsUrdbIds binds to
     // this row (was null — change flags could never reach it)
+    // RATE-2 (Oct 26): re-read from Southwest Gas's official Arizona Statement
+    // of Rates (as of 10/01/2026), 378th Revised A.C.C. Sheet No. 11 (cancels
+    // 377th), issued Aug 26 2026, effective Sept 1 2026:
+    // https://www.swgas.com/1409184757234/Statement-of-Rates-AZ-2026-10012026.pdf
+    // G-5 Basic Service Charge $10.70/month; commodity per therm, all usage:
+    // Delivery $1.23580, Rate Adjustment ($0.03556), DOT ($0.00092),
+    // DCA $0.16269, Monthly Gas Cost $0.22836 = currently effective $1.59037.
+    // The Monthly Gas Cost changes monthly (monthly_pga source cadence).
     urdbId: "swgas-az-res",
     utilityName: "Southwest Gas",
     name: "G-5 Residential Gas Service",
@@ -1127,14 +1161,15 @@ export const SEED_TARIFFS: SeedTariff[] = [
     peakKwMin: null,
     peakKwMax: null,
     structure: {
-      fixedMonthly: 12.7,
+      fixedMonthly: 10.7,
       energy: [
-        { label: "All gas", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 1.1245 },
+        { label: "All gas (delivery $1.23580 − adj $0.03556 − DOT $0.00092 + DCA $0.16269 + gas cost $0.22836)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 1.59037 },
       ],
       demand: [],
+      notes: ["Southwest Gas G-5 currently effective tariff rate from Sheet No. 11 (effective Sept 1, 2026). The monthly gas cost component changes monthly; taxes and franchise fees are not included."],
     },
     freshness: "urdb_stale",
-    effectiveDate: "2024-01-01",
+    effectiveDate: "2026-09-01",
   },
   {
     // stable id for currency-source binding (same fix as swgas-az-res)

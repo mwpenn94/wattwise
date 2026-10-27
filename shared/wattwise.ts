@@ -255,6 +255,20 @@ export interface TariffStructure {
    */
   energyBlockAdjustments?: EnergyBlock[];
   /**
+   * Oct 26 (RATE-2): calendar months (1-12) in which energyBlockAdjustments
+   * apply; omitted = every month. E.g. LG&E CGS reduces distribution on
+   * monthly usage over 100,000 cf only in the April–October billing periods.
+   */
+  energyBlockAdjustmentMonths?: number[];
+  /**
+   * Oct 26 (RATE-2): IANA zone in which the filed TOU ENERGY periods are
+   * defined, when it differs from the meter's local clock. E.g. LG&E files
+   * RTOD hours in Eastern Standard Time year-round ("Etc/GMT+5"), so during
+   * daylight time each period is one clock hour later. Billing months and
+   * demand windows stay on the meter's clock. Omitted = meter clock.
+   */
+  touTimezone?: string;
+  /**
    * Oct 25: customer-elected variant (demand or time-of-use options); never
    * used as the default current-rate basis when an account's rate is not on file.
    */

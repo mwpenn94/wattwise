@@ -265,6 +265,9 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025, tz:
   const out: number[] = new Array(8760);
   const start = new Date(refYear, 0, 1).getTime();
   const fallbackRate = widestCoverageRate(structure);
+  // RATE-2: filed TOU energy periods may use a fixed clock (LG&E RTOD: EST
+  // year-round) — same rule as costOnTariff; demand windows stay on tz.
+  const touTz = structure.touTimezone ?? tz;
   for (let h = 0; h < 8760; h++) {
     const ts = start + h * 3600_000;
     // Batch-39 (pass 1660): the dispatch signal MUST evaluate TOU windows in
@@ -277,6 +280,7 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025, tz:
     // scenario costing +$2.1k/yr instead of saving).
     const lp = localParts(ts, tz);
     const d = { getMonth: () => lp.month - 1, getDay: () => lp.dow, getHours: () => lp.hour };
+    const tp = touTz === tz ? lp : localParts(ts, touTz);
     // Batch-20 (pass 549): explicit matched flag instead of the `rate === 0`
     // sentinel — a legitimately zero-priced period (e.g. free-nights TOU rider)
     // matched but was then clobbered by the widest-coverage fallback, biasing
@@ -287,9 +291,9 @@ export function hourlyRateSignal(structure: TariffStructure, refYear = 2025, tz:
     let rate = 0;
     let matched = false;
     for (const p of structure.energy) {
-      if (!p.months.includes(d.getMonth() + 1)) continue;
-      if (!p.daysOfWeek.includes(d.getDay())) continue;
-      if (inHourWindow(d.getHours(), p.hourStart, p.hourEnd)) {
+      if (!p.months.includes(tp.month)) continue;
+      if (!p.daysOfWeek.includes(tp.dow)) continue;
+      if (inHourWindow(tp.hour, p.hourStart, p.hourEnd)) {
         rate = p.ratePerUnit;
         matched = true;
         break;
