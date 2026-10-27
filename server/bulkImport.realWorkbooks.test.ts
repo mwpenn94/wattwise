@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import { createReadStream, existsSync, readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, like, lt, sql } from "drizzle-orm";
 import { appRouter } from "./routers";
 import { getDb } from "./db";
 import * as h from "./dbHelpers";
@@ -19,19 +19,28 @@ const paths=["/home/ubuntu/upload/1026KUSD-IntervalDataRequestPLL10202026firstha
 const openId=`fe-real-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
 let userId:number|undefined,server:Server;
 let caller:ReturnType<typeof appRouter.createCaller>;
+// A run that is killed mid-test (e.g. a superseded full-suite run) never
+// reaches afterAll, so each run first purges this test's own fixture accounts
+// left by earlier runs. Only rows whose openId AND email carry this fixture's
+// markers, and that are over 3 hours old (no concurrent run lasts that long).
+async function purgeFixture(id:number){const d=(await getDb())!;for(const site of await h.listSites(id))await h.deleteSite(site.id,id);
+ for(const table of [importBatchSheets,importBatchFiles,importBatches,importSiteGroups,uploads,entities,billingAccounts])await d.delete(table).where(eq(table.userId,id));
+ await d.delete(users).where(eq(users.id,id));}
+async function purgeStaleFixtures(){const d=(await getDb())!;
+ const stale=await d.select({id:users.id}).from(users).where(and(like(users.openId,"fe-real-%"),like(users.email,"%@fe-fixture.invalid"),lt(users.createdAt,new Date(Date.now()-3*3600_000))));
+ for(const u of stale)await purgeFixture(u.id);}
 beforeAll(async()=>{
  if(!paths.every(existsSync))return;
+ await purgeStaleFixtures();
  store.dir=mkdtempSync(path.join(tmpdir(),"meterly-fe-"));
  server=createServer((req,res)=>{const filename=path.basename(req.url??"");const file=path.join(store.dir,filename);if(!existsSync(file)){res.writeHead(404).end();return;}res.writeHead(200,{"Content-Type":"application/octet-stream"});createReadStream(file).pipe(res);});
  await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));store.url=`http://127.0.0.1:${(server.address() as {port:number}).port}`;
  const d=(await getDb())!;const [r]=await d.insert(users).values({openId,name:"Isolated FE real workbook fixture",email:`${openId}@fe-fixture.invalid`,tier:"pro"});userId=Number(r.insertId);
  await d.insert(billingAccounts).values({userId,plan:"founding",entitlementTier:"pro",status:"active"});
  caller=appRouter.createCaller({user:{id:userId,openId,role:"user",tier:"pro",name:openId,email:`${openId}@fe-fixture.invalid`,loginMethod:"test",createdAt:new Date(),updatedAt:new Date(),lastSignedIn:new Date()},req:{headers:{},protocol:"http"},res:{cookie(){},clearCookie(){}}} as unknown as TrpcContext);
-},30_000);
+},300_000);
 afterAll(async()=>{
- if(userId){const d=(await getDb())!;for(const site of await h.listSites(userId))await h.deleteSite(site.id,userId);
-  for(const table of [importBatchSheets,importBatchFiles,importBatches,importSiteGroups,uploads,entities,billingAccounts])await d.delete(table).where(eq(table.userId,userId));
-  await d.delete(users).where(eq(users.id,userId));}
+ if(userId)await purgeFixture(userId);
  if(server)await new Promise<void>(resolve=>server.close(()=>resolve()));if(store.dir)rmSync(store.dir,{recursive:true,force:true});
 },120_000);
 async function stageBoth(){let batchId:number|undefined;for(const file of paths){const r=await caller.bulkImport.stageFile({batchId,filename:path.basename(file),contentBase64:readFileSync(file).toString("base64")});batchId=r.batchId;}return batchId!;}

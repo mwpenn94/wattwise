@@ -46,6 +46,15 @@ export default function Upload() {
   // R2 #2: the source timestamp convention is explicit, never silently assumed.
   const [clockBasis, setClockBasis] = useState<"auto" | "start" | "end">("auto");
   const [mode, setMode] = useState<"single" | "bulk">(() => (new URLSearchParams(window.location.search).get("mode") === "bulk" ? "bulk" : "single"));
+  // UNF-1: an unfinished bulk import continues only while its panel is open, so
+  // open Many-sites once when one exists (unless the link asked for a mode).
+  const unfinishedBulk = trpc.bulkImport.unfinished.useQuery(undefined, { staleTime: 10_000 });
+  const autoOpenedBulk = useRef(new URLSearchParams(window.location.search).has("mode"));
+  useEffect(() => {
+    if (autoOpenedBulk.current || !unfinishedBulk.data) return;
+    autoOpenedBulk.current = true;
+    if (unfinishedBulk.data.batches.length > 0) setMode("bulk");
+  }, [unfinishedBulk.data]);
   // TEL-1: links from "Utility services on this site" carry ?commodity=gas|water|electric;
   // that utility is preselected for interval files and bills (changeable here).
   const [commodity, setCommodity] = useState<"auto" | Commodity>(() => {

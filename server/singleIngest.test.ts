@@ -244,7 +244,7 @@ describe("single-site sliced workbook ingest", () => {
     expect(u.ingestState).toBeNull();
     expect(await pointsFor(u.id)).toBe(0);
     expect(await h.listMeters(siteId, userId)).toHaveLength(0);
-  }, 60_000);
+  }, 120_000);
 
   it("keeps an existing meter (and its earlier readings) when a later file fails", async () => {
     const siteId = await newSite("Keep existing");

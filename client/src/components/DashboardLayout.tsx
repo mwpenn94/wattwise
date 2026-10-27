@@ -2,6 +2,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import AlertsInbox from "@/components/AlertsInbox";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { UnfinishedImportNotice } from "@/components/UnfinishedImportNotice";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -364,6 +365,7 @@ function DashboardLayoutContent({
           </div>
         )}
         <EsTranslateTip />
+        <UnfinishedImportNotice />
         <main className="flex-1 p-4">{children}</main>
         {/* §5c-1b: privacy/terms/contact reachable from every page, console included */}
         <footer className="border-t border-border/60 px-4 py-3 print:hidden">

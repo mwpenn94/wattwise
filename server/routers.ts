@@ -1950,6 +1950,11 @@ export const appRouter = router({
       .mutation(({ ctx, input }) => bulkImport.commit(ctx.user, input)),
     status: protectedProcedure.input(z.object({ batchId: z.number().int() })).query(({ ctx, input }) => bulkImport.status(ctx.user.id, input.batchId)),
     list: protectedProcedure.query(({ ctx }) => bulkImport.listBatches(ctx.user.id)),
+    /** UNF-1: unfinished imports, for the app-wide "Continue import" notice. */
+    unfinished: protectedProcedure.query(async ({ ctx }) => {
+      const [batches, files] = await Promise.all([bulkImport.unfinishedBatches(ctx.user.id), singleIngest.pausedUploadsFor(ctx.user.id)]);
+      return { batches, files };
+    }),
   }),
   uploads: router({
     // Oct 25: lease internals of sliced single-site imports never leave the

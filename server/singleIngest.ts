@@ -514,6 +514,21 @@ export async function assertNotImporting(uploadId: number, userId: number) {
   if (p?.active) throw new TRPCError({ code: "CONFLICT", message: "This file is still importing. Wait a moment for the current step to finish, then delete it." });
 }
 
+/**
+ * UNF-1: the owner's paused single-site workbook imports (not being worked on
+ * right now). analysis.run refuses a site while one exists, so the app-wide
+ * notice points to Upload history, where each can be continued or removed.
+ */
+export async function pausedUploadsFor(userId: number) {
+  const d = await database();
+  const rows = await d.select({ id: uploads.id, siteId: uploads.siteId, filename: uploads.filename, ingestState: uploads.ingestState, status: uploads.status }).from(uploads)
+    .where(and(eq(uploads.userId, userId), eq(uploads.status, "pending"), isNotNull(uploads.ingestState))).orderBy(desc(uploads.id)).limit(10);
+  return rows.flatMap((r) => {
+    const p = ingestProgressOf(r);
+    return p && !p.active ? [{ uploadId: r.id, siteId: r.siteId, filename: r.filename, sheetsDone: p.sheetsDone, sheetsTotal: p.sheetsTotal, awaitingChoice: p.awaitingChoice }] : [];
+  });
+}
+
 /** Sites with an unfinished sliced upload must not be analyzed on partial data. */
 export async function unfinishedUploadFor(siteId: number) {
   const d = await database();

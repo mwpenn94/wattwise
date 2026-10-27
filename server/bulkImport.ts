@@ -868,6 +868,37 @@ export async function status(userId:number,batchId:number) {
   const paused=b.status==="committing"&&b.workerToken==null&&(b.leaseUntil??0)>Date.now();
   return {batch:{id:b.id,status:b.status,groupingMode:b.groupingMode,planVersion:b.planVersion,summary:b.summary as CommitSummary|null,plan:b.plan as {sites:PreviewSite[];totals:Record<string,number>;planLimit:{ok:boolean;limit:number|null;currentSites:number;newSites:number}}|null,error:b.error,createdAt:b.createdAt,completedAt:b.completedAt},running:isRunning,paused,stalled:b.status==="committing"&&!isRunning&&!paused,files:files.map(f=>({id:f.id,filename:f.filename,sheets:f.sheetCount,sizeBytes:f.sizeBytes})),sheets:sheets.map(s=>({id:s.id,fileId:s.fileId,sheetName:cleanSheetName(s.sheetName),facility:s.facilityLabel,address:s.addressRaw,servicePointId:s.servicePointId,rateScheduleCode:s.rateScheduleCode,status:s.status,siteId:s.siteId,meterId:s.meterId,pointsWritten:s.pointsWritten,detail:s.detail,overrideSiteId:s.overrideSiteId,overrideGroupKey:s.overrideGroupKey,sourceClock:s.sourceClock,validation:s.validation}))};
 }
+/**
+ * UNF-1 (Oct 26): imports are request-driven (512 MiB production), so a bulk
+ * import only advances while its Upload page is open. This lists the owner's
+ * unfinished imports in plain terms so every console page can say so and
+ * offer "Continue import". Read-only; never resumes anything by itself.
+ */
+export async function unfinishedBatches(userId:number) {
+  const d=await db();
+  const rows=await d.select({id:importBatches.id,summary:importBatches.summary,workerToken:importBatches.workerToken,leaseUntil:importBatches.leaseUntil,updatedAt:importBatches.updatedAt})
+    .from(importBatches).where(and(eq(importBatches.userId,userId),eq(importBatches.status,"committing"))).orderBy(desc(importBatches.id)).limit(3);
+  if (!rows.length) return [];
+  const files=await d.select({batchId:importBatchFiles.batchId,filename:importBatchFiles.filename}).from(importBatchFiles)
+    .where(and(eq(importBatchFiles.userId,userId),inArray(importBatchFiles.batchId,rows.map(r=>r.id))));
+  const now=Date.now();
+  return rows.map(r=>{
+    const s=r.summary as CommitSummary|null;
+    return {
+      batchId:r.id,
+      filenames:files.filter(f=>f.batchId===r.id).map(f=>f.filename),
+      phase:s?.phase??"importing",
+      sheetsDone:s?.sheetsDone??0,
+      sheetsTotal:s?.sheetsTotal??0,
+      sites:s?.siteIds?.length??0,
+      analysesRun:s?.analysesRun??0,
+      runAnalysis:s?.options?.runAnalysis!==false,
+      /** a request is working on it right now (this or another tab/device) */
+      running:r.workerToken!=null&&(r.leaseUntil??0)>now,
+      updatedAt:r.updatedAt,
+    };
+  });
+}
 export async function listBatches(userId:number) {
   const rows=await (await db()).select().from(importBatches).where(eq(importBatches.userId,userId)).orderBy(desc(importBatches.id)).limit(10);
   return rows.map(b=>({id:b.id,status:b.status,groupingMode:b.groupingMode,summary:b.summary as CommitSummary|null,createdAt:b.createdAt,completedAt:b.completedAt,running:b.workerToken!=null&&(b.leaseUntil??0)>Date.now()}));
