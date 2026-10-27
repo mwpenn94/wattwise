@@ -1057,7 +1057,9 @@ export const appRouter = router({
       const { site } = await h.getSiteAsViewer(input.siteId, ctx.user.id);
       let row = await propertyFacts.getPropertyFactsRow(site.id);
       const current = row && row.locationRevision === site.locationRevision &&
-        (row.facts as propertyFacts.PropertyFactsResult | null)?.inputKey === propertyFacts.factsInputKey(site);
+        (row.facts as propertyFacts.PropertyFactsResult | null)?.inputKey === propertyFacts.factsInputKey(site) &&
+        // a county added since these facts were saved (e.g. Pima, Oct 26) → look it up now
+        !propertyFacts.needsCountyCoverageRefresh(row.facts as propertyFacts.PropertyFactsResult | null, site.state ?? null);
       if (!current && propertyFacts.propertyFactsNetworkAvailable()) {
         row = await propertyFacts.refreshPropertyFacts(site.id).catch(() => row);
       }

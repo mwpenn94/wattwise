@@ -7,7 +7,7 @@
  * exercise the same winter-average math on the shared helpers plus a full
  * pipeline run over a seeded water meter.
  */
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
 import { getDb } from "./db";
 import { users, sites, meters, uploads, intervals, opportunities } from "../drizzle/schema";
@@ -23,6 +23,13 @@ beforeAll(async () => {
   await db.insert(users).values({ openId: "sewer-test", name: "sewer-test", tier: "pro" as never }).onDuplicateKeyUpdate({ set: { name: "sewer-test" } });
   const [u] = await db.select().from(users).where(eq(users.openId, "sewer-test"));
   userId = u.id;
+});
+
+// The fixture user exists only for this spec — remove everything it created
+// (sites, meters, intervals, opportunities and the detached upload rows) so
+// fixtures never accumulate across runs.
+afterAll(async () => {
+  if (userId) await h.deleteAllUserData(userId).catch(() => {});
 });
 
 async function makeWaterSite(withWinter: boolean) {

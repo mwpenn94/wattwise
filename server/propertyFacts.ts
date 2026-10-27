@@ -8,8 +8,9 @@
  * analysis with its basis disclosed (Honesty Charter).
  *
  * Sources (free, public, no credentials):
- *  - County assessor parcel GIS via an adapter registry (Mohave County, AZ
- *    first: official layer 38 "ParcelQueryLayer"). Parcel, owner of record,
+ *  - County assessor parcel GIS via an adapter registry: Mohave County, AZ
+ *    (official layer 38 "ParcelQueryLayer") and Pima County, AZ (the county's
+ *    official "Parcels - Regional" layer, PAREGION). Parcel, owner of record,
  *    land use, land area, assessed value, tax year.
  *  - FEMA USA Structures (national): per-building footprint, occupancy class,
  *    situs address, height where measured.
@@ -39,6 +40,17 @@ export type JsonFetcher = (url: string, body?: URLSearchParams) => Promise<unkno
 const FETCH_UA = "Meterly/1.0 (property facts; https://meterly.manus.space)";
 const TIMEOUT_MS = 12_000;
 export const MOHAVE_PARCEL_LAYER = "https://mcgis.mohave.gov/arcgis/rest/services/Mohave/MapServer/38";
+/** Pima County ITD GIS "Parcels - Regional" (PAREGION, nightly assessor join),
+ * as published by the City of Tucson GIS. The county's own host
+ * (gisdata.pima.gov) answers server requests with a bot challenge, so the
+ * same official layer is read from the city's public service instead.
+ * Primary: the URL ArcGIS Online registers for the city's public item
+ * 321414f3568b42f3bb29bf9859f03b66. Fallback: the city's own GIS host (same
+ * layer), which was unreachable from some networks on Oct 26. */
+export const PIMA_PARCEL_LAYER =
+  "https://utility.arcgis.com/usrsvcs/servers/321414f3568b42f3bb29bf9859f03b66/rest/services/PublicMaps/PropertyHousing/MapServer/17";
+export const PIMA_PARCEL_LAYER_DIRECT = "https://gis.tucsonaz.gov/arcgis/rest/services/PublicMaps/PropertyHousing/MapServer/17";
+const PIMA_PARCEL_LAYERS = [PIMA_PARCEL_LAYER, PIMA_PARCEL_LAYER_DIRECT];
 export const USA_STRUCTURES_LAYER =
   "https://services2.arcgis.com/FiaPA4ga0iQKduv3/arcgis/rest/services/USA_Structures_View/FeatureServer/0";
 const NEARBY_RADIUS_M = 200;
@@ -52,7 +64,7 @@ export const PROPERTY_FACTS_VERSION = 1;
 /* ------------------------------------------------------------------ */
 /* Sources                                                             */
 /* ------------------------------------------------------------------ */
-export type PropertySourceId = "mohave_assessor_gis" | "fema_usa_structures";
+export type PropertySourceId = "mohave_assessor_gis" | "pima_assessor_gis" | "fema_usa_structures";
 export interface PropertySource {
   id: PropertySourceId;
   label: string;
@@ -67,6 +79,13 @@ export const PROPERTY_SOURCES: Record<PropertySourceId, PropertySource> = {
     publisher: "Mohave County (official county GIS)",
     url: "https://www.arcgis.com/home/item.html?id=e47d94a4bcae402f8236c93d3b86834c",
     terms: "Public county data for general reference, provided without warranty.",
+  },
+  pima_assessor_gis: {
+    id: "pima_assessor_gis",
+    label: "Pima County Assessor parcel records",
+    publisher: "Pima County GIS (Parcels - Regional, refreshed nightly from the Assessor), published by the City of Tucson",
+    url: "https://www.arcgis.com/home/item.html?id=321414f3568b42f3bb29bf9859f03b66",
+    terms: "Open public data for reference, provided as is; parcel lines are approximate and values are not guaranteed.",
   },
   fema_usa_structures: {
     id: "fema_usa_structures",
@@ -131,6 +150,10 @@ const DIRECTIONS = new Set(["N", "S", "E", "W", "NE", "NW", "SE", "SW", "NORTH",
 const SUFFIXES = new Set([
   "ST", "STREET", "AVE", "AVENUE", "AV", "RD", "ROAD", "DR", "DRIVE", "BLVD", "BOULEVARD", "LN", "LANE", "CT", "COURT", "WAY",
   "PL", "PLACE", "HWY", "HIGHWAY", "PKWY", "PARKWAY", "CIR", "CIRCLE", "TRL", "TRAIL", "TER", "TERRACE", "LOOP", "SQ", "PLZ",
+  // Pima County situs abbreviations (Oct 26 PF-2): WY way, BL boulevard,
+  // CI circle, LP loop, PW parkway, TR trail, TE terrace, HY highway,
+  // PS pass/paseo, AL alley — "1825 N ALVERNON WY" ≡ "1825 N Alvernon Way".
+  "WY", "BL", "CI", "LP", "PW", "TR", "TE", "HY", "PS", "PASS", "AL", "ALY", "ALLEY",
 ]);
 const ORDINALS: Record<string, string> = {
   FIRST: "1ST", SECOND: "2ND", THIRD: "3RD", FOURTH: "4TH", FIFTH: "5TH", SIXTH: "6TH", SEVENTH: "7TH", EIGHTH: "8TH", NINTH: "9TH", TENTH: "10TH",
@@ -179,9 +202,10 @@ export function sameAddress(a: AddressKey | null, b: AddressKey | null): boolean
   return a != null && b != null && a.core === b.core && a.numbers.some((n) => b.numbers.includes(n));
 }
 export type ParcelRelation = "match" | "multi_includes" | "multi" | "no_situs" | "mismatch";
-export function parcelRelation(siteKey: AddressKey | null, situs: string | null | undefined): ParcelRelation {
-  const parcelKey = addressKey(situs);
-  if (!parcelKey) return "no_situs";
+export function parcelRelation(siteKey: AddressKey | null, situs: string | null | undefined, situsMultiple = false): ParcelRelation {
+  const raw = addressKey(situs);
+  if (!raw) return "no_situs";
+  const parcelKey = situsMultiple ? { ...raw, mltpl: true, multi: true } : raw;
   if (sameAddress(siteKey, parcelKey)) return parcelKey.multi ? "multi_includes" : "match";
   // A multi-address parcel on the same street ("3500 & 3700 Prospector" for a
   // site at 3550 Prospector) is a shared campus parcel, not a wrong pin.
@@ -223,14 +247,17 @@ function parseRings(raw: unknown): LngLat[][] | null {
 /* ------------------------------------------------------------------ */
 /* Text helpers                                                        */
 /* ------------------------------------------------------------------ */
-const KEEP_UPPER = new Set(["LLC", "LP", "LLP", "INC", "USA", "US", "II", "III", "IV", "HOA", "PC", "PLLC", "AZ", "KY", "NA"]);
-const EXPAND: Record<string, string> = { MUNI: "Municipal", DIST: "District", SCH: "School", PROP: "Property", CO: "Co." };
+const KEEP_UPPER = new Set(["LLC", "LP", "LLP", "INC", "USA", "US", "II", "III", "IV", "HOA", "PC", "PLLC", "AZ", "KY", "NA", "SFR"]);
+const EXPAND: Record<string, string> = { MUNI: "Municipal", DIST: "District", SCH: "School", PROP: "Property", CO: "Co.", STY: "Story" };
 export function titleCase(raw: string): string {
   return raw
     .trim()
     .split(/\s+/)
     .map((w) => {
       const up = w.toUpperCase();
+      // Ordinals read naturally ("2ND" → "2nd"); other digit words stay as
+      // recorded (unit and lot codes such as "12B").
+      if (/^\d+(ST|ND|RD|TH)$/.test(up)) return up.slice(0, -2) + up.slice(-2).toLowerCase();
       if (KEEP_UPPER.has(up) || /\d/.test(w)) return up;
       if (EXPAND[up]) return EXPAND[up];
       return up.charAt(0) + up.slice(1).toLowerCase();
@@ -269,12 +296,21 @@ export interface ParcelHit {
   improvementValue: number | null;
   taxYear: number | null;
   assessmentClass: string | null;
+  /** What the published value means, when the county defines it differently
+   * from a market-value estimate (Pima: "for analysis", not market value). */
+  valueNote?: string | null;
+  /** The county flags several street addresses on the parcel; situsAddress is
+   * one of them (Pima ADR_STATUS = MULTIPLE). */
+  situsMultiple?: boolean;
   rings: LngLat[][];
 }
+/** The pin is inside the adapter's bounding box but outside the county's
+ * parcels altogether (a neighboring county), not on a road inside it. */
+export const OUTSIDE_COVERAGE = "outside_coverage" as const;
 interface CountyAdapter {
   id: PropertySourceId;
   covers(point: { lat: number; lng: number }, state: string | null): boolean;
-  fetchParcel(point: { lat: number; lng: number }, fetcher: JsonFetcher): Promise<ParcelHit | null>;
+  fetchParcel(point: { lat: number; lng: number }, fetcher: JsonFetcher): Promise<ParcelHit | null | typeof OUTSIDE_COVERAGE>;
 }
 function splitUseCode(raw: string | null): { code: string | null; label: string | null } {
   if (!raw) return { code: null, label: null };
@@ -326,7 +362,88 @@ const mohaveAdapter: CountyAdapter = {
     return null;
   },
 };
-const COUNTY_ADAPTERS: CountyAdapter[] = [mohaveAdapter];
+const PIMA_VALUE_NOTE =
+  "Pima County publishes this full cash value for analysis; it is not a market value. It covers the whole parcel.";
+const PIMA_NEARBY_M = 150;
+const pimaAdapter: CountyAdapter = {
+  id: "pima_assessor_gis",
+  // Layer extent (WGS84, from the service) rounded outward. Points in the box
+  // but in another county return no parcel nearby → OUTSIDE_COVERAGE.
+  covers: (p, state) => (state == null || state.toUpperCase() === "AZ") && p.lat >= 31.41 && p.lat <= 32.53 && p.lng >= -113.35 && p.lng <= -110.43,
+  async fetchParcel(p, fetcher) {
+    const base = {
+      geometry: `${p.lng},${p.lat}`,
+      geometryType: "esriGeometryPoint",
+      inSR: "4326",
+      spatialRel: "esriSpatialRelIntersects",
+      f: "json",
+    };
+    const params = new URLSearchParams({
+      ...base,
+      outSR: "4326",
+      outFields: "PARCEL,SITE_ADDRESS,ADR_STATUS,MAIL1,PARCEL_USE,USE_DESC,LANDMEAS,LANDUNIT,GISACRES,FCV,TAXYR",
+      returnGeometry: "true",
+      geometryPrecision: "6",
+    });
+    // Same layer on two hosts: use the first that answers with valid JSON.
+    let layer = PIMA_PARCEL_LAYERS[0];
+    let features: ArcFeature[] = [];
+    let lastError: unknown = null;
+    let answered = false;
+    for (const candidate of PIMA_PARCEL_LAYERS) {
+      try {
+        features = arcFeatures(await fetcher(`${candidate}/query?${params.toString()}`)).features;
+        layer = candidate;
+        answered = true;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (!answered) throw lastError instanceof Error ? lastError : new Error("Pima parcel layer unavailable");
+    for (const f of features) {
+      const a = f.attributes ?? {};
+      const parcelId = str(a.PARCEL);
+      const rings = parseRings(f.geometry?.rings);
+      if (!parcelId || !rings) continue;
+      // ADR_STATUS MULTIPLE: SITE_ADDRESS holds one of several addresses.
+      const situsRaw = str(a.SITE_ADDRESS);
+      const multiple = (str(a.ADR_STATUS) ?? "").toUpperCase() === "MULTIPLE";
+      const owner = str(a.MAIL1);
+      const unit = (str(a.LANDUNIT) ?? "").toUpperCase();
+      const meas = num(a.LANDMEAS);
+      const mapped = num(a.GISACRES);
+      // LANDUNIT: A = acres, F = square feet, S = "site" (a count, not an area).
+      const landAcres = meas != null && meas > 0 && unit === "A" ? meas : meas != null && meas > 0 && unit === "F" ? meas / 43_560 : mapped != null && mapped > 0 ? mapped : null;
+      const fcv = num(a.FCV);
+      const useLabel = str(a.USE_DESC);
+      return {
+        sourceId: "pima_assessor_gis",
+        parcelId,
+        situsAddress: situsRaw,
+        situsMultiple: multiple && situsRaw != null,
+        owner: owner && owner.toUpperCase() !== "NA" ? owner : null,
+        useCode: str(a.PARCEL_USE),
+        useLabel: useLabel ? titleCase(useLabel) : null,
+        landAcres,
+        fullCashValue: fcv != null && fcv > 0 ? fcv : null,
+        landValue: null,
+        improvementValue: null,
+        taxYear: num(a.TAXYR),
+        assessmentClass: null,
+        valueNote: PIMA_VALUE_NOTE,
+        rings,
+      };
+    }
+    // Nothing under the pin: a road inside the county (parcels nearby) or a
+    // point in a neighboring county (none nearby).
+    const near = new URLSearchParams({ ...base, distance: String(PIMA_NEARBY_M), units: "esriSRUnit_Meter", returnCountOnly: "true" });
+    const d = (await fetcher(`${layer}/query?${near.toString()}`)) as { count?: unknown; error?: unknown } | null;
+    if (!d || typeof d !== "object" || d.error || typeof d.count !== "number") throw new Error("ArcGIS count query failed");
+    return d.count === 0 ? OUTSIDE_COVERAGE : null;
+  },
+};
+const COUNTY_ADAPTERS: CountyAdapter[] = [mohaveAdapter, pimaAdapter];
 export function countyAdapterFor(point: { lat: number; lng: number }, state: string | null): CountyAdapter | null {
   return COUNTY_ADAPTERS.find((a) => a.covers(point, state)) ?? null;
 }
@@ -540,7 +657,7 @@ export function estimateFloorArea(input: {
       ? "with stories inferred conservatively from measured building heights"
       : "counting buildings without a measured height as one story";
   const method = basis === "parcel_all_buildings"
-    ? `Sum of the ground footprints of all ${bldg} on parcel ${p!.parcelId}, ${storyText}.`
+    ? `Sum of the ground footprints of ${counted.length === 1 ? "the" : "all"} ${bldg} on parcel ${p!.parcelId}, ${storyText}.`
     : basis === "address_matched_buildings"
       ? `Sum of the ground footprints of the ${bldg} that public records address to ${input.siteAddressLabel}, ${storyText}.${excluded > 0 ? ` ${excluded} other building${excluded === 1 ? "" : "s"} on the same parcel carry other addresses and are not counted.` : ""}`
       : `The county parcel record lists no street address, so this counts the ${bldg} on the parcel under your map pin that public records classify as ${expected?.toLowerCase()}, ${storyText}.`;
@@ -585,6 +702,8 @@ export interface ParcelFacts {
   improvementValue: number | null;
   taxYear: number | null;
   assessmentClass: string | null;
+  valueNote?: string | null;
+  situsMultiple?: boolean;
   relation: ParcelRelation;
   shared: boolean;
   sharedWithSiteIds: number[];
@@ -609,6 +728,9 @@ export interface PropertyFactsResult {
   cautions: string[];
   sourcesUsed: PropertySourceId[];
   sourceErrors: PropertySourceId[];
+  /** County adapters consulted for this point (absent on facts saved before
+   * Oct 26 PF-2; then sourcesUsed ∪ sourceErrors is used instead). */
+  countyChecked?: PropertySourceId[];
   fetchedAt: number;
   inputKey: string;
 }
@@ -650,14 +772,20 @@ export async function computePropertyFacts(input: ComputeInput): Promise<Propert
     return base;
   }
   const point = input.point;
-  const adapter = countyAdapterFor(point, input.site.state ?? null);
+  let adapter = countyAdapterFor(point, input.site.state ?? null);
   let parcelHit: ParcelHit | null = null;
+  base.countyChecked = adapter ? [adapter.id] : [];
   if (adapter) {
+    const county = adapter;
     try {
-      parcelHit = await adapter.fetchParcel(point, fetcher);
-      base.sourcesUsed.push(adapter.id);
+      const r = await county.fetchParcel(point, fetcher);
+      if (r === OUTSIDE_COVERAGE) adapter = null; // a neighboring county: same as no adapter
+      else {
+        parcelHit = r;
+        base.sourcesUsed.push(county.id);
+      }
     } catch {
-      base.sourceErrors.push(adapter.id);
+      base.sourceErrors.push(county.id);
     }
   }
   const [inPoly, near] = await Promise.allSettled([
@@ -689,7 +817,7 @@ export async function computePropertyFacts(input: ComputeInput): Promise<Propert
   const parcelTruncated = parcelHit != null && inPoly.status === "fulfilled" && inPoly.value.exceeded;
   let relation: ParcelRelation | null = null;
   if (parcelHit) {
-    relation = parcelRelation(siteKey, parcelHit.situsAddress);
+    relation = parcelRelation(siteKey, parcelHit.situsAddress, parcelHit.situsMultiple === true);
     const shared = relation === "multi" || relation === "multi_includes" || otherPinsInParcel.length > 0;
     if (relation === "mismatch") {
       base.parcelMismatch = { parcelId: parcelHit.parcelId, situsAddress: parcelHit.situsAddress, otherSiteIds: otherPinsInParcel };
@@ -787,11 +915,22 @@ export async function getPropertyFactsRow(siteId: number): Promise<SitePropertyF
   const [row] = await db.select().from(sitePropertyFacts).where(eq(sitePropertyFacts.siteId, siteId)).limit(1);
   return row ?? null;
 }
+/** True when a county adapter now covers the facts' point but was never
+ * consulted for them (facts saved before that county was added). Only those
+ * sites refetch; every other county's facts stay as they are. */
+export function needsCountyCoverageRefresh(facts: PropertyFactsResult | null | undefined, state: string | null): boolean {
+  if (!facts?.point) return false;
+  const adapter = countyAdapterFor(facts.point, state);
+  if (!adapter) return false;
+  const checked = facts.countyChecked ?? [...(facts.sourcesUsed ?? []), ...(facts.sourceErrors ?? [])];
+  return !checked.includes(adapter.id);
+}
 function isFresh(row: SitePropertyFacts, site: Site, now: number): boolean {
   if (row.locationRevision !== site.locationRevision) return false;
   const facts = row.facts as PropertyFactsResult | null;
   if (!facts || facts.version !== PROPERTY_FACTS_VERSION) return false;
   if (facts.inputKey !== factsInputKey(site)) return false;
+  if (needsCountyCoverageRefresh(facts, site.state ?? null)) return false;
   const ttl = row.status === "unavailable" ? UNAVAILABLE_RETRY_MS : FACTS_TTL_MS;
   return now - row.fetchedAt < ttl;
 }
@@ -1089,7 +1228,11 @@ export function presentPropertyFacts(
       key: "parcel",
       label: "Parcel",
       value: `${p.parcelId}${p.landAcres != null ? ` · ${p.landAcres.toLocaleString("en-US", { maximumFractionDigits: 2 })} acres` : ""}`,
-      detail: p.situsAddress ? `Recorded address: ${titleCase(p.situsAddress)}` : "No street address on the county record",
+      detail: p.situsAddress
+        ? p.situsMultiple
+          ? `Recorded addresses include ${titleCase(p.situsAddress)} (the county lists several on this parcel)`
+          : `Recorded address: ${titleCase(p.situsAddress)}`
+        : "No street address on the county record",
       sourceId: p.sourceId,
       kind: "record",
     });
@@ -1113,7 +1256,7 @@ export function presentPropertyFacts(
         key: "value",
         label: "Assessed value",
         value: `${formatUsd(p.fullCashValue)} full cash value${p.taxYear ? ` (tax year ${p.taxYear})` : ""}`,
-        detail: `${parts.length ? `${parts.join(" · ")}. ` : ""}The assessor's market-value estimate for the whole parcel.`,
+        detail: `${parts.length ? `${parts.join(" · ")}. ` : ""}${p.valueNote ?? "The assessor's market-value estimate for the whole parcel."}`,
         sourceId: p.sourceId,
         kind: "record",
       });

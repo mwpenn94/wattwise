@@ -26,6 +26,7 @@ type Props = {
 
 const SOURCE_SHORT: Record<string, string> = {
   mohave_assessor_gis: "Mohave County Assessor",
+  pima_assessor_gis: "Pima County Assessor",
   fema_usa_structures: "FEMA USA Structures",
 };
 
