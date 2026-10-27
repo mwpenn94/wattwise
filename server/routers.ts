@@ -1,4 +1,5 @@
 import { TRPCError } from "@trpc/server";
+import { usageConversion } from "../shared/commodity";
 import { tariffMatchesSiteUtility } from "./utilityMatch";
 import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
@@ -2378,12 +2379,17 @@ export const appRouter = router({
         }),
       )
       .mutation(async ({ ctx, input }) => {
+        // UCONV-1: bills store usage in the meter's model unit (kWh / therms /
+        // gallons — the unit tariffs price). A bill stated in CCF, HCF or kgal
+        // is converted once here; the note says how.
+        const billMeter = await h.getMeter(input.meterId, ctx.user.id);
+        const conv = usageConversion(billMeter?.commodity ?? "electric", input.usageUnit);
         const id = await h.createBill(
           {
             meterId: input.meterId,
             periodStart: new Date(input.periodStart),
             periodEnd: new Date(input.periodEnd),
-            usage: input.totalUsage,
+            usage: input.totalUsage * conv.factor,
             demandBilled: input.billedDemandKw ?? null,
             demandBilledSource: input.demandBilledSource ?? (input.billedDemandKw != null ? "parsed_bill" : null),
             totalCost: input.totalCostUsd,
@@ -2406,7 +2412,7 @@ export const appRouter = router({
         } catch {
           /* evidence stamping never fails a bill save */
         }
-        return { id };
+        return { id, usageSaved: input.totalUsage * conv.factor, usageUnitSaved: conv.toUnit, unitNote: conv.note };
       }),
     /** Progressive participation (Jul 2026): persist a bill against a SITE that
      *  may not have a meter yet (quick-start bill-first entry). Lazily creates
@@ -2460,12 +2466,14 @@ export const appRouter = router({
             });
           }
         }
+        // UCONV-1: stored in the meter's model unit (see bills.create).
+        const siteBillConv = usageConversion(meter.commodity ?? "electric", input.usageUnit);
         const id = await h.createBill(
           {
             meterId: meter.id,
             periodStart: new Date(input.periodStart),
             periodEnd: new Date(input.periodEnd),
-            usage: input.totalUsage,
+            usage: input.totalUsage * siteBillConv.factor,
             demandBilled: input.billedDemandKw ?? null,
             demandBilledSource: input.billedDemandKw != null ? "parsed_bill" : null,
             totalCost: input.totalCostUsd,

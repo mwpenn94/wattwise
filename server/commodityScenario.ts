@@ -15,7 +15,7 @@
  * inventing a number.
  */
 import { TRPCError } from "@trpc/server";
-import { COMMODITIES, type Commodity } from "../shared/commodity";
+import { COMMODITIES, usageConversion, type Commodity } from "../shared/commodity";
 import type { ScenarioResults } from "../shared/wattwise";
 import * as h from "./dbHelpers";
 
@@ -64,6 +64,9 @@ export async function runCommodityEfficiency(opts: {
       if (spanDays >= 60 && annual > 0) {
         annualBaseline = annual;
         loadBasis = "measured_intervals";
+        // UCONV-1: readings were converted to ${meta.usageUnit} for pricing.
+        const unitNote = usageConversion(commodity, meter.usageUnit).note;
+        if (unitNote) disclosures.push(unitNote);
         confidence = spanDays >= 270 ? "high" : spanDays >= 120 ? "medium" : "low";
         extrapolated = spanDays < 270;
         if (extrapolated) {

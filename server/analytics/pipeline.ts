@@ -20,6 +20,7 @@ import {
   inferClimateZone,
   quickStartAssumptions,
 } from "../../shared/wattwise";
+import { usageConversion } from "../../shared/commodity";
 import {
   fitCaltrackMonthly,
   intervalsToMonthly,
@@ -409,13 +410,16 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       let trainStart: number | null = null;
       let trainEnd: number | null = null;
       if (cMeter) {
+        // UCONV-1: getIntervalPoints returns usage in therms / gallons; the
+        // basis says so when the file stated another unit (CCF, HCF, kgal…).
+        const conv = usageConversion(cMeter.commodity, cMeter.usageUnit);
         const cPts = await h.getIntervalPoints(cMeter.id, userId);
         if (cPts.length >= 2) {
           const spanDays = Math.max(1, (cPts[cPts.length - 1].ts - cPts[0].ts) / 86_400_000);
           const total = cPts.reduce((s, p) => s + p.usage, 0);
           if (spanDays >= 60 && total > 0) {
             annual = (total / spanDays) * 365;
-            basisLabel = `measured — annualized from ${Math.round(spanDays)} days of ${com} meter data`;
+            basisLabel = `measured — annualized from ${Math.round(spanDays)} days of ${com} meter data${conv.shortNote ? `; ${conv.shortNote}` : ""}`;
             trainStart = cPts[0].ts;
             trainEnd = cPts[cPts.length - 1].ts;
           }
@@ -579,6 +583,10 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
     } else if (basis) {
       currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz, hasSolar: site.hasSolar ?? false, rateCodeResolution: resolveRateCode(basis.utilityName, meter?.rateScheduleCode ?? null) });
       if ((meter?.commodity ?? "electric") === "electric") fullBillEstimate = estimateFullBill({ accounts: [currentCost], utilityName: basis.utilityName, city: site.city, state: site.state, residential: sectorClass === "residential" });
+      // UCONV-1: a gas/water meter's readings were converted to the tariff's
+      // unit (stage 1 read them through getIntervalPoints); say how.
+      const unitNote = hasIntervals && meter ? usageConversion(meter.commodity, meter.usageUnit).note : null;
+      if (unitNote) currentCost.disclosures.push(unitNote);
     }
     if (basis) {
       const bs = basis.structure as TariffStructure;

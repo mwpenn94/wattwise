@@ -26,7 +26,7 @@ import {
   type MonthNormalRow,
   type MonthlyUsage,
 } from "./analytics/baseline";
-import { COMMODITIES, type Commodity } from "../shared/commodity";
+import { COMMODITIES, usageConversion, type Commodity } from "../shared/commodity";
 import { inferClimateZone } from "../shared/wattwise";
 import * as h from "./dbHelpers";
 
@@ -112,6 +112,9 @@ export async function assessMv(opts: {
   const station = await h.getWeatherStation(climateZone);
   const normals = (station?.monthlyNormals ?? []) as MonthNormalRow[];
   const disclosures: string[] = [];
+  // UCONV-1: readings were converted to the model unit for the baseline fit.
+  const unitNote = usageConversion(commodity, meter.usageUnit).note;
+  if (unitNote) disclosures.push(unitNote);
   if (normals.length === 0) {
     throw new TRPCError({ code: "BAD_REQUEST", message: `No weather station for climate zone ${climateZone} — a weather-normalized baseline cannot be fit.` });
   }

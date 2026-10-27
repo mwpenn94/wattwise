@@ -83,7 +83,12 @@ export default function Dashboard() {
     meters.data?.find((m) => m.meterRole === "main") ??
     meters.data?.find((m) => !["submeter", "generation", "ev", "virtual_total"].includes(m.meterRole)) ??
     meters.data?.[0];
-  const flowUnit = meter?.commodity === "gas" ? "therms/day" : meter?.commodity === "water" ? "gal/day" : "kW";
+  // UCONV-1: the chart plots RAW readings per hour, so gas/water use the unit
+  // the file stated (CCF, HCF, kgal…); modeled cards convert to therms/gallons.
+  const flowUnit =
+    meter?.commodity === "gas" || meter?.commodity === "water"
+      ? `${meter.usageUnit?.trim() || (meter.commodity === "gas" ? "therms" : "gal")}/h`
+      : "kW";
   // RC3: a background re-analysis (after an address edit) shows as "running";
   // poll until it lands, then refresh every dependent panel once.
   const latest = trpc.analysis.latest.useQuery(
@@ -739,11 +744,11 @@ export default function Dashboard() {
                   fontSize={11}
                   minTickGap={48}
                 />
-                <YAxis stroke="var(--muted-foreground)" fontSize={11} width={52} unit={` ${flowUnit === "kW" ? "kW" : flowUnit.split("/")[0]}`} />
+                <YAxis stroke="var(--muted-foreground)" fontSize={11} width={flowUnit === "kW" ? 52 : 76} unit={` ${flowUnit}`} />
                 <Tooltip
                   contentStyle={{ background: "var(--popover)", color: "var(--popover-foreground)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
                   labelFormatter={(ts) => new Date(Number(ts)).toLocaleString()}
-                  formatter={(v) => [`${v} ${flowUnit === "kW" ? "kW" : flowUnit.split("/")[0]}`, flowUnit === "kW" ? "demand" : "usage"]}
+                  formatter={(v) => [`${v} ${flowUnit}`, flowUnit === "kW" ? "demand" : "usage"]}
                 />
                 <Area type="monotone" dataKey="kw" stroke="var(--chart-1)" strokeWidth={1.5} fill="url(#kwFill)" isAnimationActive={false} dot={false} />
               </AreaChart>

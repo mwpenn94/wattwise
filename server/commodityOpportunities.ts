@@ -33,6 +33,7 @@ import * as h from "./dbHelpers";
 import type { OpportunityCandidate } from "./analytics/scenarios";
 import type { MonthNormalRow } from "./analytics/baseline";
 import { COMMODITY_UNITS, TariffStructure, MODELED_ESTIMATES_DISCLAIMER } from "../shared/wattwise";
+import { usageConversion } from "../shared/commodity";
 import { resolveCommodityService } from "./commodityService";
 import { lookupTerritory } from "./serviceTerritories";
 import { deriveBillVerifiedRate } from "./billCalibration";
@@ -91,10 +92,13 @@ async function resolveBasis(site: SiteLite, userId: number, com: "gas" | "water"
       const spanDays = Math.max(1, (pts[pts.length - 1].ts - pts[0].ts) / 86_400_000);
       const total = pts.reduce((s, p) => s + p.usage, 0);
       if (spanDays >= 60 && total > 0) {
+        // UCONV-1: points arrive in therms / gallons; name the conversion when
+        // the file stated another unit (CCF, HCF, kgal…).
+        const conv = usageConversion(cMeter.commodity ?? com, cMeter.usageUnit);
         return {
           annualUnits: (total / spanDays) * 365,
           kind: "measured",
-          label: `measured — annualized from ${Math.round(spanDays)} days of ${com} meter data`,
+          label: `measured — annualized from ${Math.round(spanDays)} days of ${com} meter data${conv.shortNote ? `; ${conv.shortNote}` : ""}`,
         };
       }
     }

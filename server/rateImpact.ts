@@ -33,6 +33,7 @@ import { and, desc, eq, gte, inArray } from "drizzle-orm";
 import { getDb } from "./db";
 import { bills, intervals, meters, rateVerifications, sites, tariffs } from "../drizzle/schema";
 import { utilityNamesMatch } from "./urdbImport";
+import { usageConversion } from "../shared/commodity";
 
 const DAY_MS = 86_400_000;
 
@@ -64,7 +65,9 @@ export interface ImpactSummary {
 }
 
 /** Estimate a meter's annual usage from its own data. Never fabricates. */
-async function estimateAnnualUsage(meterId: number): Promise<{ annual: number; basis: "metered" | "billed" } | null> {
+/** UCONV-1: metered usage is converted from the meter's stated unit to the
+ * tariff's unit (therms / gallons); bill usage is already in that unit. */
+async function estimateAnnualUsage(meterId: number, unit?: { commodity: string | null; usageUnit: string | null }): Promise<{ annual: number; basis: "metered" | "billed" } | null> {
   const db = await getDb();
   if (!db) return null;
   const cutoff = Date.now() - 365 * DAY_MS;
@@ -80,7 +83,7 @@ async function estimateAnnualUsage(meterId: number): Promise<{ annual: number; b
     const maxTs = pts[0].ts + (pts[0].durationMin ?? 60) * 60_000;
     const spanDays = Math.max(1, (maxTs - minTs) / DAY_MS);
     if (spanDays >= 28) {
-      const total = pts.reduce((s, p) => s + (p.usage ?? 0), 0);
+      const total = pts.reduce((s, p) => s + (p.usage ?? 0), 0) * usageConversion(unit?.commodity, unit?.usageUnit).factor;
       return { annual: (total / spanDays) * 365, basis: "metered" };
     }
   }
@@ -132,6 +135,8 @@ export async function computeRateChangeImpact(deltas: RateDelta[], opts?: { maxS
         siteState: sites.state,
         siteUtility: sites.utilityName,
         currentTariffId: meters.currentTariffId,
+        commodity: meters.commodity,
+        usageUnit: meters.usageUnit,
       })
       .from(meters)
       .innerJoin(sites, eq(meters.siteId, sites.id))
@@ -149,7 +154,7 @@ export async function computeRateChangeImpact(deltas: RateDelta[], opts?: { maxS
       // An explicit meter tariff assignment wins over the site-utility inference.
       if (c.currentTariffId != null ? !assignedMatch : !utilityMatch) continue;
       seenMeter.add(key);
-      const usage = await estimateAnnualUsage(c.meterId);
+      const usage = await estimateAnnualUsage(c.meterId, c);
       const avgVolDelta = d.volumetricDeltas.length > 0 ? d.volumetricDeltas.reduce((s, x) => s + x, 0) / d.volumetricDeltas.length : 0;
       const est = usage ? usage.annual * avgVolDelta + 12 * d.fixedMonthlyDelta : d.fixedMonthlyDelta !== 0 ? 12 * d.fixedMonthlyDelta : null;
       perSite.push({

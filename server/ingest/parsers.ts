@@ -322,7 +322,11 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock, prebuilt
 
   let commodity: "electric" | "gas" | "water" = "electric";
   const headerBlob = headers.join(" ").toLowerCase();
-  if (/therm|ccf|mcf|gas/.test(headerBlob)) commodity = "gas";
+  // UCONV-1: CCF/HCF are volumes that gas AND water utilities both bill in, so
+  // a file that says "water" (and nothing about gas or therms) is water even
+  // when its usage is in CCF.
+  if (/water/.test(headerBlob) && !/therm|gas/.test(headerBlob)) commodity = "water";
+  else if (/therm|ccf|mcf|gas/.test(headerBlob)) commodity = "gas";
   else if (/gallon|gal\b|hcf|water/.test(headerBlob)) commodity = "water";
   // LGE-2: report the unit the file ACTUALLY carries — a CCF column must not
   // be silently relabeled therms (×1.037 error), nor HCF relabeled gallons
@@ -333,6 +337,9 @@ function tableToSeries(name: string, rows: Row[], clock: IntervalClock, prebuilt
   else if (/mcf/.test(usageColLower)) usageUnit = "Mcf";
   else if (/therm/.test(usageColLower)) usageUnit = "therms";
   else if (/hcf/.test(usageColLower)) usageUnit = "HCF";
+  // UCONV-1: "kgal" also matches gal\b — check thousands of gallons first so a
+  // kgal column is never stored as gallons (×1000 error).
+  else if (/kgal|thousand\s*gal/.test(usageColLower)) usageUnit = "kgal";
   else if (/gallon|^gal$|gal\b/.test(usageColLower)) usageUnit = "gal";
   else if (/cubic\s*feet/.test(usageColLower)) usageUnit = "cf";
   else if (/m3/.test(usageColLower)) usageUnit = "m3";
@@ -678,6 +685,8 @@ export function parseEspiXml(xmlText: string): ParsedMeterSeries[] {
 
 const COMMODITY_WORD: Record<"electric" | "gas" | "water", string> = { electric: "Electric", gas: "Natural gas", water: "Water" };
 const DEFAULT_UNIT: Record<"electric" | "gas" | "water", string> = { electric: "kWh", gas: "therms", water: "gal" };
+/** Volume units used by both gas and water utilities (UCONV-1). */
+const SHARED_VOLUME_UNITS = new Set(["ccf", "hcf", "cf", "m3"]);
 /**
  * TEL-1: reconcile the utility the user chose on Upload with what the file
  * says. A unit stated by the file always wins (a kWh column is never stored
@@ -690,6 +699,15 @@ export function applyCommodityHint(
   hint: "electric" | "gas" | "water" | null | undefined,
 ): { commodity: "electric" | "gas" | "water"; usageUnit: string; demandUnit: string | null; note: string | null } {
   if (!hint || hint === ser.commodity) return { commodity: ser.commodity, usageUnit: ser.usageUnit, demandUnit: ser.demandUnit, note: null };
+  // UCONV-1: CCF, HCF, cubic feet and m³ are volumes that gas and water
+  // utilities both bill in, so the unit alone does not say which utility it
+  // is. The user's gas/water choice decides; the stated unit is kept.
+  if (ser.unitFromFile && hint !== "electric" && ser.commodity !== "electric" && SHARED_VOLUME_UNITS.has(ser.usageUnit.toLowerCase())) {
+    return {
+      commodity: hint, usageUnit: ser.usageUnit, demandUnit: null,
+      note: `This file states its usage in ${ser.usageUnit}, which both gas and water utilities use, so it was imported as ${COMMODITY_WORD[hint]} as chosen.`,
+    };
+  }
   if (ser.unitFromFile) {
     return {
       commodity: ser.commodity, usageUnit: ser.usageUnit, demandUnit: ser.demandUnit,

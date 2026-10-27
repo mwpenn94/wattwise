@@ -16,11 +16,23 @@ import { DisclaimerBanner } from "@/components/Honesty";
 import { useActiveSite, useSiteRequestGuard } from "@/hooks/useActiveSite";
 import { BulkImportPanel } from "@/components/BulkImportPanel";
 import { Link } from "wouter";
+import { usageConversion } from "@shared/commodity";
 
 type Fmt = "xlsx" | "csv" | "espi_xml" | "zip" | "auto";
 type Commodity = "electric" | "gas" | "water";
 const USAGE_UNIT: Record<Commodity, string> = { electric: "kWh", gas: "therms", water: "gallons" };
 const COMMODITY_LABEL: Record<Commodity, string> = { electric: "Electric", gas: "Natural gas", water: "Water" };
+/** UCONV-1: units a bill may state; the server stores usage in the first
+ * (model) unit and converts the others (CCF → therms or gallons, kgal → gallons). */
+const BILL_UNITS: Record<Commodity, string[]> = { electric: ["kWh"], gas: ["therms", "CCF"], water: ["gallons", "kgal", "CCF"] };
+/** Map an OCR-read unit to one of BILL_UNITS for the chosen utility. */
+function billUnitFromOcr(unit: string, c: Commodity): string {
+  const u = unit.toLowerCase();
+  if (c === "gas" && /ccf|hcf/.test(u)) return "CCF";
+  if (c === "water" && /kgal|thousand/.test(u)) return "kgal";
+  if (c === "water" && /ccf|hcf/.test(u)) return "CCF";
+  return BILL_UNITS[c][0];
+}
 
 // Extension is only a HINT — the server re-verifies content via magic bytes
 // and routes accordingly, so extensionless Green Button files ("HourlyIntervalData")
@@ -61,7 +73,12 @@ export default function Upload() {
     const c = new URLSearchParams(window.location.search).get("commodity");
     return c === "electric" || c === "gas" || c === "water" ? c : "auto";
   });
-  const [billCommodity, setBillCommodity] = useState<Commodity>(() => (commodity === "auto" ? "electric" : commodity));
+  const [billCommodity, setBillCommodityRaw] = useState<Commodity>(() => (commodity === "auto" ? "electric" : commodity));
+  const [billUnit, setBillUnit] = useState<string>(() => BILL_UNITS[commodity === "auto" ? "electric" : commodity][0]);
+  const setBillCommodity = (c: Commodity, unit?: string) => {
+    setBillCommodityRaw(c);
+    setBillUnit(unit && BILL_UNITS[c].includes(unit) ? unit : BILL_UNITS[c][0]);
+  };
   const [billManual, setBillManual] = useState<null | { reason: string }>(null);
   const [manualBill, setManualBill] = useState({ periodStart: "", periodEnd: "", totalUsage: "", totalCost: "", billedDemandKw: "" });
   // Oct 25: large workbooks import sheet-by-sheet in short server requests.
@@ -221,7 +238,8 @@ export default function Upload() {
       } else {
         const b = res.bill;
         const unit = (b.usageUnit?.value ?? "").toLowerCase();
-        setBillCommodity(commodity !== "auto" ? commodity : /therm|ccf|mcf|dth/.test(unit) ? "gas" : /gal|kgal/.test(unit) ? "water" : "electric");
+        const billC: Commodity = commodity !== "auto" ? commodity : /therm|ccf|mcf|dth/.test(unit) ? "gas" : /gal|kgal/.test(unit) ? "water" : "electric";
+        setBillCommodity(billC, billUnitFromOcr(unit, billC));
         toast.success(`Bill parsed (confidence ${(b.overallConfidence * 100).toFixed(0)}%) — review the extracted values`);
         setManualBill({
           periodStart: b.periodStart.value ?? "",
@@ -269,7 +287,7 @@ export default function Upload() {
         periodStart: manualBill.periodStart,
         periodEnd: manualBill.periodEnd,
         totalUsage: Number(manualBill.totalUsage),
-        usageUnit: USAGE_UNIT[billCommodity],
+        usageUnit: BILL_UNITS[billCommodity].includes(billUnit) ? billUnit : USAGE_UNIT[billCommodity],
         totalCostUsd: Number(manualBill.totalCost),
         billedDemandKw: billCommodity === "electric" && manualBill.billedDemandKw ? Number(manualBill.billedDemandKw) : undefined,
       });
@@ -459,9 +477,36 @@ export default function Upload() {
               <Label htmlFor="b-end">Period end</Label>
               <Input id="b-end" type="date" value={manualBill.periodEnd} onChange={(e) => setManualBill({ ...manualBill, periodEnd: e.target.value })} />
             </div>
-            <div>
-              <Label htmlFor="b-usage">Usage ({USAGE_UNIT[billCommodity]})</Label>
-              <Input id="b-usage" type="number" value={manualBill.totalUsage} onChange={(e) => setManualBill({ ...manualBill, totalUsage: e.target.value })} />
+            <div className={BILL_UNITS[billCommodity].length > 1 ? "sm:col-span-2" : undefined}>
+              <Label htmlFor="b-usage">Usage ({BILL_UNITS[billCommodity].length > 1 ? billUnit : USAGE_UNIT[billCommodity]})</Label>
+              <div className="mt-1 flex gap-1.5">
+                <Input id="b-usage" type="number" className="mt-0 min-w-0" value={manualBill.totalUsage} onChange={(e) => setManualBill({ ...manualBill, totalUsage: e.target.value })} />
+                {BILL_UNITS[billCommodity].length > 1 && (
+                  <Select value={billUnit} onValueChange={setBillUnit}>
+                    <SelectTrigger className="w-28 shrink-0" aria-label="Usage unit on the bill" data-testid="bill-unit">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {BILL_UNITS[billCommodity].map((u) => (
+                        <SelectItem key={u} value={u}>
+                          {u}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+              {(() => {
+                const conv = usageConversion(billCommodity, billUnit);
+                const n = Number(manualBill.totalUsage);
+                if (conv.factor === 1 || !manualBill.totalUsage || !Number.isFinite(n)) return null;
+                return (
+                  <p className="mt-1 text-xs text-muted-foreground" data-testid="bill-unit-conversion">
+                    Saved as {(n * conv.factor).toLocaleString(undefined, { maximumFractionDigits: 1 })} {conv.toUnit}
+                    {billCommodity === "gas" ? " (U.S. average 1.037 therms per CCF; your bill may state its own factor)" : ""}.
+                  </p>
+                );
+              })()}
             </div>
             <div>
               <Label htmlFor="b-cost">Total cost ($)</Label>

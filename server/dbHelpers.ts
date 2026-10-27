@@ -5,6 +5,7 @@
 import { and, asc, desc, eq, gte, inArray, isNotNull, lte, ne, sql } from "drizzle-orm";
 import { getDb } from "./db";
 import { STATE_SUBREGION } from "./seed/nationalData";
+import { usageConversion } from "../shared/commodity";
 import {
   analyses,
   archetypeProfiles,
@@ -115,12 +116,13 @@ export async function assertSiteOwner(siteId: number, userId: number) {
 export async function assertMeterOwner(meterId: number, userId: number) {
   const db = await requireDb();
   const rows = await db
-    .select({ id: meters.id })
+    .select({ id: meters.id, commodity: meters.commodity, usageUnit: meters.usageUnit })
     .from(meters)
     .innerJoin(sites, eq(meters.siteId, sites.id))
     .where(and(eq(meters.id, meterId), eq(sites.userId, userId)))
     .limit(1);
   if (rows.length === 0) throw new TenancyError();
+  return rows[0];
 }
 
 /* ---------------- entities (Gap-9 organizational layer) ---------------- */
@@ -563,7 +565,7 @@ export async function setMeterRole(
 
 /* ---------------- intervals ---------------- */
 export async function getIntervalPoints(meterId: number, userId: number, fromTs?: number, toTs?: number) {
-  await assertMeterOwner(meterId, userId);
+  const owned = await assertMeterOwner(meterId, userId);
   const db = await requireDb();
   // Oct 26: the OR must be parenthesized. Without it the WHERE clause read
   // "(meterId = ? AND qcFlags IS NULL) OR qcFlags != …", which scanned the whole
@@ -571,11 +573,20 @@ export async function getIntervalPoints(meterId: number, userId: number, fromTs?
   const conds = [eq(intervals.meterId, meterId), sql`(${intervals.qcFlags} IS NULL OR ${intervals.qcFlags} != 'superseded_overlap')`];
   if (fromTs != null) conds.push(gte(intervals.ts, fromTs));
   if (toTs != null) conds.push(lte(intervals.ts, toTs));
-  return db
+  const rows = await db
     .select({ ts: intervals.ts, durationMin: intervals.durationMin, usage: intervals.usage, demand: intervals.demand })
     .from(intervals)
     .where(and(...conds))
     .orderBy(asc(intervals.ts));
+  // UCONV-1 (Oct 26): this read feeds MODELING only (baselines, pricing,
+  // savings, scenarios, M&V), so usage comes back in the commodity's model
+  // unit (kWh / therms / gallons) converted from the unit the file stated
+  // (CCF, HCF, kgal…). Stored rows are never changed; the chart and exports
+  // read raw rows elsewhere. Electric and model-unit meters (factor 1) are
+  // returned untouched, so large campuses allocate nothing extra.
+  const { factor } = usageConversion(owned.commodity, owned.usageUnit);
+  if (factor !== 1) for (const r of rows) if (r.usage != null) r.usage = r.usage * factor;
+  return rows;
 }
 
 export async function intervalStats(meterId: number, userId: number) {

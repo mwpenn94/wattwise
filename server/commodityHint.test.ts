@@ -36,7 +36,13 @@ describe("TEL-1 Upload utility choice", () => {
     const [ccf] = parseCsvIntervals(csv("Timestamp,CCF"), "gas.csv");
     expect(ccf!.commodity).toBe("gas");
     expect(ccf!.usageUnit).toBe("CCF");
-    expect(applyCommodityHint(ccf!, "water")).toMatchObject({ commodity: "gas", usageUnit: "CCF" });
+    // UCONV-1 (Oct 26): CCF is a volume gas AND water utilities bill in, so the
+    // user's water choice decides the utility; the stated unit is kept.
+    const ccfWater = applyCommodityHint(ccf!, "water");
+    expect(ccfWater).toMatchObject({ commodity: "water", usageUnit: "CCF", demandUnit: null });
+    expect(ccfWater.note).toMatch(/both gas and water utilities use, so it was imported as Water as chosen/);
+    // …but a CCF file chosen as Electric stays gas: CCF is never electricity.
+    expect(applyCommodityHint(ccf!, "electric")).toMatchObject({ commodity: "gas", usageUnit: "CCF" });
   });
 
   it("is a no-op with no choice or a matching choice", () => {
