@@ -357,7 +357,9 @@ function fmtDays(days?: number[]): string {
 }
 function fmtHours(hs?: number, he?: number): string {
   if (hs == null || he == null) return "anytime";
-  const f = (h: number) => `${((h + 11) % 12) + 1}${h < 12 ? "am" : "pm"}`;
+  // Hour 24 is midnight at the end of the day (it used to read "12pm").
+  if (hs === 0 && he === 24) return "all hours";
+  const f = (h: number) => { const hh = h % 24; return `${((hh + 11) % 12) + 1}${hh < 12 ? "am" : "pm"}`; };
   return `${f(hs)}–${f(he)}`;
 }
 
@@ -448,6 +450,26 @@ function TariffRowGroup({ t, meters, onAssign, rateUnit }: { t: TariffListRow; m
                   <p className="mt-2 font-mono text-[11px] text-muted-foreground">
                     fixed ${s.fixedMonthly?.toFixed(2) ?? "0.00"}/mo{s.minBill != null ? ` · min bill $${s.minBill.toFixed(2)}/mo` : ""}
                   </p>
+                  {s.seasonalEnergyBlockAdjustments?.length ? (
+                    <div className="mt-2">
+                      <p className="font-mono text-[10px] uppercase text-muted-foreground">Included use (no user charge)</p>
+                      <ul className="mt-1 space-y-1">
+                        {s.seasonalEnergyBlockAdjustments.map((a) => (
+                          <li key={a.label} className="font-mono">{a.label}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {s.meterSizeCharges?.length ? (
+                    <div className="mt-2">
+                      <p className="font-mono text-[10px] uppercase text-muted-foreground">Monthly service charge by meter size</p>
+                      <ul className="mt-1 grid max-w-xs grid-cols-2 gap-x-6 gap-y-1">
+                        {s.meterSizeCharges.map((m) => (
+                          <li key={m.size} className="flex justify-between gap-2 font-mono"><span>{m.size}</span><span className="text-foreground">${m.monthly.toFixed(2)}</span></li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                   {!!s.riders?.length && <div className="mt-3 space-y-2">
                     <p className="font-mono text-[10px] uppercase text-muted-foreground">Date-versioned riders (USD)</p>
                     {s.riders.map((r, i) => <div key={`${r.label}-${r.validFrom}-${i}`} className="border-t border-border/40 pt-1">

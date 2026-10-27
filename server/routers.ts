@@ -1,5 +1,5 @@
 import { TRPCError } from "@trpc/server";
-import { usageConversion } from "../shared/commodity";
+import { usageConversion, WATER_METER_SIZES } from "../shared/commodity";
 import { tariffMatchesSiteUtility } from "./utilityMatch";
 import { z } from "zod";
 import { COOKIE_NAME } from "@shared/const";
@@ -1514,12 +1514,18 @@ export const appRouter = router({
           label: z.string().max(255).nullable().optional(),
           timezone: z.string().max(64).optional(),
           accountNumber: z.string().max(64).nullable().optional(),
+          /** RATE-7b: water meter size as billed; one of WATER_METER_SIZES or null. */
+          serviceSize: z.enum(WATER_METER_SIZES).nullable().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
         const { meterId, ...patch } = input;
         const clean = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
         if (Object.keys(clean).length === 0) return { ok: true as const };
+        if (clean.serviceSize !== undefined) {
+          const m = await h.getMeter(meterId, ctx.user.id);
+          if (!m || m.commodity !== "water") throw new TRPCError({ code: "BAD_REQUEST", message: "Meter size applies to water meters only." });
+        }
         await h.updateMeter(meterId, ctx.user.id, clean);
         return { ok: true as const };
       }),

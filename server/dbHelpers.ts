@@ -420,7 +420,7 @@ export async function createMeter(data: typeof meters.$inferInsert, userId: numb
 export async function updateMeter(
   meterId: number,
   userId: number,
-  patch: Partial<Pick<typeof meters.$inferInsert, "label" | "timezone" | "usageUnit" | "demandUnit" | "commodity" | "accountNumber">>,
+  patch: Partial<Pick<typeof meters.$inferInsert, "label" | "timezone" | "usageUnit" | "demandUnit" | "commodity" | "accountNumber" | "serviceSize">>,
 ) {
   await assertMeterOwner(meterId, userId);
   const db = await requireDb();

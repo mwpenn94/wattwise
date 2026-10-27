@@ -1,0 +1,1 @@
+ALTER TABLE `meters` ADD `serviceSize` varchar(16);

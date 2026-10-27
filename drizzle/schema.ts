@@ -189,6 +189,10 @@ export const meters = mysqlTable(
     importBatchId: int("importBatchId"),
     importIdentity: varchar("importIdentity", { length: 191 }),
     timestampBasis: mysqlEnum("timestampBasis", ["start", "end"]),
+    /** RATE-7b (Oct 2026): water service/meter size as the utility bills it
+     * (e.g. "5/8 in."). Picks the filed monthly service charge on tariffs that
+     * charge by meter size; null = not on file (smallest size, disclosed). */
+    serviceSize: varchar("serviceSize", { length: 16 }),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   (t) => [index("meters_site_idx").on(t.siteId), index("meters_user_idx").on(t.userId), uniqueIndex("meters_user_import_identity_uq").on(t.userId, t.importIdentity)],

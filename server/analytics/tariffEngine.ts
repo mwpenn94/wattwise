@@ -549,6 +549,14 @@ export function foldEdgeStubMonths(byMonth: Map<string, IntervalPoint[]>): EdgeM
   return folds;
 }
 
+/** RATE-7b: "1 1/2\"", "1-1/2 in", "1.5 inch" → "1-1/2 in."; "5/8" → "5/8 in.". */
+export function normalizeMeterSize(v: string | null | undefined): string | null {
+  if (v == null) return null;
+  let t = String(v).trim().toLowerCase().replace(/["”″]|inches|inch|in\.?$/g, "").replace(/\s+in\.?\s*$/, "").trim();
+  t = t.replace(/^1\.5$/, "1-1/2").replace(/^1\s+1\/2$/, "1-1/2").replace(/^0?\.75$/, "3/4").replace(/^0?\.625$/, "5/8");
+  t = t.replace(/\s+/g, "");
+  return t ? `${t} in.` : null;
+}
 /**
  * Cost interval data on a tariff. Handles TOU, windowed demand charges,
  * ratchet, CP proxy, export credits. Points may include negative usage
@@ -570,6 +578,13 @@ export interface TariffPricingOptions {
    * "none": observed window only (used to report the observed-only subtotal).
    */
   ratchetHistory?: "auto" | "none";
+  /**
+   * RATE-7b: the account's water meter size as billed (e.g. "1 in."). Selects
+   * the filed row of `structure.meterSizeCharges`; ignored by tariffs without
+   * one. Missing or unknown sizes use `fixedMonthly` (smallest) and disclose
+   * the range.
+   */
+  meterSize?: string | null;
   /**
    * Internal (Oct 26 performance): the observed-only re-pricing reuses the
    * outer call's month grouping and per-month reading scans. Only valid for
@@ -598,6 +613,11 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
   // year-round); months and demand windows stay on the meter's clock.
   const touTz = structure.touTimezone ?? tz;
   const disclosures: string[] = [];
+  // RATE-7b: filed service charge for the account's meter size, when known.
+  const sizeRow = structure.meterSizeCharges?.length && opts?.meterSize
+    ? structure.meterSizeCharges.find((m) => normalizeMeterSize(m.size) === normalizeMeterSize(opts.meterSize))
+    : undefined;
+  const sizedFixed = sizeRow ? sizeRow.monthly : structure.fixedMonthly;
   const touFallback = { used: false };
   // Oct 26 (performance, identical results): the observed-only re-pricing
   // below passes the same points/structure/tz, so it reuses this call's month
@@ -745,6 +765,10 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
         (!adjMonths?.length || adjMonths.includes(Number(mk.slice(5, 7))))) {
       mEnergy += monthlyBlockCharge(mImportedKwh, structure.energyBlockAdjustments);
     }
+    // RATE-7: seasonal included-use allowance (Phoenix water) — additive, off unless set.
+    for (const adj of structure.seasonalEnergyBlockAdjustments ?? []) {
+      if (adj.months.includes(Number(mk.slice(5, 7)))) mEnergy += monthlyBlockCharge(mImportedKwh, adj.blocks);
+    }
     // Demand charges: each charge computes its OWN windowed peak (windowPeak is
     // local per-charge, so anytime and windowed charges never clobber each other).
     // Charges sharing a demandGroup are alternative windows of ONE billed
@@ -823,7 +847,7 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
       mRiders += amount;
       riderTotals.set(rider.label, (riderTotals.get(rider.label) ?? 0) + amount);
     }
-    const mFixed = structure.fixedMonthly;
+    const mFixed = sizedFixed;
     // Minimum bill applies to charges BEFORE export credits (cycle 1, pass 12):
     // export credits reduce the bill after the minimum floor is established,
     // so exporters are not silently stripped of credit value by the floor.
@@ -978,6 +1002,18 @@ export function costOnTariff(points: IntervalPoint[], structure: TariffStructure
   }
   if (structure.energyBlocks?.length) {
     disclosures.push("Energy charges use the tariff's progressive monthly usage blocks, applied to total imported kWh in each billing month.");
+  }
+  if (structure.seasonalEnergyBlockAdjustments?.length) {
+    disclosures.push(`Included-use allowance applied by calendar month (${structure.seasonalEnergyBlockAdjustments.map((a) => a.label).join("; ")}). A billing cycle that spans two seasons is billed by the utility's own cycle dates, so a month at a season boundary can differ slightly.`);
+  }
+  if (structure.meterSizeCharges?.length) {
+    const lo = Math.min(...structure.meterSizeCharges.map((m) => m.monthly));
+    const hi = Math.max(...structure.meterSizeCharges.map((m) => m.monthly));
+    if (sizeRow) {
+      disclosures.push(`Monthly service charge for a ${sizeRow.size} meter: $${sizeRow.monthly.toFixed(2)} (filed range $${lo.toFixed(2)}–$${hi.toFixed(2)}/mo by meter size).`);
+    } else {
+      disclosures.push(`The monthly service charge depends on meter size ($${lo.toFixed(2)}–$${hi.toFixed(2)}/mo). The meter size is not on file, so the smallest size ($${structure.fixedMonthly.toFixed(2)}) is used; a larger meter adds up to $${(hi - structure.fixedMonthly).toFixed(2)}/mo. Set the meter size on the Sites page to use the exact charge.`);
+    }
   }
   if (riderTotals.size > 0) {
     disclosures.push(`Applied date-versioned riders by calendar month: ${Array.from(riderTotals.keys()).join(", ")}. Energy riders use imported kWh; demand-based TCA uses billed kW. Filed caps and validity windows apply.`);

@@ -78,7 +78,7 @@ export async function reconcileBill(billId: number, meterId: number, userId: num
   }));
   let predictedUsd: number;
   try {
-    const cost = costOnTariff(points, tariff.structure as TariffStructure);
+    const cost = costOnTariff(points, tariff.structure as TariffStructure, { meterSize: meter.serviceSize ?? null });
     predictedUsd = cost.breakdown.total;
   } catch (e) {
     return { reconciled: false, reason: `structure unpriceable: ${e instanceof Error ? e.message : String(e)}` };

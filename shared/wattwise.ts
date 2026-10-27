@@ -261,6 +261,23 @@ export interface TariffStructure {
    */
   energyBlockAdjustmentMonths?: number[];
   /**
+   * Oct 26 (RATE-7): seasonal monthly block adjustments, applied in ADDITION to
+   * the energy periods (and to energyBlockAdjustments). Each entry applies only
+   * in its calendar months. Used for an included-use allowance whose size
+   * changes by season (City of Phoenix water: the monthly service charge
+   * includes 5 CCF Oct–May and 8 CCF Jun–Sep, so the user charge is credited
+   * back on that first block while the environmental charge still applies).
+   * Off unless a tariff sets it; every other tariff prices exactly as before.
+   */
+  seasonalEnergyBlockAdjustments?: Array<{ label: string; months: number[]; blocks: EnergyBlock[] }>;
+  /**
+   * Oct 26 (RATE-7/7b): filed fixed monthly charge by meter size. When the
+   * meter's size is on file (meters.serviceSize → pricing opts.meterSize) the
+   * matching row is charged; otherwise `fixedMonthly` (the smallest size) is
+   * used and the range is disclosed.
+   */
+  meterSizeCharges?: Array<{ size: string; monthly: number }>;
+  /**
    * Oct 26 (RATE-2): IANA zone in which the filed TOU ENERGY periods are
    * defined, when it differs from the meter's local clock. E.g. LG&E files
    * RTOD hours in Eastern Standard Time year-round ("Etc/GMT+5"), so during

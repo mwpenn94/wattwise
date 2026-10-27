@@ -32,6 +32,7 @@ import { ProvChip } from "@/components/Honesty";
 import QuickStart from "@/components/QuickStart";
 import OperatingHoursPanel from "@/components/OperatingHoursPanel";
 import { siteHref, useActiveSite } from "@/hooks/useActiveSite";
+import { WATER_METER_SIZES, type WaterMeterSize } from "@shared/commodity";
 
 const BUILDING_TYPES = [
   ["single_family", "Single-family home"],
@@ -708,6 +709,29 @@ function MeterManager({ siteId }: { siteId: number }) {
               }}
             />
             <Badge variant="secondary" className="text-[10px]">{m.commodity}</Badge>
+            {m.commodity === "water" && (
+              <Select
+                value={m.serviceSize ?? "unknown"}
+                onValueChange={(v) =>
+                  update.mutate(
+                    { meterId: m.id, serviceSize: v === "unknown" ? null : (v as WaterMeterSize) },
+                    { onSuccess: () => toast.success("Meter size saved — update estimates on Explore to re-price the service charge") },
+                  )
+                }
+              >
+                <SelectTrigger className="h-7 w-36 text-xs" aria-label="Water meter size">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="unknown">Meter size: not set</SelectItem>
+                  {WATER_METER_SIZES.map((sz) => (
+                    <SelectItem key={sz} value={sz}>
+                      Meter size {sz}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             <Select
               value={m.meterRole}
               onValueChange={(role) =>

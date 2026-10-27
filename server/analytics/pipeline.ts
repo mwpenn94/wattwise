@@ -581,7 +581,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
       // Defensive: should be unreachable per the filtering above.
       currentCost = null;
     } else if (basis) {
-      currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz, hasSolar: site.hasSolar ?? false, rateCodeResolution: resolveRateCode(basis.utilityName, meter?.rateScheduleCode ?? null) });
+      currentCost = costOnTariff(costPoints, basis.structure as TariffStructure, { tz, hasSolar: site.hasSolar ?? false, rateCodeResolution: resolveRateCode(basis.utilityName, meter?.rateScheduleCode ?? null), meterSize: meter?.serviceSize ?? null });
       if ((meter?.commodity ?? "electric") === "electric") fullBillEstimate = estimateFullBill({ accounts: [currentCost], utilityName: basis.utilityName, city: site.city, state: site.state, residential: sectorClass === "residential" });
       // UCONV-1: a gas/water meter's readings were converted to the tariff's
       // unit (stage 1 read them through getIntervalPoints); say how.
@@ -632,7 +632,7 @@ async function execute(site: Site, meter: Meter | null, userId: number, tier: st
         { sectorClass, hasSolar: site.hasSolar ?? false, buildingType: site.buildingType, isCurrentBasis: t.id === basisTariffId, monthlyImportedKwh: monthlyImportedKwh(costPoints, tz) },
         peakKw,
       );
-      let cost = elig.eligible ? costOnTariff(costPoints, t.structure as TariffStructure, { tz }) : null;
+      let cost = elig.eligible ? costOnTariff(costPoints, t.structure as TariffStructure, { tz, meterSize: meter?.serviceSize ?? null }) : null;
       // Oct 26: same rule as the per-account review — a schedule whose filed
       // minimum billing demand is above this account's peak, and which would
       // cost more, is listed as "not a fit" with the cost, not as an option.

@@ -13,7 +13,7 @@
 
 import type { TariffStructure } from "../../shared/wattwise";
 
-export const SEED_VERSION = "2026.10.6"; // Oct 26 (RATE-2): Southwest Gas G-5 (378th Rev Sheet 11, eff 2026-09-01) and LG&E RS/RTOD-Energy/GS (Electric No. 14, eff 2026-09-01) + RGS/CGS (Gas No. 14, eff 2026-08-14; GSCC 2026-08-01) re-read from the official sheets
+export const SEED_VERSION = "2026.10.7"; // Oct 26 (RATE-7): City of Phoenix water — filed March 1, 2025 schedule (seasonal user charge, environmental charge, included allowance, meter-size service charge); adds the residential twin. Previously Oct 26 (RATE-2): Southwest Gas G-5 (378th Rev Sheet 11, eff 2026-09-01) and LG&E RS/RTOD-Energy/GS (Electric No. 14, eff 2026-09-01) + RGS/CGS (Gas No. 14, eff 2026-08-14; GSCC 2026-08-01) re-read from the official sheets
 // previous: Oct 25: official UNS SGS-TOU / SGS-Demand / SGS-Demand-TOU (sheets 202–204, Decision 79277)
 
 /* ================= eGRID subregion factors (lb CO2e / MWh, eGRID2022) ========= */
@@ -358,6 +358,44 @@ function unsElectricRiders(restCapUsd: number, demandBilled = false): NonNullabl
   ];
 }
 
+/* RATE-7: City of Phoenix water, inside City, effective 2025-03-01.
+ * Rates are stored per GALLON because water is modeled in gallons
+ * (usageConversion converts CCF/HCF readings first); 1 CCF = 748 gal per the
+ * City schedule. Each season's energy rate = user charge + environmental
+ * charge, per CCF / 748. The included allowance (5 CCF Oct–May, 8 CCF Jun–Sep)
+ * is a seasonal block CREDIT of the user charge only, because the
+ * environmental charge applies to all metered use, including included use. */
+const PHX_GAL_PER_CCF = 748;
+const PHX_ENV = 0.62;
+const phxPerGal = (perCcf: number) => Math.round((perCcf / PHX_GAL_PER_CCF) * 1e9) / 1e9;
+const PHX_LOW = [12, 1, 2, 3];
+const PHX_MED = [4, 5, 10, 11];
+const PHX_HIGH = [6, 7, 8, 9];
+const PHX_ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
+export const PHX_WATER_STRUCTURE: TariffStructure = {
+  fixedMonthly: 4.64,
+  meterSizeCharges: [
+    { size: "5/8 in.", monthly: 4.64 }, { size: "3/4 in.", monthly: 6.03 }, { size: "1 in.", monthly: 8.81 }, { size: "1-1/2 in.", monthly: 15.77 },
+    { size: "2 in.", monthly: 24.13 }, { size: "3 in.", monthly: 43.62 }, { size: "4 in.", monthly: 71.46 }, { size: "6 in.", monthly: 141.06 },
+  ],
+  energy: [
+    // Low season first: energy[0] is the lowest marginal rate, so callers that
+    // read a single $/gal (savings estimates) stay conservative.
+    { label: "Low season Dec–Mar (user $4.93 + environmental $0.62 per CCF)", months: PHX_LOW, daysOfWeek: PHX_ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: phxPerGal(4.93 + PHX_ENV) },
+    { label: "Medium season Apr–May, Oct–Nov (user $5.65 + environmental $0.62 per CCF)", months: PHX_MED, daysOfWeek: PHX_ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: phxPerGal(5.65 + PHX_ENV) },
+    { label: "High season Jun–Sep (user $6.13 + environmental $0.62 per CCF)", months: PHX_HIGH, daysOfWeek: PHX_ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: phxPerGal(6.13 + PHX_ENV) },
+  ],
+  demand: [],
+  seasonalEnergyBlockAdjustments: [
+    { label: "5 CCF (3,740 gal) included Dec–Mar", months: PHX_LOW, blocks: [{ upToKwh: 5 * PHX_GAL_PER_CCF, ratePerUnit: -phxPerGal(4.93) }, { upToKwh: null, ratePerUnit: 0 }] },
+    { label: "5 CCF (3,740 gal) included Apr–May and Oct–Nov", months: PHX_MED, blocks: [{ upToKwh: 5 * PHX_GAL_PER_CCF, ratePerUnit: -phxPerGal(5.65) }, { upToKwh: null, ratePerUnit: 0 }] },
+    { label: "8 CCF (5,984 gal) included Jun–Sep", months: PHX_HIGH, blocks: [{ upToKwh: 8 * PHX_GAL_PER_CCF, ratePerUnit: -phxPerGal(6.13) }, { upToKwh: null, ratePerUnit: 0 }] },
+  ],
+  notes: [
+    "City of Phoenix Water Rate Schedule effective March 1, 2025 (inside City). One unit is 1 CCF = 748 gallons. The monthly service charge includes 5 CCF Oct–May and 8 CCF Jun–Sep; the environmental charge ($0.62/CCF) applies to all use.",
+    "Outside-City service is billed at 150% of these rates (except the Town of Paradise Valley) and is not modeled here. Sales taxes and surcharges are not included.",
+  ],
+};
 export const SEED_TARIFFS: SeedTariff[] = [
   /* -------------------- APS (Arizona Public Service) -------------------- */
   {
@@ -1171,29 +1209,26 @@ export const SEED_TARIFFS: SeedTariff[] = [
     freshness: "urdb_stale",
     effectiveDate: "2026-09-01",
   },
-  {
+  // RATE-7 (Oct 26 2026): City of Phoenix Water Rate Schedule effective
+  // 2025-03-01 (City Code §37-63 as amended by Ordinance G-7128), inside City.
+  // The City's general metered-water schedule has no separate commercial
+  // class, so the residential and commercial rows carry the same filed
+  // structure and sector eligibility keeps them apart (meter size is not a
+  // rate choice, so sizes are not separate rows that could look like a switch).
+  ...(["commercial", "residential"] as const).map((sector): SeedTariff => ({
     // stable id for currency-source binding (same fix as swgas-az-res)
-    urdbId: "phxwater-az-comm",
+    urdbId: sector === "commercial" ? "phxwater-az-comm" : "phxwater-az-res",
     utilityName: "City of Phoenix Water Services",
-    name: "Municipal Water — Commercial",
-    sector: "commercial",
+    name: sector === "commercial" ? "Municipal Water — Commercial" : "Municipal Water — Residential",
+    sector,
     commodity: "water",
     state: "AZ",
     peakKwMin: null,
     peakKwMax: null,
-    structure: {
-      fixedMonthly: 35.0,
-      energy: [
-        // Unit semantics: the cost engine multiplies ratePerUnit by usage in the
-        // METER'S unit (gallons for water) — the published $5.19/kgal rate is
-        // therefore stored per-gallon so a gallons meter prices correctly.
-        { label: "Volumetric ($5.19/kgal, priced per gallon)", months: ALL_MONTHS, daysOfWeek: ALL_DAYS, hourStart: 0, hourEnd: 24, ratePerUnit: 0.00519 },
-      ],
-      demand: [],
-    },
+    structure: PHX_WATER_STRUCTURE,
     freshness: "urdb_stale",
-    effectiveDate: "2024-10-01",
-  },
+    effectiveDate: "2025-03-01",
+  })),
 ];
 
 /* ================= Archetype 8760 shapes ("prototype-archetype") ============= */

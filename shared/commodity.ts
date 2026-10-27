@@ -193,3 +193,9 @@ export function usageConversion(commodity: string | null | undefined, unit: stri
 export function toModelUsage(value: number, commodity: string | null | undefined, unit: string | null | undefined): number {
   return value * usageConversion(commodity, unit).factor;
 }
+
+/** RATE-7b: water meter sizes as utilities bill them (City of Phoenix filed
+ * service charges are by these sizes). Used by the meter-size picker and the
+ * meter update API; the tariff engine matches them to `meterSizeCharges`. */
+export const WATER_METER_SIZES = ["5/8 in.", "3/4 in.", "1 in.", "1-1/2 in.", "2 in.", "3 in.", "4 in.", "6 in.", "8 in.", "10 in.", "12 in."] as const;
+export type WaterMeterSize = (typeof WATER_METER_SIZES)[number];

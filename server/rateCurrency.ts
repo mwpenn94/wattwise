@@ -160,7 +160,8 @@ export const RATE_SOURCE_SEEDS: RateSourceSeed[] = [
     // Official water/sewer rates page (verified reachable Jul 2026).
     sourceUrl: "https://www.phoenix.gov/administration/departments/waterservices/city-services-bill/water-sewer-rates.html",
     sourceLabel: "City of Phoenix water rates (ordinance)",
-    governsUrdbIds: ["phxwater-az-comm"],
+    // RATE-7: the filed schedule covers all metered customers; both rows are it.
+    governsUrdbIds: ["phxwater-az-comm", "phxwater-az-res"],
     adjustorCycle: "annual",
     verifyCadenceDays: 180,
   },

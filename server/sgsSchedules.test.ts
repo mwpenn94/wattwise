@@ -38,7 +38,11 @@ describe("official UNS SGS-family schedules (sheets 202–204)", () => {
       expect(s(id).optionalSchedule).toBe(true);
       expect(resolveRateCode("UNS Electric", code)).toMatchObject({ urdbId: id, match: "exact" });
     }
-    expect(SEED_VERSION).toBe("2026.10.6");
+    // The SGS rows arrived in 2026.10.6; later releases may bump it again (RATE-7: 2026.10.7).
+    const v = (x: string) => x.split(".").map(Number);
+    const [a, b] = [v(SEED_VERSION), v("2026.10.6")];
+    const cmp = a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+    expect(cmp).toBeGreaterThanOrEqual(0);
   });
 
   it("SGS-TOU prices each delivery block at the filed sheet 202-1 totals", () => {
