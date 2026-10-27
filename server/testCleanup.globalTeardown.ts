@@ -56,12 +56,22 @@ export async function teardown() {
           "measure_implementations", "alerts", "site_geometry", "site_property_facts", "site_members",
           "bill_reconciliations", "production_series", "equipment_inventory",
           "report_artifacts", "site_group_members",
+          // DEL-1 (Oct 26): tables added after CLEAN-2 that the sweep missed.
+          "site_schedules", "telecom_price_history", "telecom_services",
+          "recommendation_states", "import_site_groups", "plan_baskets",
         ]) {
           await q(`DELETE FROM ${table} WHERE siteId IN (${sph})`, siteIds).catch(() => {});
         }
         await q(`DELETE FROM sites WHERE id IN (${sph})`, siteIds);
       }
-      for (const table of ["uploads", "plan_baskets", "site_groups", "audit_log", "site_members", "metering", "alerts", "entities"]) {
+      for (const table of [
+        "uploads", "plan_baskets", "site_groups", "audit_log", "site_members", "metering", "alerts", "entities",
+        // DEL-1 (Oct 26): user-scoped tables added after CLEAN-2.
+        "import_batch_sheets", "import_batch_files", "import_batches", "import_site_groups",
+        "telecom_price_history", "telecom_services", "recommendation_states", "measure_implementations",
+        "report_artifacts", "equipment_inventory", "production_series", "bill_reconciliations",
+        "billing_audit", "billing_accounts",
+      ]) {
         await q(`DELETE FROM ${table} WHERE userId = ?`, [uid]).catch(() => {});
       }
       await q("DELETE FROM users WHERE id = ?", [uid]);

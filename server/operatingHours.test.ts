@@ -6,7 +6,7 @@
  * - effectiveSchedules: archetype fallback vs user rows
  * - schedules router CRUD with ownership checks
  */
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import {
   archetypeDefaultSchedules,
   computeHoursSummary,
@@ -137,6 +137,17 @@ beforeAll(async () => {
   siteId = mine[0].id;
   const others = await db.select().from(sites).where(eq(sites.name, `HRS Other ${tag}`));
   otherSiteId = others[0].id;
+});
+
+afterAll(async () => {
+  // DEL-1 (Oct 26): this suite used to leave both sites behind on every run
+  // (49 each). Remove this run's own site cascade and the stand-in "other
+  // user" site (its userId has no account, so nothing else ever cleans it).
+  const db = (await getDb())!;
+  const { eq } = await import("drizzle-orm");
+  const { deleteSite } = await import("./dbHelpers");
+  if (siteId) await deleteSite(siteId, userId);
+  if (otherSiteId) await db.delete(sites).where(eq(sites.id, otherSiteId));
 });
 
 describe("effectiveSchedules", () => {

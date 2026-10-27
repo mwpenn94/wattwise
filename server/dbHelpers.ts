@@ -43,8 +43,12 @@ import {
   productionSeries,
   recommendationStates,
   importSiteGroups,
+  importBatches,
+  importBatchFiles,
+  importBatchSheets,
   telecomServices,
   telecomPriceHistory,
+  siteSchedules,
 } from "../drizzle/schema";
 import type { Alert } from "../drizzle/schema";
 
@@ -240,6 +244,14 @@ export async function deleteSite(siteId: number, userId: number) {
   // TEL-1: connectivity services and their bill history belong to the site.
   await db.delete(telecomPriceHistory).where(eq(telecomPriceHistory.siteId, siteId));
   await db.delete(telecomServices).where(eq(telecomServices.siteId, siteId));
+  // DEL-1 (Oct 26): operating schedules, equipment, production series, bill
+  // reconciliations and shared access belong to the site and go with it
+  // (schedules carry no userId, so this is also their only deletion path).
+  await db.delete(siteSchedules).where(eq(siteSchedules.siteId, siteId));
+  await db.delete(equipmentInventory).where(eq(equipmentInventory.siteId, siteId));
+  await db.delete(productionSeries).where(eq(productionSeries.siteId, siteId));
+  await db.delete(billReconciliations).where(eq(billReconciliations.siteId, siteId));
+  await db.delete(siteMembers).where(eq(siteMembers.siteId, siteId));
   await db.delete(meters).where(eq(meters.siteId, siteId));
   // uploads keep their file provenance but detach from the deleted site
   await db.update(uploads).set({ siteId: null }).where(eq(uploads.siteId, siteId));
@@ -266,6 +278,13 @@ export async function deleteAllUserData(userId: number) {
   await db.delete(siteMembers).where(eq(siteMembers.userId, userId));
   await db.delete(siteGroups).where(eq(siteGroups.userId, userId));
   await db.delete(entities).where(eq(entities.userId, userId));
+  // DEL-1 (Oct 26): bulk-import records hold filenames, account and service-
+  // point numbers and raw addresses, so "delete my account" removes them too
+  // (sheets → files → batches; site mappings by user, not only per site).
+  await db.delete(importBatchSheets).where(eq(importBatchSheets.userId, userId));
+  await db.delete(importBatchFiles).where(eq(importBatchFiles.userId, userId));
+  await db.delete(importBatches).where(eq(importBatches.userId, userId));
+  await db.delete(importSiteGroups).where(eq(importSiteGroups.userId, userId));
   await db.delete(uploads).where(eq(uploads.userId, userId));
   await db.delete(metering).where(eq(metering.userId, userId));
   await db.delete(reportArtifacts).where(eq(reportArtifacts.userId, userId));
